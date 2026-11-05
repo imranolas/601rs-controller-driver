@@ -1,26 +1,34 @@
 //! Streaming decoder for controller → host bytes.
 //!
-//! The stream mixes two things [SPEC p.6–7]:
+//! The stream mixes two things [SPEC1 p.6–7]:
 //! - reply lines terminated by CR (an empty line is a bare acknowledgement), and
-//! - single out-of-band signal bytes (0x01–0x07) that may arrive between or inside lines,
+//! - single out-of-band signal bytes (0x01–0x09) that may arrive between or inside lines,
 //!   e.g. `@X18\r\x01\x01\x04` after homing [CAP g_init].
 //!
 //! Signals are emitted immediately and never disturb a partially received line.
 
+/// Out-of-band signal bytes [SPEC1 p.7]. Each is switched on by a parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Signal {
-    /// 0x01: a motion finished ("positioned"); enabled by `#C5,1`.
+    /// 0x01: a motion finished ("positioned"); `#C5,1`.
     Positioned,
-    /// 0x02: buffer has room again after `BufferAlmostFull` (resume, like XON); `#C7,1`.
+    /// 0x02: buffer has room again after `BufferAlmostFull` (like XON); `#C7,1`.
     BufferResume,
-    /// 0x03: mode-2 buffer almost full (pause, like XOFF); `#C7,1`.
+    /// 0x03: mode-2 buffer almost full, ~200 characters left (like XOFF); `#C7,1`.
     BufferAlmostFull,
     /// 0x04: homing finished; `#C6,1`.
     HomingDone,
-    /// 0x05: keep-alive ("node guarding"); `#C8,<ms>`.
+    /// 0x05: heartbeat ("node guarding"); `#C8,<ms>`.
     KeepAlive,
-    /// 0x07: start button pressed during a cut (host code, not in the spec).
-    StartButton,
+    /// 0x06: signal input 1 (I221, the green start button on the 601) went HIGH; `#C35` bit 1.
+    Input1High,
+    /// 0x07: signal input 1 (I221) went LOW; `#C35` bit 1. GMC treats this byte as "start
+    /// button" [GMC], i.e. it reacts to the release.
+    Input1Low,
+    /// 0x08: signal input 2 (I222) went HIGH; `#C35` bit 2.
+    Input2High,
+    /// 0x09: signal input 2 (I222) went LOW; `#C35` bit 2.
+    Input2Low,
 }
 
 impl Signal {
@@ -31,8 +39,25 @@ impl Signal {
             0x03 => Some(Signal::BufferAlmostFull),
             0x04 => Some(Signal::HomingDone),
             0x05 => Some(Signal::KeepAlive),
-            0x07 => Some(Signal::StartButton),
+            0x06 => Some(Signal::Input1High),
+            0x07 => Some(Signal::Input1Low),
+            0x08 => Some(Signal::Input2High),
+            0x09 => Some(Signal::Input2Low),
             _ => None,
+        }
+    }
+
+    pub const fn byte(self) -> u8 {
+        match self {
+            Signal::Positioned => 0x01,
+            Signal::BufferResume => 0x02,
+            Signal::BufferAlmostFull => 0x03,
+            Signal::HomingDone => 0x04,
+            Signal::KeepAlive => 0x05,
+            Signal::Input1High => 0x06,
+            Signal::Input1Low => 0x07,
+            Signal::Input2High => 0x08,
+            Signal::Input2Low => 0x09,
         }
     }
 }
@@ -108,6 +133,20 @@ mod tests {
     }
 
     #[test]
+    fn all_nine_signal_bytes() {
+        let mut d = Decoder::new();
+        let frames = d.push(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let bytes: Vec<u8> = frames
+            .iter()
+            .map(|f| match f {
+                Frame::Signal(s) => s.byte(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
     fn lines_split_across_reads() {
         let mut d = Decoder::new();
         assert!(d.push(b"@X1").is_empty());
@@ -120,14 +159,14 @@ mod tests {
     fn signal_inside_a_line_does_not_corrupt_it() {
         let mut d = Decoder::new();
         assert_eq!(
-            d.push(b"@X\x011\r"),
-            vec![Frame::Signal(Signal::Positioned), line("@X1")]
+            d.push(b"@X\x061\r"),
+            vec![Frame::Signal(Signal::Input1High), line("@X1")]
         );
     }
 
     #[test]
     fn unknown_control_bytes_are_surfaced() {
         let mut d = Decoder::new();
-        assert_eq!(d.push(&[0x06]), vec![Frame::Unknown(0x06)]);
+        assert_eq!(d.push(&[0x0B]), vec![Frame::Unknown(0x0B)]);
     }
 }

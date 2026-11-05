@@ -39,6 +39,9 @@ pub struct SimConfig {
     pub instant_motion: bool,
     /// `#C6` default: 0x04 after homing. The real controller sent it without GMC enabling it.
     pub homing_done_signal: bool,
+    /// The start counter has reached 0: mode changes are refused [SPEC1 p.10]. The spec does
+    /// not name the error; `*007` ("service code required") is inferred.
+    pub start_counter_exhausted: bool,
     /// Steps per mm on X/Y, for the µm-based commands (`@P`, `$E`, `V`). [GCF ScaleX/Y]
     pub steps_per_mm: f64,
 }
@@ -56,6 +59,7 @@ impl Default for SimConfig {
             instant_motion: false,
             homing_done_signal: true,
             steps_per_mm: 40.0,
+            start_counter_exhausted: false,
         }
     }
 }
@@ -92,9 +96,19 @@ struct Motion {
 
 #[derive(Debug, Clone)]
 enum Item {
-    Vector { target: [i64; 3], speed: u8 },
+    Vector {
+        target: [i64; 3],
+        speed: u8,
+    },
     Outputs(u8),
     Dwell(Duration),
+    /// `I<n>` / `I-<n>`: wait for an input level [SPEC1 p.35].
+    WaitInput {
+        input: u8,
+        high: bool,
+    },
+    /// `C8` / `C16`: speed override on / off from here [SPEC1 p.35].
+    Override(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +159,16 @@ pub struct SimCore {
     free_at: SimTime,
     flow_paused: bool,
     start_button_latched: bool,
+    /// Limit-switch error code while the machine stands on that switch (for `@Y`).
+    limit_hit: Option<u16>,
+    /// `C1`: start the next path without the `#C1` dead time.
+    next_no_dead_time: bool,
+    /// `C8`/`C16`: whether the `@O` override applies to motions started from here.
+    override_active: bool,
+    /// When the controller last sent anything (for the `#C8` heartbeat).
+    last_tx: SimTime,
+    /// `#C6,0`: the CR reply to `$H` is held back until homing has finished.
+    pending_home_ack: bool,
     received: Vec<String>,
 }
 
@@ -233,6 +257,11 @@ impl SimCore {
             free_at: Duration::ZERO,
             flow_paused: false,
             start_button_latched: false,
+            limit_hit: None,
+            next_no_dead_time: false,
+            override_active: true,
+            last_tx: Duration::ZERO,
+            pending_home_ack: false,
             received: Vec::new(),
         }
     }
@@ -257,9 +286,15 @@ impl SimCore {
     }
 
     pub fn position_at(&self, now: SimTime) -> [i64; 3] {
-        let Some(m) = &self.motion else { return self.pos };
+        let Some(m) = &self.motion else {
+            return self.pos;
+        };
         let span = m.end.saturating_sub(m.start).as_secs_f64();
-        let frac = if span <= 0.0 { 1.0 } else { (now.saturating_sub(m.start).as_secs_f64() / span).min(1.0) };
+        let frac = if span <= 0.0 {
+            1.0
+        } else {
+            (now.saturating_sub(m.start).as_secs_f64() / span).min(1.0)
+        };
         let mut p = [0; 3];
         for (a, slot) in p.iter_mut().enumerate() {
             let delta = (m.to[a] - m.from[a]) as f64;
@@ -280,12 +315,39 @@ impl SimCore {
         }
     }
 
+    /// Is the head of the queue an `I` command whose input is not yet at the wanted level?
+    fn blocked_on_input(&self) -> bool {
+        matches!(self.queue.front(), Some(Queued { item: Item::WaitInput { input, high }, .. })
+            if self.input_defined(*input) && self.level_seen(*input, *high) != *high)
+    }
+
+    /// Spec: "if the input is not defined at all, execution continues immediately".
+    fn input_defined(&self, input: u8) -> bool {
+        // I221 and up are fixed hardware inputs (signal, reference, stop) [SPEC1 p.7].
+        input >= 221 || self.inputs.contains_key(&input) || self.input_defs.contains_key(&input)
+    }
+
+    /// The level a wait sees. A button press is momentary; the firmware samples it, so a
+    /// wait for I221 high also accepts a press since the last read (the latch).
+    fn level_seen(&self, input: u8, high: bool) -> bool {
+        self.input(input) || (high && input == 221 && self.start_button_latched)
+    }
+
+    fn input(&self, input: u8) -> bool {
+        self.inputs.get(&input).copied().unwrap_or(false)
+    }
+
     fn status_line(&self, now: SimTime) -> String {
         let moving = self.is_moving();
-        let waiting = self.motion.is_none()
+        // Flag 1: "waiting for an input or a wait time is running" [SPEC1 p.13]: the #C1
+        // dead time, a W dwell, or an I wait.
+        let in_dead_time = self.motion.is_none()
             && self.homing.is_none()
             && !self.queue.is_empty()
             && self.dead_until.is_none_or(|t| now < t);
+        let dwelling = self.motion.as_ref().is_some_and(|m| m.kind == Kind::Dwell);
+        let waiting =
+            in_dead_time || dwelling || (self.motion.is_none() && self.blocked_on_input());
         let flags = u8::from(waiting)
             | (u8::from(self.error != 0) << 1)
             | (u8::from(self.homed) << 2)
@@ -305,15 +367,27 @@ impl SimCore {
         out
     }
 
-    /// The green start button. During a cut the controller sends 0x07 [GMC];
-    /// otherwise input I221 reads `1` once.
+    /// Press and release the green start button (signal input 1, I221). With `#C35` bit 1 the
+    /// controller reports the level changes as 0x06 (high) then 0x07 (low) [SPEC1 p.7, p.28];
+    /// GMC enables this with `#C35,1` and reacts to the 0x07. A poll of `@I221` reads `1` once.
     pub fn press_start_button(&mut self) -> Vec<u8> {
+        let mut out = self.set_input(221, true);
+        out.extend(self.set_input(221, false));
         self.start_button_latched = true;
-        if self.mode == 2 && self.is_moving() { vec![0x07] } else { Vec::new() }
+        out
     }
 
-    pub fn set_input(&mut self, input: u8, value: bool) {
+    /// Set an input level. Level changes on the two signal inputs I221/I222 produce the
+    /// `#C35` bytes when enabled.
+    pub fn set_input(&mut self, input: u8, value: bool) -> Vec<u8> {
+        let changed = self.input(input) != value;
         self.inputs.insert(input, value);
+        let acks = self.c_val(35);
+        match (changed, input) {
+            (true, 221) if acks & 1 != 0 => vec![if value { 0x06 } else { 0x07 }],
+            (true, 222) if acks & 2 != 0 => vec![if value { 0x08 } else { 0x09 }],
+            _ => Vec::new(),
+        }
     }
 
     // ------------------------------------------------------------------ host input
@@ -341,7 +415,27 @@ impl SimCore {
                 _ => push_err(&mut out, 1),
             }
         }
+        if !out.is_empty() {
+            self.last_tx = now;
+        }
         out
+    }
+
+    /// `@Y` bits `sbff rrrr uuzz yyxx` [SPEC1 p.13].
+    fn switch_bits(&self) -> u16 {
+        let mut bits: u16 = 1 << 14; // machine ready
+        if self.input(254) {
+            bits |= 1 << 15; // stop input (ISTOP)
+        }
+        for (i, input) in (235..=238).enumerate() {
+            if self.input(input) {
+                bits |= 1 << (8 + i); // reference switches IREF1..4
+            }
+        }
+        if let Some(bit) = self.limit_hit.and_then(protocol_limit_bit) {
+            bits |= 1 << bit;
+        }
+        bits
     }
 
     // ------------------------------------------------------------------ master commands
@@ -349,7 +443,9 @@ impl SimCore {
     fn master(&mut self, line: &str, now: SimTime, out: &mut Vec<u8>) {
         let body = &line[1..];
         let mut chars = body.chars();
-        let Some(key) = chars.next() else { return push_err(out, 29) };
+        let Some(key) = chars.next() else {
+            return push_err(out, 29);
+        };
         let arg = chars.as_str();
         match (key, arg) {
             ('V', "") => {
@@ -364,16 +460,22 @@ impl SimCore {
                 let s = self.status_line(now);
                 push_line(out, &s);
             }
-            ('Y', "") => push_line(out, "@Y4000"), // machine ready, no switches active
+            ('Y', "") => push_line(out, &format!("@Y{:04X}", self.switch_bits())),
             ('E', "") => push_line(out, &format!("@E{}", self.error)),
-            ('L', a) | ('P', a) if a.len() == 1 => match axis_index(a.chars().next().unwrap_or('?')) {
-                Some((axis, true)) => {
-                    let steps = self.position_at(now)[axis];
-                    let v = if key == 'L' { steps } else { (steps as f64 * 1000.0 / self.cfg.steps_per_mm) as i64 };
-                    push_line(out, &format!("@{key}{a}{v}"));
+            ('L', a) | ('P', a) if a.len() == 1 => {
+                match axis_index(a.chars().next().unwrap_or('?')) {
+                    Some((axis, true)) => {
+                        let steps = self.position_at(now)[axis];
+                        let v = if key == 'L' {
+                            steps
+                        } else {
+                            (steps as f64 * 1000.0 / self.cfg.steps_per_mm) as i64
+                        };
+                        push_line(out, &format!("@{key}{a}{v}"));
+                    }
+                    _ => push_err(out, 12),
                 }
-                _ => push_err(out, 12),
-            },
+            }
             ('B', "") => self.brake(now, out),
             ('S', "") => {
                 self.halt(now);
@@ -403,10 +505,38 @@ impl SimCore {
                 }
                 Err(_) => push_err(out, 3),
             },
-            ('Q', q) => match q.split_once(',') {
-                Some((_, _)) => push_ack(out),
-                None => push_line(out, &format!("@Q{q},0")),
-            },
+            // Q242–Q249 are the auxiliary signals 1–8 = the `$A`/`A` bits [SPEC1 p.11–12].
+            ('Q', q) => {
+                let (n, set) = match q.split_once(',') {
+                    Some((n, v)) => (n, Some(v)),
+                    None => (q, None),
+                };
+                let Ok(n) = n.parse::<u8>() else {
+                    return push_err(out, 3);
+                };
+                let aux_bit = (242..=249).contains(&n).then(|| n - 242);
+                match set {
+                    None => {
+                        let v = aux_bit.is_some_and(|b| self.outputs & (1 << b) != 0);
+                        push_line(out, &format!("@Q{n},{}", u8::from(v)));
+                    }
+                    Some(v) => {
+                        let on = match v {
+                            "0" => false,
+                            "1" => true,
+                            _ => return push_err(out, 46),
+                        };
+                        if let Some(b) = aux_bit {
+                            if on {
+                                self.outputs |= 1 << b
+                            } else {
+                                self.outputs &= !(1 << b)
+                            }
+                        }
+                        push_ack(out);
+                    }
+                }
+            }
             ('D', flags) => match parse_hex_u8(flags) {
                 Some(f) => {
                     if f & 1 != 0 {
@@ -434,6 +564,7 @@ impl SimCore {
             // `@@`: not in the spec; the 601 acks it [CAP g_init]. Modelled as "clear error".
             ('@', "") => {
                 self.error = 0;
+                self.limit_hit = None;
                 push_ack(out);
             }
             _ => push_err(out, 29),
@@ -451,6 +582,12 @@ impl SimCore {
         if self.is_moving() {
             return push_err(out, 28);
         }
+        // A used-up start counter refuses mode switches [SPEC1 p.10, *007 p.38].
+        if self.cfg.start_counter_exhausted && mode != self.mode {
+            return push_err(out, 7);
+        }
+        // Outputs are deliberately NOT cleared here: the spec says a mode switch resets
+        // them, but the captures show they persist [CAP].
         if mode == 2 && !self.homed {
             return push_err(out, 41);
         }
@@ -497,12 +634,18 @@ impl SimCore {
             };
         };
         let mut chars = rest.chars();
-        let Some(key) = chars.next() else { return push_err(out, 21) };
+        let Some(key) = chars.next() else {
+            return push_err(out, 21);
+        };
         let arg = chars.as_str();
         let num = |s: &str| s.trim_start_matches(',').parse::<i64>().ok();
         let ok = match key {
-            'G' => split_entry(arg).and_then(|(g, v)| Some(self.speeds.insert(g, v.parse().ok()?))).is_some(),
-            'B' => split_entry(arg).and_then(|(g, v)| Some(self.brake_angles.insert(g, v.parse().ok()?))).is_some(),
+            'G' => split_entry(arg)
+                .and_then(|(g, v)| Some(self.speeds.insert(g, v.parse().ok()?)))
+                .is_some(),
+            'B' => split_entry(arg)
+                .and_then(|(g, v)| Some(self.brake_angles.insert(g, v.parse().ok()?)))
+                .is_some(),
             'E' => split_entry(arg)
                 .and_then(|(g, v)| {
                     let (speed, angle) = v.split_once(',')?;
@@ -526,7 +669,8 @@ impl SimCore {
                 None => false,
             },
             'Z' | 'N' | 'U' | 'Y' | 'D' => {
-                self.axis_params.insert(format!("{key}{arg}"), arg.to_owned());
+                self.axis_params
+                    .insert(format!("{key}{arg}"), arg.to_owned());
                 arg.contains(',')
             }
             'I' | 'Q' => match arg.split_once(',') {
@@ -539,10 +683,16 @@ impl SimCore {
                 },
                 None => false,
             },
-            'H' => split_entry(arg).and_then(|(n, v)| Some(self.counters.insert(n, v.parse().ok()?))).is_some(),
+            'H' => split_entry(arg)
+                .and_then(|(n, v)| Some(self.counters.insert(n, v.parse().ok()?)))
+                .is_some(),
             'C' => {
-                let Some((n, v)) = arg.split_once(',') else { return push_err(out, 3) };
-                let Ok(n) = n.parse::<u16>() else { return push_err(out, 3) };
+                let Some((n, v)) = arg.split_once(',') else {
+                    return push_err(out, 3);
+                };
+                let Ok(n) = n.parse::<u16>() else {
+                    return push_err(out, 3);
+                };
                 if n == 97 {
                     self.clock = v.to_owned();
                     true
@@ -561,7 +711,11 @@ impl SimCore {
             'P' | 'L' => match arg.split_once(',') {
                 Some((a, v)) => match (a.chars().next().and_then(axis_index), v.parse::<i64>()) {
                     (Some((axis, _)), Ok(v)) => {
-                        let steps = if key == 'L' { v } else { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 };
+                        let steps = if key == 'L' {
+                            v
+                        } else {
+                            (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64
+                        };
                         self.pos[axis] = steps;
                         self.path_target[axis] = steps;
                         true
@@ -588,11 +742,20 @@ impl SimCore {
                 _ => return push_err(out, 21),
             },
             Some('G') => match arg.parse::<u8>() {
-                Ok(g) => format!("&G{g},{}", self.speeds.get(&g).copied().unwrap_or(self.cfg.default_speed)),
+                Ok(g) => format!(
+                    "&G{g},{}",
+                    self.speeds
+                        .get(&g)
+                        .copied()
+                        .unwrap_or(self.cfg.default_speed)
+                ),
                 Err(_) => return push_err(out, 3),
             },
             Some('I') => match arg.parse::<u8>() {
-                Ok(n) => format!("&I{n},{}", self.input_defs.get(&n).map_or("000h,0,0", String::as_str)),
+                Ok(n) => format!(
+                    "&I{n},{}",
+                    self.input_defs.get(&n).map_or("000h,0,0", String::as_str)
+                ),
                 Err(_) => return push_err(out, 3),
             },
             Some('H') => match arg.parse::<u8>() {
@@ -610,23 +773,36 @@ impl SimCore {
     // ------------------------------------------------------------------ mode 1
 
     fn mode1(&mut self, line: &str, now: SimTime, out: &mut Vec<u8>) {
-        let Some(rest) = line.strip_prefix('$') else { return push_err(out, 1) };
+        let Some(rest) = line.strip_prefix('$') else {
+            return push_err(out, 1);
+        };
         let mut chars = rest.chars();
-        let Some(key) = chars.next() else { return push_err(out, 31) };
+        let Some(key) = chars.next() else {
+            return push_err(out, 31);
+        };
         let arg = chars.as_str();
         match key {
             'H' => {
                 if self.is_moving() {
                     return push_err(out, 30);
                 }
-                let axes: Option<Vec<usize>> = arg.chars().map(|c| axis_index(c).map(|(a, _)| a)).collect();
+                let axes: Option<Vec<usize>> =
+                    arg.chars().map(|c| axis_index(c).map(|(a, _)| a)).collect();
                 match axes {
                     Some(axes) if !axes.is_empty() => {
                         self.error = 0;
                         self.homed = false;
-                        self.homing =
-                            Some(Homing { axes, index: 0, axis_end: now + self.homing_duration() });
-                        push_ack(out);
+                        self.homing = Some(Homing {
+                            axes,
+                            index: 0,
+                            axis_end: now + self.homing_duration(),
+                        });
+                        // With #C6 off the ack is withheld until homing completes [SPEC1 p.23, p.30].
+                        if self.c_val(6) == 0 {
+                            self.pending_home_ack = true;
+                        } else {
+                            push_ack(out);
+                        }
                     }
                     _ => push_err(out, 12),
                 }
@@ -635,12 +811,20 @@ impl SimCore {
                 if self.is_moving() {
                     return push_err(out, 30);
                 }
-                let Some((g, vals)) = split_entry(arg) else { return push_err(out, 3) };
-                let Some(vals) = parse_axis_values(vals) else { return push_err(out, 3) };
+                let Some((g, vals)) = split_entry(arg) else {
+                    return push_err(out, 3);
+                };
+                let Some(vals) = parse_axis_values(vals) else {
+                    return push_err(out, 3);
+                };
                 let from = self.pos;
                 let mut to = from;
                 for (axis, abs, v) in vals {
-                    let steps = if key == 'L' || axis == Z { v } else { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 };
+                    let steps = if key == 'L' || axis == Z {
+                        v
+                    } else {
+                        (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64
+                    };
                     to[axis] = if abs { steps } else { from[axis] + steps };
                 }
                 self.start_motion(from, to, g, Kind::Jog, now);
@@ -676,16 +860,24 @@ impl SimCore {
     }
 
     fn homing_duration(&self) -> Duration {
-        if self.cfg.instant_motion { Duration::ZERO } else { self.cfg.homing_time_per_axis }
+        if self.cfg.instant_motion {
+            Duration::ZERO
+        } else {
+            self.cfg.homing_time_per_axis
+        }
     }
 
     // ------------------------------------------------------------------ mode 2
 
     fn mode2(&mut self, line: &str, out: &mut Vec<u8>) {
-        let Some(first) = line.chars().next() else { return };
+        let Some(first) = line.chars().next() else {
+            return;
+        };
         let item = match first {
             'L' | 'V' => {
-                let Some((g, vals)) = split_entry(&line[1..]) else { return push_err(out, 3) };
+                let Some((g, vals)) = split_entry(&line[1..]) else {
+                    return push_err(out, 3);
+                };
                 self.path_speed = Some(g);
                 match self.vector_target(vals, first == 'V') {
                     Some(target) => Item::Vector { target, speed: g },
@@ -693,7 +885,9 @@ impl SimCore {
                 }
             }
             'X' | 'Y' | 'Z' | 'x' | 'y' | 'z' => {
-                let Some(g) = self.path_speed else { return push_err(out, 2) };
+                let Some(g) = self.path_speed else {
+                    return push_err(out, 2);
+                };
                 match self.vector_target(line, false) {
                     Some(target) => Item::Vector { target, speed: g },
                     None => return push_err(out, 3),
@@ -716,7 +910,39 @@ impl SimCore {
                 }
                 return;
             }
-            'C' | 'D' | 'I' => return, // one-shot flags, spindle, wait-for-input: accepted, not modelled
+            // Special functions [SPEC1 p.35]: 1 = no dead time before the next vector
+            // (one-shot), 8/16 = override on/off from here on. 2 and 4 are listed but
+            // "noch nicht realisiert": accepted without effect. `C0` cancels a pending
+            // one-shot. Anything outside the defined bits → *067 ("Wert ungültig").
+            'C' => {
+                let Ok(bits) = line[1..].parse::<u32>() else {
+                    return push_err(out, 67);
+                };
+                if bits & !31 != 0 {
+                    return push_err(out, 67);
+                }
+                self.next_no_dead_time = bits & 1 != 0;
+                if bits & 8 != 0 {
+                    Item::Override(true)
+                } else if bits & 16 != 0 {
+                    Item::Override(false)
+                } else {
+                    return;
+                }
+            }
+            // Wait until input n is high (`In`) or low (`I-n`); an undefined input does not
+            // wait; a bad number is *066 [SPEC1 p.35, p.40].
+            'I' => {
+                let (high, n) = match line[1..].strip_prefix('-') {
+                    Some(n) => (false, n),
+                    None => (true, &line[1..]),
+                };
+                match n.parse::<u8>() {
+                    Ok(input) => Item::WaitInput { input, high },
+                    Err(_) => return push_err(out, 66),
+                }
+            }
+            'D' => return, // spindle: accepted, not modelled
             _ => return push_err(out, 31),
         };
         let bytes = line.len() + 1;
@@ -737,8 +963,11 @@ impl SimCore {
     fn vector_target(&self, vals: &str, micrometres: bool) -> Option<[i64; 3]> {
         let mut target = self.path_target;
         for (axis, abs, v) in parse_axis_values(vals)? {
-            let steps =
-                if micrometres && axis != Z { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 } else { v };
+            let steps = if micrometres && axis != Z {
+                (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64
+            } else {
+                v
+            };
             target[axis] = if abs { steps } else { target[axis] + steps };
         }
         Some(target)
@@ -768,7 +997,14 @@ impl SimCore {
         } else {
             self.move_duration(from, to, speed)
         };
-        self.motion = Some(Motion { from, to, start: now, end: now + duration, kind, limit_error });
+        self.motion = Some(Motion {
+            from,
+            to,
+            start: now,
+            end: now + duration,
+            kind,
+            limit_error,
+        });
     }
 
     fn move_duration(&self, from: [i64; 3], to: [i64; 3], speed: u8) -> Duration {
@@ -781,9 +1017,17 @@ impl SimCore {
         if distance == 0.0 {
             return Duration::ZERO;
         }
-        let speed = f64::from(self.speeds.get(&speed).copied().unwrap_or(self.cfg.default_speed).max(1))
-            * f64::from(self.override_pct)
-            / 100.0;
+        let speed = f64::from(
+            self.speeds
+                .get(&speed)
+                .copied()
+                .unwrap_or(self.cfg.default_speed)
+                .max(1),
+        ) * f64::from(if self.override_active {
+            self.override_pct
+        } else {
+            100
+        }) / 100.0;
         Duration::from_secs_f64(distance / speed) + Duration::from_millis(u64::from(self.ramp_ms))
     }
 
@@ -811,6 +1055,7 @@ impl SimCore {
         } else {
             Duration::from_millis(self.c_val(1).max(0) as u64)
         };
+        let heartbeat = self.c_val(8);
 
         loop {
             let mut progressed = false;
@@ -830,6 +1075,9 @@ impl SimCore {
                         self.free_at = h.axis_end;
                         self.homing = None;
                         self.homed = true;
+                        if std::mem::take(&mut self.pending_home_ack) {
+                            out.push(b'\r'); // the withheld `$H` ack (#C6 off)
+                        }
                         if homing_done_signal {
                             out.push(0x04);
                         }
@@ -847,6 +1095,7 @@ impl SimCore {
                     if let Some(code) = m.limit_error {
                         self.halt(now);
                         self.error = code;
+                        self.limit_hit = Some(code);
                         push_err(&mut out, code);
                     } else if m.kind == Kind::Jog && positioned_signal {
                         out.push(0x01);
@@ -856,20 +1105,66 @@ impl SimCore {
             }
 
             if self.motion.is_none() && self.homing.is_none() && !self.queue.is_empty() {
+                // Non-motion items run as soon as the machine is free: no dead time.
+                let front = self.queue.front().map(|q| match q.item {
+                    Item::WaitInput { .. } => Some(None),
+                    Item::Override(on) => Some(Some(on)),
+                    _ => None,
+                });
+                match front.flatten() {
+                    Some(None) if self.blocked_on_input() => break,
+                    Some(None) => {
+                        if matches!(
+                            self.queue.front(),
+                            Some(Queued {
+                                item: Item::WaitInput {
+                                    input: 221,
+                                    high: true
+                                },
+                                ..
+                            })
+                        ) {
+                            self.start_button_latched = false; // the press is consumed
+                        }
+                        self.pop_front_item();
+                        continue;
+                    }
+                    Some(Some(on)) => {
+                        self.override_active = on;
+                        self.pop_front_item();
+                        continue;
+                    }
+                    None => {}
+                }
                 let free_at = self.free_at;
-                let start_at = (*self.dead_until.get_or_insert(free_at.max(now) + dead_time)).max(free_at);
+                let dead = if self.next_no_dead_time {
+                    Duration::ZERO
+                } else {
+                    dead_time
+                };
+                let start_at =
+                    (*self.dead_until.get_or_insert(free_at.max(now) + dead)).max(free_at);
                 if now >= start_at {
                     if let Some(q) = self.queue.pop_front() {
                         self.queued_bytes -= q.bytes;
                         self.command_counter += 1;
+                        if matches!(q.item, Item::Vector { .. }) {
+                            self.next_no_dead_time = false;
+                            self.limit_hit = None;
+                        }
                         match q.item {
+                            Item::WaitInput { .. } | Item::Override(_) => {}
                             Item::Vector { target, speed } => {
                                 let from = self.pos;
                                 self.start_motion(from, target, speed, Kind::Path, start_at);
                             }
                             Item::Outputs(bits) => self.outputs = bits,
                             Item::Dwell(d) => {
-                                let d = if self.cfg.instant_motion { Duration::ZERO } else { d };
+                                let d = if self.cfg.instant_motion {
+                                    Duration::ZERO
+                                } else {
+                                    d
+                                };
                                 self.motion = Some(Motion {
                                     from: self.pos,
                                     to: self.pos,
@@ -897,8 +1192,37 @@ impl SimCore {
             self.flow_paused = false;
             out.push(0x02);
         }
+        // #C8 heartbeat: 0x05 after this many ms without sending anything [SPEC1 p.23].
+        if heartbeat > 0
+            && out.is_empty()
+            && now.saturating_sub(self.last_tx) >= Duration::from_millis(heartbeat as u64)
+        {
+            out.push(0x05);
+        }
+        if !out.is_empty() {
+            self.last_tx = now;
+        }
         out
     }
+
+    fn pop_front_item(&mut self) {
+        if let Some(q) = self.queue.pop_front() {
+            self.queued_bytes -= q.bytes;
+            self.command_counter += 1;
+        }
+    }
+}
+
+/// Bit in `@Y` for the limit switch named by error `*032`–`*037`: axis pairs `yyxx`…,
+/// the lower bit of each pair is the PLUS switch [SPEC1 p.13].
+fn protocol_limit_bit(code: u16) -> Option<u32> {
+    let k = code.checked_sub(32)?;
+    if k > 5 {
+        return None;
+    }
+    let axis = u32::from(k / 2);
+    let plus = k % 2 == 1;
+    Some(axis * 2 + if plus { 0 } else { 1 })
 }
 
 #[cfg(test)]
@@ -912,7 +1236,13 @@ mod tests {
     fn text(bytes: &[u8]) -> String {
         bytes
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { (b as char).to_string() } else { format!("<{b:02x}>") })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("<{b:02x}>")
+                }
+            })
             .collect()
     }
 
@@ -922,19 +1252,35 @@ mod tests {
     }
 
     fn homed() -> SimCore {
-        SimCore::new(SimConfig { homed_at_start: true, ..SimConfig::default() })
+        SimCore::new(SimConfig {
+            homed_at_start: true,
+            ..SimConfig::default()
+        })
     }
 
     #[test]
     fn status_sequence_after_a_vector_matches_captures() {
         // [CAP g_regular_mount]: after L20 the controller reports 15 (dead time), 14, then 04.
         let mut c = homed();
-        for (cmd, t) in [("#C1,100", 0), ("#G20,4000", 0), ("@M2", 0), ("L20,X400,Y0,Z0", 0)] {
+        for (cmd, t) in [
+            ("#C1,100", 0),
+            ("#G20,4000", 0),
+            ("@M2", 0),
+            ("L20,X400,Y0,Z0", 0),
+        ] {
             send(&mut c, cmd, t);
         }
-        assert_eq!(send(&mut c, "@X", 10), "@X15<0d>", "waiting out #C1 dead time");
+        assert_eq!(
+            send(&mut c, "@X", 10),
+            "@X15<0d>",
+            "waiting out #C1 dead time"
+        );
         assert_eq!(send(&mut c, "@X", 150), "@X14<0d>", "moving");
-        assert_eq!(send(&mut c, "@X", 300), "@X04<0d>", "400 steps @ 4000/s = 100 ms after 100 ms dead time");
+        assert_eq!(
+            send(&mut c, "@X", 300),
+            "@X04<0d>",
+            "400 steps @ 4000/s = 100 ms after 100 ms dead time"
+        );
         assert_eq!(c.snapshot(ms(300)).position, [400, 0, 0]);
     }
 
@@ -957,8 +1303,16 @@ mod tests {
         assert_eq!(send(&mut c, "#C35,1", 0), "<0d>", "[CAP g_init]");
         assert_eq!(send(&mut c, "#R,100", 0), "<0d>", "[CAP g_init]");
         assert_eq!(send(&mut c, "@M2", 0), "*041<0d>", "mode 2 requires homing");
-        assert_eq!(send(&mut c, "$Hz", 0), "*001<0d>", "$ commands only in mode 1");
-        assert_eq!(send(&mut c, "@Q", 0), "@Q,0<0d>");
+        assert_eq!(
+            send(&mut c, "$Hz", 0),
+            "*001<0d>",
+            "$ commands only in mode 1"
+        );
+        assert_eq!(
+            send(&mut c, "@Q", 0),
+            "*003<0d>",
+            "@Q needs an output number"
+        );
         assert_eq!(send(&mut c, "@K", 0), "*029<0d>", "unknown master command");
     }
 
@@ -980,7 +1334,10 @@ mod tests {
         send(&mut c, "$L20,x999999", 0);
         assert_eq!(send(&mut c, "@B", 500), "<0d><01>");
         let x = c.snapshot(ms(500)).position[X];
-        assert!((4000..=6000).contains(&x), "≈ 0.5 s at 10000 steps/s, got {x}");
+        assert!(
+            (4000..=6000).contains(&x),
+            "≈ 0.5 s at 10000 steps/s, got {x}"
+        );
         assert_eq!(send(&mut c, "@LX", 600), format!("@LX{x}<0d>"));
         assert!(c.snapshot(ms(600)).homed, "@B keeps the reference");
     }
@@ -1011,7 +1368,11 @@ mod tests {
 
     #[test]
     fn flow_control_signals_and_overrun() {
-        let cfg = SimConfig { homed_at_start: true, buffer_capacity: 400, ..SimConfig::default() };
+        let cfg = SimConfig {
+            homed_at_start: true,
+            buffer_capacity: 400,
+            ..SimConfig::default()
+        };
         // Without #C7: no warning, overrun is *022.
         let mut c = SimCore::new(cfg.clone());
         send(&mut c, "@M2", 0);
@@ -1026,10 +1387,14 @@ mod tests {
         send(&mut c, "#C7,1", 0);
         send(&mut c, "@M2", 0);
         let mut replies = String::new();
-        for i in 0..16 { // ~240 bytes queued: inside the 200-byte warning zone, below 400
+        for i in 0..16 {
+            // ~240 bytes queued: inside the 200-byte warning zone, below 400
             replies += &send(&mut c, &format!("L20,X{},Y0,Z0", i * 10), 0);
         }
-        assert!(replies.contains("<03>") && !replies.contains("*022"), "{replies}");
+        assert!(
+            replies.contains("<03>") && !replies.contains("*022"),
+            "{replies}"
+        );
         assert_eq!(text(&c.tick(ms(5_000))), "<02>");
     }
 
@@ -1040,7 +1405,11 @@ mod tests {
         send(&mut c, "@M1", 0);
         send(&mut c, "$L20,x999999", 0);
         assert_eq!(text(&c.tick(ms(150))), "", "host still within 200 ms");
-        assert_eq!(text(&c.tick(ms(250))), "*068<0d>", "no host byte for > 200 ms");
+        assert_eq!(
+            text(&c.tick(ms(250))),
+            "*068<0d>",
+            "no host byte for > 200 ms"
+        );
         assert!(!c.snapshot(ms(250)).moving);
     }
 
@@ -1052,9 +1421,217 @@ mod tests {
         assert_eq!(send(&mut c, "@I221", 1), "@I221,1<0d>");
         assert_eq!(send(&mut c, "@I221", 2), "@I221,0<0d>", "reads 1 once");
 
-        send(&mut c, "@M2", 3);
-        send(&mut c, "L20,X100000,Y0,Z0", 3);
+        assert_eq!(
+            c.press_start_button(),
+            Vec::<u8>::new(),
+            "no bytes without #C35"
+        );
+        send(&mut c, "#C35,1", 3);
+        assert_eq!(
+            c.press_start_button(),
+            vec![0x06, 0x07],
+            "#C35 bit 1: I221 high, low"
+        );
+        send(&mut c, "#C35,2", 4);
+        assert_eq!(c.press_start_button(), Vec::<u8>::new(), "bit 1 off");
+        assert_eq!(c.set_input(222, true), vec![0x08]);
+        assert_eq!(
+            c.set_input(222, true),
+            Vec::<u8>::new(),
+            "only level changes"
+        );
+        assert_eq!(c.set_input(222, false), vec![0x09]);
+    }
+
+    #[test]
+    fn c1_skips_dead_time_for_the_next_vector_only() {
+        let mut c = homed();
+        for cmd in ["#C1,100", "#G20,4000", "@M2", "C1", "L20,X400,Y0,Z0"] {
+            send(&mut c, cmd, 0);
+        }
+        assert_eq!(
+            send(&mut c, "@X", 10),
+            "@X14<0d>",
+            "moving at once: no dead time"
+        );
+        c.tick(ms(200));
+        send(&mut c, "L20,X0,Y0,Z0", 200);
+        assert_eq!(
+            send(&mut c, "@X", 210),
+            "@X15<0d>",
+            "dead time again for a new path"
+        );
+    }
+
+    #[test]
+    fn c_flag_values() {
+        // [SPEC1 p.35]: 2 and 4 are "not yet realised" (accepted, no effect); C0 cancels a
+        // pending one-shot; undefined values are *067.
+        let mut c = homed();
+        for cmd in ["#C1,100", "#G20,4000", "@M2"] {
+            send(&mut c, cmd, 0);
+        }
+        assert_eq!(send(&mut c, "C2", 0), "");
+        assert_eq!(send(&mut c, "C4", 0), "");
+        assert_eq!(
+            send(&mut c, "C9", 0),
+            "",
+            "1 | 8 is fine, no reply in mode 2"
+        );
+        assert_eq!(send(&mut c, "C32", 0), "*067<0d>");
+        assert_eq!(send(&mut c, "Cx", 0), "*067<0d>");
+        assert_eq!(send(&mut c, "C0", 0), "", "cancels the C1 inside C9");
+        send(&mut c, "L20,X400,Y0,Z0", 0);
+        assert_eq!(
+            send(&mut c, "@X", 10),
+            "@X15<0d>",
+            "dead time applies again"
+        );
+        assert_eq!(send(&mut c, "I-x", 10), "*066<0d>");
+    }
+
+    #[test]
+    fn override_off_in_stream_ignores_at_o() {
+        let mut c = homed();
+        for cmd in [
+            "#G20,4000",
+            "@O50",
+            "@M2",
+            "C16",
+            "L20,X400,Y0,Z0",
+            "C8",
+            "L20,X0,Y0,Z0",
+        ] {
+            send(&mut c, cmd, 0);
+        }
+        assert_eq!(send(&mut c, "@X", 99), "@X14<0d>");
+        assert_eq!(
+            c.snapshot(ms(100)).position[0],
+            400,
+            "override off: full speed, 100 ms"
+        );
+        c.tick(ms(100));
+        c.tick(ms(250));
+        assert_ne!(
+            c.snapshot(ms(250)).position[0],
+            0,
+            "override back on: 50 %, 200 ms"
+        );
+        c.tick(ms(300));
+        assert_eq!(c.snapshot(ms(300)).position[0], 0);
+    }
+
+    #[test]
+    fn dwell_reports_waiting_and_outputs_apply_in_order() {
+        let mut c = homed();
+        for cmd in [
+            "#G20,4000",
+            "@M2",
+            "A01",
+            "W100",
+            "A03",
+            "L20,X400,Y0,Z0",
+            "A00",
+        ] {
+            send(&mut c, cmd, 0);
+        }
+        c.tick(ms(1));
+        assert_eq!(send(&mut c, "@Q242", 1), "@Q242,1<0d>", "A01 applied");
+        assert_eq!(
+            send(&mut c, "@Q243", 1),
+            "@Q243,0<0d>",
+            "A03 not yet: dwell first"
+        );
+        assert_eq!(send(&mut c, "@X", 50), "@X15<0d>", "dwell reports waiting");
+        c.tick(ms(110));
+        assert_eq!(send(&mut c, "@Q243", 110), "@Q243,1<0d>");
+        c.tick(ms(300));
+        assert_eq!(
+            send(&mut c, "@Q242", 300),
+            "@Q242,0<0d>",
+            "A00 after the vector"
+        );
+        assert_eq!(send(&mut c, "@N", 300), "@N5<0d>", "five items executed");
+    }
+
+    #[test]
+    fn wait_input_blocks_until_level() {
+        let mut c = homed();
+        for cmd in ["#G20,4000", "@M2", "I221", "L20,X400,Y0,Z0"] {
+            send(&mut c, cmd, 0);
+        }
         c.tick(ms(500));
-        assert_eq!(c.press_start_button(), vec![0x07], "0x07 during a cut");
+        assert_eq!(send(&mut c, "@X", 500), "@X15<0d>", "waiting on I221");
+        assert_eq!(c.snapshot(ms(500)).position[0], 0);
+        c.set_input(221, true);
+        c.tick(ms(501));
+        c.tick(ms(1000));
+        assert_eq!(c.snapshot(ms(1000)).position[0], 400);
+    }
+
+    #[test]
+    fn q_outputs_are_the_a_bits() {
+        let mut c = homed();
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$A05", 0);
+        assert_eq!(send(&mut c, "@Q242", 0), "@Q242,1<0d>");
+        assert_eq!(send(&mut c, "@Q243", 0), "@Q243,0<0d>");
+        assert_eq!(send(&mut c, "@Q244", 0), "@Q244,1<0d>");
+        assert_eq!(send(&mut c, "@Q243,1", 0), "<0d>");
+        assert_eq!(send(&mut c, "@Q243", 0), "@Q243,1<0d>", "set via @Q");
+    }
+
+    #[test]
+    fn y_reports_the_limit_switch_until_cleared() {
+        let mut c = homed();
+        assert_eq!(send(&mut c, "@Y", 0), "@Y4000<0d>");
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,X999999", 0);
+        let out = text(&c.tick(ms(3_700_000)));
+        assert_eq!(out, "*033<0d>", "X plus limit");
+        assert_eq!(
+            send(&mut c, "@Y", 3_700_000),
+            "@Y4001<0d>",
+            "spec example: X+ limit, ready"
+        );
+        send(&mut c, "@@", 3_700_000);
+        assert_eq!(send(&mut c, "@Y", 3_700_000), "@Y4000<0d>");
+    }
+
+    #[test]
+    fn c8_heartbeat_when_quiet() {
+        let mut c = homed();
+        send(&mut c, "#C8,100", 0);
+        assert_eq!(c.tick(ms(50)), Vec::<u8>::new());
+        assert_eq!(c.tick(ms(100)), vec![0x05]);
+        assert_eq!(c.tick(ms(150)), Vec::<u8>::new());
+        send(&mut c, "@X", 190);
+        assert_eq!(
+            c.tick(ms(250)),
+            Vec::<u8>::new(),
+            "the reply at 190 restarted the timer"
+        );
+        assert_eq!(c.tick(ms(290)), vec![0x05]);
+    }
+
+    #[test]
+    fn c6_off_withholds_the_home_ack() {
+        let mut c = SimCore::new(SimConfig {
+            homing_done_signal: false,
+            ..SimConfig::default()
+        });
+        send(&mut c, "@M1", 0);
+        assert_eq!(send(&mut c, "$Hz", 0), "", "no ack while homing");
+        assert_eq!(text(&c.tick(ms(3000))), "<0d>", "ack on completion");
+    }
+
+    #[test]
+    fn exhausted_start_counter_refuses_mode_switch() {
+        let mut c = SimCore::new(SimConfig {
+            start_counter_exhausted: true,
+            ..SimConfig::default()
+        });
+        assert_eq!(send(&mut c, "@M1", 0), "*007<0d>");
+        assert_eq!(send(&mut c, "@M0", 0), "<0d>", "staying in mode 0 is fine");
     }
 }

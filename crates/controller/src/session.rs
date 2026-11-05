@@ -92,7 +92,11 @@ impl fmt::Debug for Session {
 
 impl Session {
     pub(crate) fn start(link: Link, cfg: Config) -> io::Result<Session> {
-        let Link { reader, writer, name } = link;
+        let Link {
+            reader,
+            writer,
+            name,
+        } = link;
         let shared = Arc::new(Shared {
             writer: Mutex::new(writer),
             stopped: AtomicBool::new(false),
@@ -176,13 +180,18 @@ impl Session {
 
     pub(crate) fn unexpected(&mut self, cmd: &Command, reply: &Reply) -> ControllerError {
         self.needs_resync = true;
-        ControllerError::UnexpectedReply { command: cmd.to_string(), reply: format!("{reply:?}") }
+        ControllerError::UnexpectedReply {
+            command: cmd.to_string(),
+            reply: format!("{reply:?}"),
+        }
     }
 
     /// Send a command that expects a reply and return that reply.
     ///
     /// `in_stream`: in mode 2, a `*NNN` may belong to an earlier streamed vector rather than
-    /// to this command, so it is recorded as an async error and the wait continues.
+    /// to this command, so it is recorded as an async error and the wait continues. The same
+    /// holds for pure queries ([`Command::is_query`]), which are never rejected: a `*NNN`
+    /// during an `@X` poll is a fault that raced with it (found by the simulator).
     pub(crate) fn request(&mut self, cmd: &Command, in_stream: bool) -> Result<Reply> {
         debug_assert!(cmd.expects_reply(), "{cmd} has no reply; use send_streamed");
         self.ensure_usable()?;
@@ -200,7 +209,7 @@ impl Session {
                 });
             };
             let reply = Reply::parse(&line);
-            if in_stream && matches!(reply, Reply::Error(_)) {
+            if (in_stream || cmd.is_query()) && matches!(reply, Reply::Error(_)) {
                 self.unsolicited(line);
                 continue;
             }
@@ -210,7 +219,10 @@ impl Session {
                 return Err(ControllerError::Stopped);
             }
             if let Reply::Error(code) = reply {
-                return Err(ControllerError::Rejected { command: cmd.to_string(), code });
+                return Err(ControllerError::Rejected {
+                    command: cmd.to_string(),
+                    code,
+                });
             }
             return Ok(reply);
         }
@@ -243,7 +255,9 @@ impl Session {
     /// `stream_window_bytes` streamed, ask `@H` (a master command, answered even when the
     /// buffer is full) and wait while the buffer is above `stream_high_water_pct`.
     fn pace_by_buffer_level(&mut self, next: usize) -> Result<()> {
-        let Some(window) = self.cfg.stream_window_bytes else { return Ok(()) };
+        let Some(window) = self.cfg.stream_window_bytes else {
+            return Ok(());
+        };
         if self.streamed_since_check + next <= window {
             return Ok(());
         }
@@ -254,37 +268,55 @@ impl Session {
                 Reply::Value(v) => reply::parse_buffer_level(v),
                 _ => None,
             };
-            let Some(level) = level else { return Err(self.unexpected(&Command::BufferLevel, &reply)) };
+            let Some(level) = level else {
+                return Err(self.unexpected(&Command::BufferLevel, &reply));
+            };
             if level < self.cfg.stream_high_water_pct {
                 self.streamed_since_check = 0;
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(ControllerError::FlowTimeout { timeout_ms: millis(self.cfg.flow_timeout) });
+                return Err(ControllerError::FlowTimeout {
+                    timeout_ms: millis(self.cfg.flow_timeout),
+                });
             }
             thread::sleep(self.cfg.poll_interval);
         }
     }
 
-    fn wait_for_buffer_room(&self) -> Result<()> {
+    fn wait_for_buffer_room(&mut self) -> Result<()> {
         let deadline = Instant::now() + self.cfg.flow_timeout;
-        let mut paused = lock(&self.shared.flow_paused);
-        while *paused {
-            if self.shared.stopped.load(Ordering::SeqCst) {
-                return Err(ControllerError::Stopped);
+        loop {
+            {
+                let paused = lock(&self.shared.flow_paused);
+                if !*paused {
+                    return Ok(());
+                }
+                if self.shared.stopped.load(Ordering::SeqCst) {
+                    return Err(ControllerError::Stopped);
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(ControllerError::FlowTimeout {
+                        timeout_ms: millis(self.cfg.flow_timeout),
+                    });
+                }
+                let wait = self.cfg.poll_interval.min(deadline - now);
+                let (paused, _) = self
+                    .shared
+                    .flow_changed
+                    .wait_timeout(paused, wait)
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !*paused {
+                    return Ok(());
+                }
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(ControllerError::FlowTimeout { timeout_ms: millis(self.cfg.flow_timeout) });
-            }
-            paused = self
-                .shared
-                .flow_changed
-                .wait_timeout(paused, deadline - now)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            // Still held. The #C19 host watchdog needs a character from us while the axes
+            // move [SPEC1 p.26], and master commands are processed even while the stream is
+            // held [SPEC1 p.5, p.12], so ask `@H`. It also surfaces faults raised meanwhile.
+            self.request(&Command::BufferLevel, true)?;
+            self.take_async_error()?;
         }
-        Ok(())
     }
 
     // ---------------------------------------------------------------- recovery

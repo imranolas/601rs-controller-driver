@@ -38,7 +38,16 @@ pub fn parse_position(line: &str, axis: Axis) -> Option<i32> {
 
 /// `@I235,1` → state of input `n` [SPEC p.15].
 pub fn parse_input(line: &str, n: u8) -> Option<bool> {
-    let rest = line.strip_prefix("@I")?;
+    parse_io(line, "@I", n)
+}
+
+/// `@Q250,0` → state of output `n` [SPEC1 p.16].
+pub fn parse_output(line: &str, n: u8) -> Option<bool> {
+    parse_io(line, "@Q", n)
+}
+
+fn parse_io(line: &str, prefix: &str, n: u8) -> Option<bool> {
+    let rest = line.strip_prefix(prefix)?;
     let (num, val) = rest.split_once(',')?;
     if num.parse::<u8>().ok()? != n {
         return None;
@@ -48,6 +57,25 @@ pub fn parse_input(line: &str, n: u8) -> Option<bool> {
         "1" => Some(true),
         _ => None,
     }
+}
+
+/// `@M01` → mode number (two digits with leading zero) [SPEC1 p.13].
+pub fn parse_mode(line: &str) -> Option<u8> {
+    let digits = line.strip_prefix("@M")?;
+    if digits.len() != 2 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// `@N412` → mode-2 command counter [SPEC1 p.15].
+pub fn parse_command_counter(line: &str) -> Option<u32> {
+    line.strip_prefix("@N")?.parse().ok()
+}
+
+/// `@O120` → speed override in percent [SPEC1 p.16].
+pub fn parse_override(line: &str) -> Option<u16> {
+    line.strip_prefix("@O")?.parse().ok()
 }
 
 /// `@E23` → error code [SPEC p.13].
@@ -87,5 +115,10 @@ mod tests {
         assert_eq!(parse_error_code("@E0"), Some(0));
         assert_eq!(parse_error_code("@E33"), Some(33));
         assert_eq!(parse_buffer_level("@H86"), Some(86));
+        assert_eq!(parse_output("@Q250,0", 250), Some(false));
+        assert_eq!(parse_mode("@M01"), Some(1));
+        assert_eq!(parse_mode("@M1"), None, "two digits with leading zero");
+        assert_eq!(parse_command_counter("@N412"), Some(412));
+        assert_eq!(parse_override("@O120"), Some(120));
     }
 }

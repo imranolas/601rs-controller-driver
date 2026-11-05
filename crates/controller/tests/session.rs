@@ -125,7 +125,9 @@ fn full_journey_through_the_modes() {
 
     let mut jog = ctl.into_jog().expect("@M1");
     jog.home(&[Axis::X, Axis::Y]).expect("$Hxy");
-    let s = jog.wait_until(Duration::from_secs(1), |s| s.homed && !s.moving).expect("homed");
+    let s = jog
+        .wait_until(Duration::from_secs(1), |s| s.homed && !s.moving)
+        .expect("homed");
     assert!(s.homed);
     jog.set_outputs(0x42).expect("$A42");
 
@@ -140,10 +142,21 @@ fn full_journey_through_the_modes() {
     assert_eq!(
         finish(params, fake),
         [
-            "@I100", "@V", "@M0", // connect: unique resync probe, version, mode 0
-            "@M1", "$Hxy", "@X", "@X", "@X", "$A42", // home + clamp
-            "@M2", "L20,X9695,Y10775,Z774", "L20,X9695,Y2615,Z774", "@X", // stream, then wait
-            "@M0", "#G20,36000",
+            "@I100",
+            "@V",
+            "@M0", // connect: unique resync probe, version, mode 0
+            "@M1",
+            "$Hxy",
+            "@X",
+            "@X",
+            "@X",
+            "$A42", // home + clamp
+            "@M2",
+            "L20,X9695,Y10775,Z774",
+            "L20,X9695,Y2615,Z774",
+            "@X", // stream, then wait
+            "@M0",
+            "#G20,36000",
         ]
     );
 }
@@ -180,11 +193,18 @@ fn timeout_then_late_reply_is_resynced() {
         standard(l)
     });
     let mut ctl = open(link);
-    assert!(matches!(ctl.position_steps(Axis::X), Err(ControllerError::Timeout { .. })));
+    assert!(matches!(
+        ctl.position_steps(Axis::X),
+        Err(ControllerError::Timeout { .. })
+    ));
     // GMC would now read "@LX44149" as the answer to whatever it sent next.
     let s = ctl.status().expect("status after resync");
     assert!(s.homed);
-    assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0", "@LX", "@I101", "@X"], "unique resync probe, then the real @X");
+    assert_eq!(
+        finish(ctl, fake),
+        ["@I100", "@V", "@M0", "@LX", "@I101", "@X"],
+        "unique resync probe, then the real @X"
+    );
 }
 
 #[test]
@@ -234,12 +254,24 @@ fn stop_from_another_thread_interrupts_a_wait_and_latches() {
     });
 
     let started = Instant::now();
-    assert!(matches!(ctl.wait_idle(Duration::from_secs(5)), Err(ControllerError::Stopped)));
-    assert!(started.elapsed() < Duration::from_secs(1), "stop must interrupt promptly");
+    assert!(matches!(
+        ctl.wait_idle(Duration::from_secs(5)),
+        Err(ControllerError::Stopped)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "stop must interrupt promptly"
+    );
     stopper.join().expect("stopper");
 
-    assert!(wait_for(&events, &Event::StopIssued(controller::StopKind::Brake)));
-    assert!(matches!(ctl.status(), Err(ControllerError::Stopped)), "latched until cleared");
+    assert!(wait_for(
+        &events,
+        &Event::StopIssued(controller::StopKind::Brake)
+    ));
+    assert!(
+        matches!(ctl.status(), Err(ControllerError::Stopped)),
+        "latched until cleared"
+    );
     ctl.clear_stop().expect("clear_stop");
     ctl.status().expect("usable again");
     assert!(finish(ctl, fake).iter().any(|l| l == "@B"));
@@ -262,7 +294,10 @@ fn mode_two_respects_buffer_flow_control() {
     thread::sleep(Duration::from_millis(30)); // let 0x03 arrive
     let t = Instant::now();
     cut.vector(20, 4, 5, 6).expect("second, after 0x02");
-    assert!(t.elapsed() >= Duration::from_millis(50), "second vector must wait for 0x02");
+    assert!(
+        t.elapsed() >= Duration::from_millis(50),
+        "second vector must wait for 0x02"
+    );
     finish(cut, fake);
 }
 
@@ -278,7 +313,10 @@ fn mode_two_flow_timeout() {
     let mut cut = open(link).into_cutting().expect("@M2");
     cut.vector(20, 1, 2, 3).expect("first");
     thread::sleep(Duration::from_millis(30));
-    assert!(matches!(cut.vector(20, 4, 5, 6), Err(ControllerError::FlowTimeout { .. })));
+    assert!(matches!(
+        cut.vector(20, 4, 5, 6),
+        Err(ControllerError::FlowTimeout { .. })
+    ));
     finish(cut, fake);
 }
 
@@ -307,7 +345,10 @@ fn rejected_mode_switch_hands_the_controller_back() {
     });
     let ctl = open(link);
     let err = ctl.into_cutting().expect_err("must be rejected");
-    assert!(matches!(err.error, ControllerError::Rejected { code: 28, .. }));
+    assert!(matches!(
+        err.error,
+        ControllerError::Rejected { code: 28, .. }
+    ));
     let mut ctl = *err.controller; // still Controller<Parameters>
     ctl.status().expect("still usable");
     finish(ctl, fake);
@@ -330,7 +371,35 @@ fn disconnect_is_reported_and_sticky() {
         other => standard(other),
     });
     let mut ctl = open(link);
-    assert!(matches!(ctl.position_steps(Axis::X), Err(ControllerError::Disconnected(_))));
-    assert!(matches!(ctl.status(), Err(ControllerError::Disconnected(_))));
+    assert!(matches!(
+        ctl.position_steps(Axis::X),
+        Err(ControllerError::Disconnected(_))
+    ));
+    assert!(matches!(
+        ctl.status(),
+        Err(ControllerError::Disconnected(_))
+    ));
+    finish(ctl, fake);
+}
+
+/// Found by the simulator: a limit switch fires while an `@X` poll is in flight, so `*033`
+/// arrives before `@X04`. Queries are never rejected, so the `*033` is an async fault and the
+/// `@X04` still pairs with the poll; nothing gets out of step.
+#[test]
+fn fault_racing_a_status_poll_is_async_not_a_rejection() {
+    let (link, fake) = fake(|line, _| match line {
+        "@X" => reply("*033\r@X04\r"),
+        l => standard(l),
+    });
+    let mut ctl = open(link);
+    let err = ctl
+        .wait_idle(Duration::from_secs(1))
+        .expect_err("fault reported");
+    assert!(
+        matches!(err, ControllerError::AsyncError { code: 33 }),
+        "{err}"
+    );
+    let s = ctl.status().expect("still in step");
+    assert!(s.is_idle());
     finish(ctl, fake);
 }

@@ -19,20 +19,30 @@ fn captures() -> Vec<PathBuf> {
         })
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "no g_*.txt captures found in {}", root.display());
+    assert!(
+        !files.is_empty(),
+        "no g_*.txt captures found in {}",
+        root.display()
+    );
     files
 }
 
 #[test]
 fn every_capture_parses_and_decodes() {
     for path in captures() {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let transfers = capture::read_file(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(!transfers.is_empty(), "{name}: no transfers");
 
         let mut decoder = Decoder::new();
         let mut lines = 0;
-        for t in transfers.iter().filter(|t| t.direction == Direction::ControllerToHost) {
+        for t in transfers
+            .iter()
+            .filter(|t| t.direction == Direction::ControllerToHost)
+        {
             for frame in decoder.push(&t.bytes) {
                 match frame {
                     Frame::Unknown(b) => panic!("{name}: unknown control byte {b:#04x}"),
@@ -47,14 +57,20 @@ fn every_capture_parses_and_decodes() {
                 }
             }
         }
-        assert!(decoder.pending().is_empty(), "{name}: trailing partial line");
+        assert!(
+            decoder.pending().is_empty(),
+            "{name}: trailing partial line"
+        );
         assert!(lines > 0, "{name}: no reply lines");
     }
 }
 
 #[test]
 fn init_capture_starts_with_version_query() {
-    let path = captures().into_iter().find(|p| p.ends_with("g_init.txt")).expect("g_init.txt");
+    let path = captures()
+        .into_iter()
+        .find(|p| p.ends_with("g_init.txt"))
+        .expect("g_init.txt");
     let t = capture::read_file(path).expect("parse");
     assert_eq!(t[0].direction, Direction::HostToController);
     assert_eq!(t[0].bytes, b"@V\r");

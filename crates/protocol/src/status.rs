@@ -63,7 +63,16 @@ mod tests {
 
     #[test]
     fn rejects_non_status() {
-        for bad in ["", "@X", "@X1", "@X2", "@X1G", "@X140", "@V2.00/55W", "*021"] {
+        for bad in [
+            "",
+            "@X",
+            "@X1",
+            "@X2",
+            "@X1G",
+            "@X140",
+            "@V2.00/55W",
+            "*021",
+        ] {
             assert_eq!(Status::parse(bad), None, "{bad}");
         }
     }

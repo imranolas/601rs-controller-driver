@@ -15,10 +15,21 @@ pub fn pair(read_timeout: Duration) -> (Link, Remote) {
     let (remote_tx, host_rx) = mpsc::channel::<Vec<u8>>();
     let link = Link {
         name: "memory".to_owned(),
-        reader: Box::new(MemReader { rx: host_rx, pending: VecDeque::new(), timeout: read_timeout }),
+        reader: Box::new(MemReader {
+            rx: host_rx,
+            pending: VecDeque::new(),
+            timeout: read_timeout,
+        }),
         writer: Box::new(MemWriter { tx: host_tx }),
     };
-    (link, Remote { rx: remote_rx, tx: remote_tx, buf: Vec::new() })
+    (
+        link,
+        Remote {
+            rx: remote_rx,
+            tx: remote_tx,
+            buf: Vec::new(),
+        },
+    )
 }
 
 struct MemReader {
@@ -34,7 +45,10 @@ impl Reader for MemReader {
                 Ok(bytes) => self.pending.extend(bytes),
                 Err(RecvTimeoutError::Timeout) => return Ok(0),
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "remote end closed"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "remote end closed",
+                    ));
                 }
             }
         }
@@ -67,7 +81,9 @@ pub struct Remote {
 
 impl fmt::Debug for Remote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Remote").field("buffered", &self.buf.len()).finish_non_exhaustive()
+        f.debug_struct("Remote")
+            .field("buffered", &self.buf.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -107,17 +123,30 @@ mod tests {
         let (mut link, mut remote) = pair(Duration::from_millis(5));
         link.writer.write_all(b"@V\r@X").expect("write");
         link.writer.write_all(b"\r").expect("write");
-        assert_eq!(remote.recv_line(Duration::from_millis(50)).as_deref(), Some("@V"));
-        assert_eq!(remote.recv_line(Duration::from_millis(50)).as_deref(), Some("@X"));
+        assert_eq!(
+            remote.recv_line(Duration::from_millis(50)).as_deref(),
+            Some("@V")
+        );
+        assert_eq!(
+            remote.recv_line(Duration::from_millis(50)).as_deref(),
+            Some("@X")
+        );
 
         assert!(remote.send(b"@X04\r"));
         let mut buf = [0u8; 3];
         assert_eq!(link.reader.read(&mut buf).expect("read"), 3);
         assert_eq!(&buf, b"@X0");
         assert_eq!(link.reader.read(&mut buf).expect("read"), 2);
-        assert_eq!(link.reader.read(&mut buf).expect("read"), 0, "timeout is Ok(0)");
+        assert_eq!(
+            link.reader.read(&mut buf).expect("read"),
+            0,
+            "timeout is Ok(0)"
+        );
 
         drop(remote);
-        assert!(link.reader.read(&mut buf).is_err(), "closed remote is an error");
+        assert!(
+            link.reader.read(&mut buf).is_err(),
+            "closed remote is an error"
+        );
     }
 }

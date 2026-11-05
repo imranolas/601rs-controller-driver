@@ -45,7 +45,10 @@ struct Replay {
 }
 
 fn replay(path: &Path) -> Replay {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let transfers = capture::read_file(path).expect("capture");
     let mut core = SimCore::new(SimConfig {
         instant_motion: true,
@@ -55,7 +58,10 @@ fn replay(path: &Path) -> Replay {
     });
 
     let (mut host, mut real_dec, mut sim_dec) = (Decoder::new(), Decoder::new(), Decoder::new());
-    let mut out = Replay { real: Vec::new(), sim: Vec::new() };
+    let mut out = Replay {
+        real: Vec::new(),
+        sim: Vec::new(),
+    };
     let mut last_cmd = String::from("<start>");
     let mut mode9 = false;
     let mut keep_next_real = false; // the ack of `@M9` itself
@@ -108,7 +114,10 @@ fn simulator_answers_like_the_real_controller() {
     let mut report = String::new();
     let mut compared = 0;
     for path in captures() {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let r = replay(&path);
         compared += r.real.len();
         // Capture boundaries: recording can start while one GMC poll is outstanding (its reply
@@ -117,12 +126,20 @@ fn simulator_answers_like_the_real_controller() {
         let matches = |skip: usize| {
             let real = &r.real[skip.min(r.real.len())..];
             let n = real.len().min(r.sim.len());
-            real.len().abs_diff(r.sim.len()) <= 1 && real[..n].iter().zip(&r.sim[..n]).all(|((_, a), (_, b))| a == b)
+            real.len().abs_diff(r.sim.len()) <= 1
+                && real[..n]
+                    .iter()
+                    .zip(&r.sim[..n])
+                    .all(|((_, a), (_, b))| a == b)
         };
         if matches(0) || matches(1) {
             continue;
         }
-        let first_diff = r.real.iter().zip(&r.sim).position(|((_, a), (_, b))| a != b);
+        let first_diff = r
+            .real
+            .iter()
+            .zip(&r.sim)
+            .position(|((_, a), (_, b))| a != b);
         let i = first_diff.unwrap_or(r.real.len().min(r.sim.len()));
         report += &format!(
             "\n{name}: {} real vs {} simulated replies; first difference at #{i}\n",
@@ -130,11 +147,20 @@ fn simulator_answers_like_the_real_controller() {
             r.sim.len()
         );
         for j in i.saturating_sub(3)..(i + 3) {
-            let real = r.real.get(j).map_or("—".into(), |(c, l)| format!("{c:>16} → {l:?}"));
-            let sim = r.sim.get(j).map_or("—".into(), |(c, l)| format!("{c:>16} → {l:?}"));
+            let real = r
+                .real
+                .get(j)
+                .map_or("—".into(), |(c, l)| format!("{c:>16} → {l:?}"));
+            let sim = r
+                .sim
+                .get(j)
+                .map_or("—".into(), |(c, l)| format!("{c:>16} → {l:?}"));
             report += &format!("  #{j:<5} real {real:<44} sim {sim}\n");
         }
     }
-    assert!(report.is_empty(), "simulator diverges from the real controller:{report}");
+    assert!(
+        report.is_empty(),
+        "simulator diverges from the real controller:{report}"
+    );
     assert!(compared > 1000, "too few replies compared ({compared})");
 }

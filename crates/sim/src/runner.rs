@@ -57,7 +57,9 @@ pub struct Sim {
 
 impl fmt::Debug for Sim {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sim").field("snapshot", &self.snapshot()).finish()
+        f.debug_struct("Sim")
+            .field("snapshot", &self.snapshot())
+            .finish()
     }
 }
 
@@ -81,7 +83,9 @@ pub fn spawn(config: SimConfig, speedup: f64) -> (Link, Sim) {
     let thread = thread::Builder::new()
         .name("sim".to_owned())
         .spawn(move || {
-            while !thread_shared.shutdown.load(Ordering::SeqCst) && !thread_shared.hang_up.load(Ordering::SeqCst) {
+            while !thread_shared.shutdown.load(Ordering::SeqCst)
+                && !thread_shared.hang_up.load(Ordering::SeqCst)
+            {
                 let line = remote.recv_line(Duration::from_millis(1));
                 let mut st = lock(&thread_shared.state);
                 let now = st.now();
@@ -98,7 +102,11 @@ pub fn spawn(config: SimConfig, speedup: f64) -> (Link, Sim) {
                 st.enqueue(spontaneous, Duration::ZERO);
 
                 let real_now = Instant::now();
-                let ready = st.outbox.iter().take_while(|(at, _)| *at <= real_now).count();
+                let ready = st
+                    .outbox
+                    .iter()
+                    .take_while(|(at, _)| *at <= real_now)
+                    .count();
                 let due: Vec<_> = st.outbox.drain(..ready).collect();
                 drop(st);
                 for (_, bytes) in due {
@@ -109,7 +117,13 @@ pub fn spawn(config: SimConfig, speedup: f64) -> (Link, Sim) {
             }
         })
         .expect("spawn simulator thread");
-    (link, Sim { shared, thread: Some(thread) })
+    (
+        link,
+        Sim {
+            shared,
+            thread: Some(thread),
+        },
+    )
 }
 
 impl Sim {
@@ -146,7 +160,10 @@ impl Sim {
     }
 
     pub fn set_input(&self, input: u8, value: bool) {
-        self.with(|st| st.core.set_input(input, value));
+        self.with(|st| {
+            let out = st.core.set_input(input, value);
+            st.enqueue(out, Duration::ZERO);
+        });
     }
 
     /// Delay every subsequent reply (not spontaneous signals) by `delay`.

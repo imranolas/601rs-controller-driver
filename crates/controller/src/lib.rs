@@ -51,7 +51,7 @@ use std::time::Duration;
 
 pub use error::{ControllerError, Result};
 pub use event::{Event, StopKind};
-pub use protocol::{Axis, Mode, Signal, Status};
+pub use protocol::{Axis, Mode, Signal, Status, StreamFlags, Switches};
 pub use stop::StopHandle;
 pub use typed::{Controller, ModeMarker, ModeSwitchError, connect, mode};
 

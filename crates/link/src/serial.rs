@@ -22,7 +22,11 @@ pub struct SerialConfig {
 
 impl SerialConfig {
     pub fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into(), baud: DEFAULT_BAUD, read_timeout: Duration::from_millis(20) }
+        Self {
+            path: path.into(),
+            baud: DEFAULT_BAUD,
+            read_timeout: Duration::from_millis(20),
+        }
     }
 }
 

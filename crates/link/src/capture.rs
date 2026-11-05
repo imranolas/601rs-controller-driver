@@ -42,7 +42,10 @@ pub fn parse_utf16le(raw: &[u8]) -> Result<Vec<Transfer>, CaptureError> {
     if raw.len() % 2 != 0 {
         return Err(CaptureError::NotUtf16);
     }
-    let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     let text = String::from_utf16_lossy(&units);
     parse_text(text.trim_start_matches('\u{feff}'))
 }
@@ -51,9 +54,16 @@ pub fn parse_text(text: &str) -> Result<Vec<Transfer>, CaptureError> {
     let mut out: Vec<Transfer> = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if let Some((at_secs, direction)) = parse_header(line) {
-            out.push(Transfer { at_secs, direction, bytes: Vec::new() });
+            out.push(Transfer {
+                at_secs,
+                direction,
+                bytes: Vec::new(),
+            });
         } else if let Some(row) = parse_hex_row(line) {
-            out.last_mut().ok_or(CaptureError::OrphanRow(n + 1))?.bytes.extend(row);
+            out.last_mut()
+                .ok_or(CaptureError::OrphanRow(n + 1))?
+                .bytes
+                .extend(row);
         }
     }
     Ok(out)
