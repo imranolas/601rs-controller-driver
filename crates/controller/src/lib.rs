@@ -64,8 +64,13 @@ pub struct Config {
     pub poll_interval: Duration,
     /// How long a mode-2 send may wait for the controller to signal buffer room (0x02).
     pub flow_timeout: Duration,
-    /// Silence on the line that counts as "drained" during resync.
-    pub quiet_period: Duration,
+    /// Mode-2 pacing: after this many bytes streamed, check the controller's buffer level
+    /// (`@H`) and wait while it is at or above `stream_high_water_pct`. `None` streams freely
+    /// and relies on the 0x03/0x02 signals (`#C7,1`) and on the buffer being large, as GMC does
+    /// (it sends a 24 KB oval in one write [CAP g_oval_mount]). Enable once `@H` is verified on
+    /// the real firmware; choose `window ≤ capacity × (100 − high_water)%`.
+    pub stream_window_bytes: Option<usize>,
+    pub stream_high_water_pct: u8,
 }
 
 impl Default for Config {
@@ -74,7 +79,8 @@ impl Default for Config {
             reply_timeout: Duration::from_millis(1000),
             poll_interval: Duration::from_millis(50),
             flow_timeout: Duration::from_secs(10),
-            quiet_period: Duration::from_millis(100),
+            stream_window_bytes: None,
+            stream_high_water_pct: 50,
         }
     }
 }

@@ -81,6 +81,9 @@ pub enum Command {
     Home(Vec<Axis>),
     /// `$A<hh>`: set auxiliary outputs (head/clamp bitmask).
     SetOutputs(u8),
+    /// `$L<entry>,<axis><steps>`: jog one axis in steps at speed-table entry; `relative`
+    /// selects the lowercase (relative) axis letter. ±999999 means "run until braked".
+    JogSteps { speed_entry: u8, axis: Axis, steps: i32, relative: bool },
 
     // ---- mode 0 (`#`) [SPEC p.17–27] ----
     /// `#G<entry>,<v>`: speed of speed-table entry.
@@ -110,7 +113,7 @@ impl Command {
         match self {
             Version | Status | SetMode(_) | Brake | EmergencyStop | PositionSteps(_)
             | ReadInput(_) | ErrorCode | BufferLevel => None,
-            Home(_) | SetOutputs(_) => Some(Mode::Jog),
+            Home(_) | SetOutputs(_) | JogSteps { .. } => Some(Mode::Jog),
             SetSpeed { .. }
             | SetRampMs(_)
             | SetDeadTimeMs(_)
@@ -153,6 +156,10 @@ impl fmt::Display for Command {
                 axes.iter().try_for_each(|a| write!(f, "{}", a.lower()))
             }
             SetOutputs(bits) => write!(f, "$A{bits:02X}"),
+            JogSteps { speed_entry, axis, steps, relative } => {
+                let a = if *relative { axis.lower() } else { axis.upper() };
+                write!(f, "$L{speed_entry},{a}{steps}")
+            }
             SetSpeed { entry, value } => write!(f, "#G{entry},{value}"),
             SetRampMs(ms) => write!(f, "#R{ms}"),
             SetDeadTimeMs(ms) => write!(f, "#C1,{ms}"),
@@ -182,6 +189,11 @@ mod tests {
             (Command::Home(vec![Axis::Z]), "$Hz\r"),
             (Command::SetOutputs(0x4A), "$A4A\r"),
             (Command::SetOutputs(0x02), "$A02\r"),
+            (
+                Command::JogSteps { speed_entry: 20, axis: Axis::X, steps: -999_999, relative: true },
+                "$L20,x-999999\r",
+            ),
+            (Command::JogSteps { speed_entry: 10, axis: Axis::X, steps: 3, relative: false }, "$L10,X3\r"),
             (Command::SetSpeed { entry: 20, value: 36000 }, "#G20,36000\r"),
             (Command::SetRampMs(225), "#R225\r"),
             (Command::SetDeadTimeMs(100), "#C1,100\r"),

@@ -1,0 +1,1060 @@
+//! The controller model: pure, explicit time, text in / bytes out.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
+
+/// Simulated time since the core was created.
+pub type SimTime = Duration;
+
+const ENDLESS_JOG: i64 = 999_999;
+
+const X: usize = 0;
+const Y: usize = 1;
+const Z: usize = 2;
+
+/// `#C` registers the 601 firmware accepts: the spec's list [SPEC p.17] plus 35/37 seen
+/// accepted in [CAP g_init]. Anything else is `*021`, as the real controller answers `#C52`.
+const KNOWN_C: &[u16] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29,
+    30, 31, 32, 33, 34, 35, 37,
+];
+
+#[derive(Debug, Clone)]
+pub struct SimConfig {
+    /// Reply to `@V` [CAP g_init].
+    pub version: String,
+    pub homed_at_start: bool,
+    pub start_position: [i64; 3],
+    /// X and Y travel limits in steps (Z is rotary and unlimited). Placeholder until the
+    /// diagnostic tool measures the envelope; covers every coordinate in the captures
+    /// (X up to 58860 = park, Y up to 41800 in g_init).
+    pub envelope: [(i64, i64); 2],
+    /// Simulated duration of homing one axis.
+    pub homing_time_per_axis: Duration,
+    /// Mode-2 input buffer in bytes (unknown on the real controller).
+    pub buffer_capacity: usize,
+    /// Speed (steps/s) for speed-table entries never set with `#G`.
+    pub default_speed: u32,
+    /// Motions and dead times complete instantly (used for protocol replay).
+    pub instant_motion: bool,
+    /// `#C6` default: 0x04 after homing. The real controller sent it without GMC enabling it.
+    pub homing_done_signal: bool,
+    /// Steps per mm on X/Y, for the µm-based commands (`@P`, `$E`, `V`). [GCF ScaleX/Y]
+    pub steps_per_mm: f64,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            version: "@V2.00/55W 19.10.10 2807001".to_owned(),
+            homed_at_start: false,
+            start_position: [0, 0, 0],
+            envelope: [(0, 60_000), (0, 43_000)],
+            homing_time_per_axis: Duration::from_secs(3),
+            buffer_capacity: 4096,
+            default_speed: 10_000,
+            instant_motion: false,
+            homing_done_signal: true,
+            steps_per_mm: 40.0,
+        }
+    }
+}
+
+/// Observable state, for tests and dry-run tooling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub mode: u8,
+    pub homed: bool,
+    pub moving: bool,
+    pub position: [i64; 3],
+    pub outputs: u8,
+    pub error: u16,
+    pub queued_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Jog,
+    Path,
+    Dwell,
+}
+
+#[derive(Debug, Clone)]
+struct Motion {
+    from: [i64; 3],
+    to: [i64; 3],
+    start: SimTime,
+    end: SimTime,
+    kind: Kind,
+    /// Set when the target was beyond the envelope: raised when the limit is reached.
+    limit_error: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+enum Item {
+    Vector { target: [i64; 3], speed: u8 },
+    Outputs(u8),
+    Dwell(Duration),
+}
+
+#[derive(Debug, Clone)]
+struct Queued {
+    item: Item,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct Homing {
+    axes: Vec<usize>,
+    index: usize,
+    axis_end: SimTime,
+}
+
+#[derive(Debug)]
+pub struct SimCore {
+    cfg: SimConfig,
+    mode: u8,
+    homed: bool,
+    homing: Option<Homing>,
+    pos: [i64; 3],
+    motion: Option<Motion>,
+    queue: VecDeque<Queued>,
+    queued_bytes: usize,
+    path_target: [i64; 3],
+    path_speed: Option<u8>,
+    dead_until: Option<SimTime>,
+    outputs: u8,
+    inputs: BTreeMap<u8, bool>,
+    input_defs: BTreeMap<u8, String>,
+    speeds: BTreeMap<u8, u32>,
+    brake_angles: BTreeMap<u8, u32>,
+    ramp_ms: u32,
+    start_speed: u32,
+    max_speed: u32,
+    c: BTreeMap<u16, i64>,
+    clock: String,
+    offsets: [i64; 3],
+    axis_params: BTreeMap<String, String>,
+    counters: BTreeMap<u8, i64>,
+    error: u16,
+    override_pct: u32,
+    command_counter: i64,
+    last_host: SimTime,
+    /// When the machine last became free (end of the previous motion), so queued motions
+    /// chain back-to-back however coarse the ticks are.
+    free_at: SimTime,
+    flow_paused: bool,
+    start_button_latched: bool,
+    received: Vec<String>,
+}
+
+// ------------------------------------------------------------------ small helpers
+
+fn push_line(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(s.as_bytes());
+    out.push(b'\r');
+}
+
+fn push_ack(out: &mut Vec<u8>) {
+    out.push(b'\r');
+}
+
+fn push_err(out: &mut Vec<u8>, code: u16) {
+    push_line(out, &format!("*{code:03}"));
+}
+
+fn axis_index(c: char) -> Option<(usize, bool)> {
+    match c {
+        'X' => Some((X, true)),
+        'Y' => Some((Y, true)),
+        'Z' => Some((Z, true)),
+        'x' => Some((X, false)),
+        'y' => Some((Y, false)),
+        'z' => Some((Z, false)),
+        _ => None,
+    }
+}
+
+/// `x2300,Y0` → [(axis, absolute, value)].
+fn parse_axis_values(s: &str) -> Option<Vec<(usize, bool, i64)>> {
+    s.split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut chars = p.chars();
+            let (axis, abs) = axis_index(chars.next()?)?;
+            Some((axis, abs, chars.as_str().parse().ok()?))
+        })
+        .collect()
+}
+
+/// `20,X1,Y2` → (20, "X1,Y2").
+fn split_entry(s: &str) -> Option<(u8, &str)> {
+    let (g, rest) = s.split_once(',')?;
+    Some((g.parse().ok()?, rest))
+}
+
+fn parse_hex_u8(s: &str) -> Option<u8> {
+    u8::from_str_radix(s, 16).ok()
+}
+
+impl SimCore {
+    pub fn new(cfg: SimConfig) -> Self {
+        let mut c = BTreeMap::new();
+        c.insert(6, i64::from(cfg.homing_done_signal));
+        Self {
+            homed: cfg.homed_at_start,
+            pos: cfg.start_position,
+            path_target: cfg.start_position,
+            cfg,
+            mode: 0,
+            homing: None,
+            motion: None,
+            queue: VecDeque::new(),
+            queued_bytes: 0,
+            path_speed: None,
+            dead_until: None,
+            outputs: 0,
+            inputs: BTreeMap::new(),
+            input_defs: BTreeMap::new(),
+            speeds: BTreeMap::new(),
+            brake_angles: BTreeMap::new(),
+            ramp_ms: 0,
+            start_speed: 0,
+            max_speed: 0,
+            c,
+            clock: "1,1,2026,0,0,0".to_owned(),
+            offsets: [0; 3],
+            axis_params: BTreeMap::new(),
+            counters: BTreeMap::new(),
+            error: 0,
+            override_pct: 100,
+            command_counter: 0,
+            last_host: Duration::ZERO,
+            free_at: Duration::ZERO,
+            flow_paused: false,
+            start_button_latched: false,
+            received: Vec::new(),
+        }
+    }
+
+    fn c_on(&self, reg: u16) -> bool {
+        self.c.get(&reg).copied().unwrap_or(0) != 0
+    }
+
+    fn c_val(&self, reg: u16) -> i64 {
+        self.c.get(&reg).copied().unwrap_or(0)
+    }
+
+    // ------------------------------------------------------------------ observation
+
+    /// Every line the host has sent, in order.
+    pub fn received(&self) -> &[String] {
+        &self.received
+    }
+
+    pub fn is_moving(&self) -> bool {
+        self.homing.is_some() || self.motion.is_some() || !self.queue.is_empty()
+    }
+
+    pub fn position_at(&self, now: SimTime) -> [i64; 3] {
+        let Some(m) = &self.motion else { return self.pos };
+        let span = m.end.saturating_sub(m.start).as_secs_f64();
+        let frac = if span <= 0.0 { 1.0 } else { (now.saturating_sub(m.start).as_secs_f64() / span).min(1.0) };
+        let mut p = [0; 3];
+        for (a, slot) in p.iter_mut().enumerate() {
+            let delta = (m.to[a] - m.from[a]) as f64;
+            *slot = m.from[a] + (delta * frac).round() as i64;
+        }
+        p
+    }
+
+    pub fn snapshot(&self, now: SimTime) -> Snapshot {
+        Snapshot {
+            mode: self.mode,
+            homed: self.homed,
+            moving: self.is_moving(),
+            position: self.position_at(now),
+            outputs: self.outputs,
+            error: self.error,
+            queued_bytes: self.queued_bytes,
+        }
+    }
+
+    fn status_line(&self, now: SimTime) -> String {
+        let moving = self.is_moving();
+        let waiting = self.motion.is_none()
+            && self.homing.is_none()
+            && !self.queue.is_empty()
+            && self.dead_until.is_none_or(|t| now < t);
+        let flags = u8::from(waiting)
+            | (u8::from(self.error != 0) << 1)
+            | (u8::from(self.homed) << 2)
+            | (u8::from(self.homing.is_some()) << 3);
+        format!("@X{}{:X}", u8::from(moving), flags)
+    }
+
+    // ------------------------------------------------------------------ fault injection
+
+    /// Raise a machine error now (e.g. 33 = limit switch, 40 = stop input): motion halts and
+    /// `*NNN` is sent, as the controller does on a fault during motion [SPEC p.6].
+    pub fn inject_error(&mut self, code: u16, now: SimTime) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.halt(now);
+        self.error = code;
+        push_err(&mut out, code);
+        out
+    }
+
+    /// The green start button. During a cut the controller sends 0x07 [GMC];
+    /// otherwise input I221 reads `1` once.
+    pub fn press_start_button(&mut self) -> Vec<u8> {
+        self.start_button_latched = true;
+        if self.mode == 2 && self.is_moving() { vec![0x07] } else { Vec::new() }
+    }
+
+    pub fn set_input(&mut self, input: u8, value: bool) {
+        self.inputs.insert(input, value);
+    }
+
+    // ------------------------------------------------------------------ host input
+
+    /// Process one line from the host (without CR). Returns bytes to send back.
+    pub fn handle_line(&mut self, line: &str, now: SimTime) -> Vec<u8> {
+        self.received.push(line.to_owned());
+        self.last_host = now;
+        let mut out = self.tick(now);
+
+        if self.mode == 9 {
+            // File transfer (licence, firmware) is not emulated: only leaving mode 9 is.
+            if let Some(n) = line.strip_prefix("@M") {
+                self.set_mode(n, now, &mut out);
+            }
+            return out;
+        }
+        if line.starts_with('@') {
+            self.master(line, now, &mut out);
+        } else {
+            match self.mode {
+                0 => self.mode0(line, &mut out),
+                1 => self.mode1(line, now, &mut out),
+                2 => self.mode2(line, &mut out),
+                _ => push_err(&mut out, 1),
+            }
+        }
+        out
+    }
+
+    // ------------------------------------------------------------------ master commands
+
+    fn master(&mut self, line: &str, now: SimTime, out: &mut Vec<u8>) {
+        let body = &line[1..];
+        let mut chars = body.chars();
+        let Some(key) = chars.next() else { return push_err(out, 29) };
+        let arg = chars.as_str();
+        match (key, arg) {
+            ('V', "") => {
+                let v = self.cfg.version.clone();
+                push_line(out, &v);
+            }
+            ('V', "7") => push_line(out, "@V000000000/"), // [CAP g_init]
+            ('V', "8") => push_line(out, "@V0"),          // [CAP g_init]
+            ('M', "") => push_line(out, &format!("@M0{}", self.mode)),
+            ('M', n) => self.set_mode(n, now, out),
+            ('X', "") => {
+                let s = self.status_line(now);
+                push_line(out, &s);
+            }
+            ('Y', "") => push_line(out, "@Y4000"), // machine ready, no switches active
+            ('E', "") => push_line(out, &format!("@E{}", self.error)),
+            ('L', a) | ('P', a) if a.len() == 1 => match axis_index(a.chars().next().unwrap_or('?')) {
+                Some((axis, true)) => {
+                    let steps = self.position_at(now)[axis];
+                    let v = if key == 'L' { steps } else { (steps as f64 * 1000.0 / self.cfg.steps_per_mm) as i64 };
+                    push_line(out, &format!("@{key}{a}{v}"));
+                }
+                _ => push_err(out, 12),
+            },
+            ('B', "") => self.brake(now, out),
+            ('S', "") => {
+                self.halt(now);
+                self.homed = false; // positions lost [SPEC p.13]
+                push_ack(out);
+            }
+            ('N', "") => push_line(out, &format!("@N{}", self.command_counter)),
+            ('N', n) => match n.parse() {
+                Ok(v) => {
+                    self.command_counter = v;
+                    push_ack(out);
+                }
+                Err(_) => push_err(out, 3),
+            },
+            ('H', "") => {
+                let pct = self.queued_bytes * 100 / self.cfg.buffer_capacity.max(1);
+                push_line(out, &format!("@H{pct}"));
+            }
+            ('I', n) => match n.parse::<u8>() {
+                Ok(n) => {
+                    let mut v = self.inputs.get(&n).copied().unwrap_or(false);
+                    if n == 221 && self.start_button_latched {
+                        v = true;
+                        self.start_button_latched = false;
+                    }
+                    push_line(out, &format!("@I{n},{}", u8::from(v)));
+                }
+                Err(_) => push_err(out, 3),
+            },
+            ('Q', q) => match q.split_once(',') {
+                Some((_, _)) => push_ack(out),
+                None => push_line(out, &format!("@Q{q},0")),
+            },
+            ('D', flags) => match parse_hex_u8(flags) {
+                Some(f) => {
+                    if f & 1 != 0 {
+                        self.homed = true;
+                    }
+                    push_ack(out);
+                }
+                None => push_err(out, 3),
+            },
+            ('O', "") => push_line(out, &format!("@O{}", self.override_pct)),
+            ('O', pct) => match pct.parse::<u32>() {
+                Ok(p) if (10..=200).contains(&p) => {
+                    self.override_pct = p;
+                    push_ack(out);
+                }
+                _ => push_err(out, 55),
+            },
+            ('R', "") => {
+                // Restart: no reply [SPEC p.14].
+                let cfg = self.cfg.clone();
+                let received = std::mem::take(&mut self.received);
+                *self = SimCore::new(cfg);
+                self.received = received;
+            }
+            // `@@`: not in the spec; the 601 acks it [CAP g_init]. Modelled as "clear error".
+            ('@', "") => {
+                self.error = 0;
+                push_ack(out);
+            }
+            _ => push_err(out, 29),
+        }
+    }
+
+    fn set_mode(&mut self, n: &str, now: SimTime, out: &mut Vec<u8>) {
+        let mode = match n {
+            "0" => 0,
+            "1" => 1,
+            "2" => 2,
+            "9" => 9,
+            _ => return push_err(out, 27),
+        };
+        if self.is_moving() {
+            return push_err(out, 28);
+        }
+        if mode == 2 && !self.homed {
+            return push_err(out, 41);
+        }
+        if mode == 2 && self.mode != 2 {
+            self.path_target = self.position_at(now);
+            self.path_speed = None;
+        }
+        self.mode = mode;
+        push_ack(out);
+    }
+
+    fn brake(&mut self, now: SimTime, out: &mut Vec<u8>) {
+        let was_moving = self.is_moving();
+        let homing = self.homing.is_some();
+        self.halt(now);
+        if homing {
+            self.homed = false;
+        }
+        push_ack(out);
+        if was_moving && self.c_on(5) {
+            out.push(0x01);
+        }
+    }
+
+    /// Stop everything at the current position.
+    fn halt(&mut self, now: SimTime) {
+        self.pos = self.position_at(now);
+        self.motion = None;
+        self.homing = None;
+        self.queue.clear();
+        self.queued_bytes = 0;
+        self.dead_until = None;
+        self.path_target = self.pos;
+        self.free_at = now;
+    }
+
+    // ------------------------------------------------------------------ mode 0
+
+    fn mode0(&mut self, line: &str, out: &mut Vec<u8>) {
+        let Some(rest) = line.strip_prefix('#') else {
+            return match line.strip_prefix('&') {
+                Some(q) => self.query(q, out),
+                None => push_err(out, 1),
+            };
+        };
+        let mut chars = rest.chars();
+        let Some(key) = chars.next() else { return push_err(out, 21) };
+        let arg = chars.as_str();
+        let num = |s: &str| s.trim_start_matches(',').parse::<i64>().ok();
+        let ok = match key {
+            'G' => split_entry(arg).and_then(|(g, v)| Some(self.speeds.insert(g, v.parse().ok()?))).is_some(),
+            'B' => split_entry(arg).and_then(|(g, v)| Some(self.brake_angles.insert(g, v.parse().ok()?))).is_some(),
+            'E' => split_entry(arg)
+                .and_then(|(g, v)| {
+                    let (speed, angle) = v.split_once(',')?;
+                    self.speeds.insert(g, speed.parse().ok()?);
+                    self.brake_angles.insert(g, angle.parse().ok()?);
+                    Some(())
+                })
+                .is_some(),
+            'M' => num(arg).map(|v| self.max_speed = v as u32).is_some(),
+            // `#R225` and the `#R,100` form both occur [CAP g_init].
+            'R' => num(arg).map(|v| self.ramp_ms = v as u32).is_some(),
+            'S' => num(arg).map(|v| self.start_speed = v as u32).is_some(),
+            'O' => match arg.split_once(',') {
+                Some((a, v)) => match (a.chars().next().and_then(axis_index), v.parse::<i64>()) {
+                    (Some((axis, _)), Ok(v)) => {
+                        self.offsets[axis] = v;
+                        true
+                    }
+                    _ => false,
+                },
+                None => false,
+            },
+            'Z' | 'N' | 'U' | 'Y' | 'D' => {
+                self.axis_params.insert(format!("{key}{arg}"), arg.to_owned());
+                arg.contains(',')
+            }
+            'I' | 'Q' => match arg.split_once(',') {
+                Some((n, def)) => match n.parse::<u8>() {
+                    Ok(n) => {
+                        self.input_defs.insert(n, def.to_owned());
+                        true
+                    }
+                    Err(_) => false,
+                },
+                None => false,
+            },
+            'H' => split_entry(arg).and_then(|(n, v)| Some(self.counters.insert(n, v.parse().ok()?))).is_some(),
+            'C' => {
+                let Some((n, v)) = arg.split_once(',') else { return push_err(out, 3) };
+                let Ok(n) = n.parse::<u16>() else { return push_err(out, 3) };
+                if n == 97 {
+                    self.clock = v.to_owned();
+                    true
+                } else if KNOWN_C.contains(&n) {
+                    match v.split(',').next().and_then(|v| v.parse::<i64>().ok()) {
+                        Some(v) => {
+                            self.c.insert(n, v);
+                            true
+                        }
+                        None => false,
+                    }
+                } else {
+                    return push_err(out, 21);
+                }
+            }
+            'P' | 'L' => match arg.split_once(',') {
+                Some((a, v)) => match (a.chars().next().and_then(axis_index), v.parse::<i64>()) {
+                    (Some((axis, _)), Ok(v)) => {
+                        let steps = if key == 'L' { v } else { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 };
+                        self.pos[axis] = steps;
+                        self.path_target[axis] = steps;
+                        true
+                    }
+                    _ => false,
+                },
+                None => false,
+            },
+            'W' => true,
+            'X' => return, // reload parameters: no reply [SPEC p.27]
+            _ => return push_err(out, 21),
+        };
+        if ok { push_ack(out) } else { push_err(out, 3) }
+    }
+
+    fn query(&mut self, q: &str, out: &mut Vec<u8>) {
+        let mut chars = q.chars();
+        let key = chars.next();
+        let arg = chars.as_str();
+        let reply = match key {
+            Some('C') => match arg.parse::<u16>() {
+                Ok(97) => format!("&C97,{}", self.clock),
+                Ok(n) if KNOWN_C.contains(&n) => format!("&C{n},{}", self.c_val(n)),
+                _ => return push_err(out, 21),
+            },
+            Some('G') => match arg.parse::<u8>() {
+                Ok(g) => format!("&G{g},{}", self.speeds.get(&g).copied().unwrap_or(self.cfg.default_speed)),
+                Err(_) => return push_err(out, 3),
+            },
+            Some('I') => match arg.parse::<u8>() {
+                Ok(n) => format!("&I{n},{}", self.input_defs.get(&n).map_or("000h,0,0", String::as_str)),
+                Err(_) => return push_err(out, 3),
+            },
+            Some('H') => match arg.parse::<u8>() {
+                Ok(n) => format!("&H{n},{}", self.counters.get(&n).copied().unwrap_or(0)),
+                Err(_) => return push_err(out, 3),
+            },
+            Some('M') => format!("&M{}", self.max_speed),
+            Some('R') => format!("&R{}", self.ramp_ms),
+            Some('S') => format!("&S{}", self.start_speed),
+            _ => return push_err(out, 21),
+        };
+        push_line(out, &reply);
+    }
+
+    // ------------------------------------------------------------------ mode 1
+
+    fn mode1(&mut self, line: &str, now: SimTime, out: &mut Vec<u8>) {
+        let Some(rest) = line.strip_prefix('$') else { return push_err(out, 1) };
+        let mut chars = rest.chars();
+        let Some(key) = chars.next() else { return push_err(out, 31) };
+        let arg = chars.as_str();
+        match key {
+            'H' => {
+                if self.is_moving() {
+                    return push_err(out, 30);
+                }
+                let axes: Option<Vec<usize>> = arg.chars().map(|c| axis_index(c).map(|(a, _)| a)).collect();
+                match axes {
+                    Some(axes) if !axes.is_empty() => {
+                        self.error = 0;
+                        self.homed = false;
+                        self.homing =
+                            Some(Homing { axes, index: 0, axis_end: now + self.homing_duration() });
+                        push_ack(out);
+                    }
+                    _ => push_err(out, 12),
+                }
+            }
+            'L' | 'E' => {
+                if self.is_moving() {
+                    return push_err(out, 30);
+                }
+                let Some((g, vals)) = split_entry(arg) else { return push_err(out, 3) };
+                let Some(vals) = parse_axis_values(vals) else { return push_err(out, 3) };
+                let from = self.pos;
+                let mut to = from;
+                for (axis, abs, v) in vals {
+                    let steps = if key == 'L' || axis == Z { v } else { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 };
+                    to[axis] = if abs { steps } else { from[axis] + steps };
+                }
+                self.start_motion(from, to, g, Kind::Jog, now);
+                push_ack(out);
+            }
+            'C' => {
+                if arg.is_empty() {
+                    self.pos = [0; 3];
+                } else if let Some((axis, _)) = arg.chars().next().and_then(axis_index) {
+                    self.pos[axis] = 0;
+                } else {
+                    return push_err(out, 12);
+                }
+                self.path_target = self.pos;
+                push_ack(out);
+            }
+            'B' => self.brake(now, out),
+            'S' => {
+                self.halt(now);
+                self.homed = false;
+                push_ack(out);
+            }
+            'A' => match parse_hex_u8(arg) {
+                Some(bits) => {
+                    self.outputs = bits;
+                    push_ack(out);
+                }
+                None => push_err(out, 46),
+            },
+            'D' | 'W' => push_ack(out),
+            _ => push_err(out, 31),
+        }
+    }
+
+    fn homing_duration(&self) -> Duration {
+        if self.cfg.instant_motion { Duration::ZERO } else { self.cfg.homing_time_per_axis }
+    }
+
+    // ------------------------------------------------------------------ mode 2
+
+    fn mode2(&mut self, line: &str, out: &mut Vec<u8>) {
+        let Some(first) = line.chars().next() else { return };
+        let item = match first {
+            'L' | 'V' => {
+                let Some((g, vals)) = split_entry(&line[1..]) else { return push_err(out, 3) };
+                self.path_speed = Some(g);
+                match self.vector_target(vals, first == 'V') {
+                    Some(target) => Item::Vector { target, speed: g },
+                    None => return push_err(out, 3),
+                }
+            }
+            'X' | 'Y' | 'Z' | 'x' | 'y' | 'z' => {
+                let Some(g) = self.path_speed else { return push_err(out, 2) };
+                match self.vector_target(line, false) {
+                    Some(target) => Item::Vector { target, speed: g },
+                    None => return push_err(out, 3),
+                }
+            }
+            'A' => match parse_hex_u8(&line[1..]) {
+                Some(bits) => Item::Outputs(bits),
+                None => return push_err(out, 46),
+            },
+            'W' => match line[1..].parse::<u64>() {
+                Ok(ms) => Item::Dwell(Duration::from_millis(ms)),
+                Err(_) => return push_err(out, 45),
+            },
+            'G' => {
+                match split_entry(&line[1..]).and_then(|(g, v)| Some((g, v.parse::<u32>().ok()?))) {
+                    Some((g, v)) => {
+                        self.speeds.insert(g, v);
+                    }
+                    None => push_err(out, 4),
+                }
+                return;
+            }
+            'C' | 'D' | 'I' => return, // one-shot flags, spindle, wait-for-input: accepted, not modelled
+            _ => return push_err(out, 31),
+        };
+        let bytes = line.len() + 1;
+        if self.queued_bytes + bytes > self.cfg.buffer_capacity {
+            return push_err(out, 22); // buffer overrun: "Speicher zu klein"
+        }
+        if let Item::Vector { target, .. } = &item {
+            self.path_target = *target;
+        }
+        self.queue.push_back(Queued { item, bytes });
+        self.queued_bytes += bytes;
+        if self.c_on(7) && !self.flow_paused && self.cfg.buffer_capacity - self.queued_bytes < 200 {
+            self.flow_paused = true;
+            out.push(0x03); // ~200 chars before full [SPEC p.5]
+        }
+    }
+
+    fn vector_target(&self, vals: &str, micrometres: bool) -> Option<[i64; 3]> {
+        let mut target = self.path_target;
+        for (axis, abs, v) in parse_axis_values(vals)? {
+            let steps =
+                if micrometres && axis != Z { (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64 } else { v };
+            target[axis] = if abs { steps } else { target[axis] + steps };
+        }
+        Some(target)
+    }
+
+    // ------------------------------------------------------------------ time
+
+    fn start_motion(&mut self, from: [i64; 3], to: [i64; 3], speed: u8, kind: Kind, now: SimTime) {
+        // A jog of ≥ 999999 is "run until stopped" [SPEC p.30; CAP g_motions `$L20,x-999999`].
+        // Even with instant motion it must keep running until braked.
+        let endless = kind == Kind::Jog && (0..3).any(|a| (to[a] - from[a]).abs() >= ENDLESS_JOG);
+        let mut to = to;
+        let mut limit_error = None;
+        for (axis, (lo, hi)) in self.cfg.envelope.iter().enumerate() {
+            // Error numbers per axis: minus = 32 + 2·axis, plus = 33 + 2·axis [SPEC p.37–38]
+            let base = 32 + 2 * axis as u16;
+            if to[axis] < *lo {
+                to[axis] = *lo;
+                limit_error = Some(base);
+            } else if to[axis] > *hi {
+                to[axis] = *hi;
+                limit_error = Some(base + 1);
+            }
+        }
+        let duration = if endless && self.cfg.instant_motion {
+            Duration::from_secs(3600)
+        } else {
+            self.move_duration(from, to, speed)
+        };
+        self.motion = Some(Motion { from, to, start: now, end: now + duration, kind, limit_error });
+    }
+
+    fn move_duration(&self, from: [i64; 3], to: [i64; 3], speed: u8) -> Duration {
+        if self.cfg.instant_motion {
+            return Duration::ZERO;
+        }
+        let d = |a: usize| (to[a] - from[a]) as f64;
+        let xy = d(X).hypot(d(Y));
+        let distance = if xy > 0.0 { xy } else { d(Z).abs() };
+        if distance == 0.0 {
+            return Duration::ZERO;
+        }
+        let speed = f64::from(self.speeds.get(&speed).copied().unwrap_or(self.cfg.default_speed).max(1))
+            * f64::from(self.override_pct)
+            / 100.0;
+        Duration::from_secs_f64(distance / speed) + Duration::from_millis(u64::from(self.ramp_ms))
+    }
+
+    /// Advance the model to `now`. Returns bytes the controller sends on its own (signals,
+    /// fault messages).
+    pub fn tick(&mut self, now: SimTime) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        // Host watchdog [SPEC p.25]: abort motion if the host is silent too long.
+        let watchdog = self.c_val(19);
+        if watchdog > 0
+            && self.is_moving()
+            && now.saturating_sub(self.last_host) > Duration::from_millis(watchdog as u64)
+        {
+            self.halt(now);
+            self.error = 68;
+            push_err(&mut out, 68);
+        }
+
+        let positioned_signal = self.c_on(5);
+        let homing_done_signal = self.c_on(6);
+        let homing_step = self.homing_duration();
+        let dead_time = if self.cfg.instant_motion {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(self.c_val(1).max(0) as u64)
+        };
+
+        loop {
+            let mut progressed = false;
+
+            if let Some(h) = &mut self.homing {
+                if now >= h.axis_end {
+                    let axis = h.axes[h.index];
+                    self.pos[axis] = self.offsets[axis];
+                    self.path_target[axis] = self.pos[axis];
+                    if positioned_signal {
+                        out.extend_from_slice(&[0x01, 0x01]); // seek + release [CAP g_init]
+                    }
+                    h.index += 1;
+                    if h.index < h.axes.len() {
+                        h.axis_end += homing_step;
+                    } else {
+                        self.free_at = h.axis_end;
+                        self.homing = None;
+                        self.homed = true;
+                        if homing_done_signal {
+                            out.push(0x04);
+                        }
+                    }
+                    progressed = true;
+                }
+            }
+
+            if let Some(m) = &self.motion {
+                if now >= m.end {
+                    let m = m.clone();
+                    self.pos = m.to;
+                    self.free_at = m.end;
+                    self.motion = None;
+                    if let Some(code) = m.limit_error {
+                        self.halt(now);
+                        self.error = code;
+                        push_err(&mut out, code);
+                    } else if m.kind == Kind::Jog && positioned_signal {
+                        out.push(0x01);
+                    }
+                    progressed = true;
+                }
+            }
+
+            if self.motion.is_none() && self.homing.is_none() && !self.queue.is_empty() {
+                let free_at = self.free_at;
+                let start_at = (*self.dead_until.get_or_insert(free_at.max(now) + dead_time)).max(free_at);
+                if now >= start_at {
+                    if let Some(q) = self.queue.pop_front() {
+                        self.queued_bytes -= q.bytes;
+                        self.command_counter += 1;
+                        match q.item {
+                            Item::Vector { target, speed } => {
+                                let from = self.pos;
+                                self.start_motion(from, target, speed, Kind::Path, start_at);
+                            }
+                            Item::Outputs(bits) => self.outputs = bits,
+                            Item::Dwell(d) => {
+                                let d = if self.cfg.instant_motion { Duration::ZERO } else { d };
+                                self.motion = Some(Motion {
+                                    from: self.pos,
+                                    to: self.pos,
+                                    start: start_at,
+                                    end: start_at + d,
+                                    kind: Kind::Dwell,
+                                    limit_error: None,
+                                });
+                            }
+                        }
+                        progressed = true;
+                    }
+                }
+            }
+
+            if !progressed {
+                break;
+            }
+        }
+
+        if self.motion.is_none() && self.queue.is_empty() {
+            self.dead_until = None; // the path has ended; the next one waits #C1 again
+        }
+        if self.flow_paused && self.queued_bytes <= self.cfg.buffer_capacity / 2 {
+            self.flow_paused = false;
+            out.push(0x02);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|&b| if (0x20..0x7f).contains(&b) { (b as char).to_string() } else { format!("<{b:02x}>") })
+            .collect()
+    }
+
+    /// Send `line` at time `t`, return the reply as text (CR shown as <0d>).
+    fn send(core: &mut SimCore, line: &str, t: u64) -> String {
+        text(&core.handle_line(line, ms(t)))
+    }
+
+    fn homed() -> SimCore {
+        SimCore::new(SimConfig { homed_at_start: true, ..SimConfig::default() })
+    }
+
+    #[test]
+    fn status_sequence_after_a_vector_matches_captures() {
+        // [CAP g_regular_mount]: after L20 the controller reports 15 (dead time), 14, then 04.
+        let mut c = homed();
+        for (cmd, t) in [("#C1,100", 0), ("#G20,4000", 0), ("@M2", 0), ("L20,X400,Y0,Z0", 0)] {
+            send(&mut c, cmd, t);
+        }
+        assert_eq!(send(&mut c, "@X", 10), "@X15<0d>", "waiting out #C1 dead time");
+        assert_eq!(send(&mut c, "@X", 150), "@X14<0d>", "moving");
+        assert_eq!(send(&mut c, "@X", 300), "@X04<0d>", "400 steps @ 4000/s = 100 ms after 100 ms dead time");
+        assert_eq!(c.snapshot(ms(300)).position, [400, 0, 0]);
+    }
+
+    #[test]
+    fn homing_reports_18_then_signals() {
+        // [CAP g_init]: $Hz → CR; @X18 while homing; then 0x01 0x01 0x04.
+        let mut c = SimCore::new(SimConfig::default());
+        send(&mut c, "#C5,1", 0);
+        send(&mut c, "@M1", 0);
+        assert_eq!(send(&mut c, "$Hz", 0), "<0d>");
+        assert_eq!(send(&mut c, "@X", 100), "@X18<0d>");
+        assert_eq!(text(&c.tick(ms(3000))), "<01><01><04>");
+        assert_eq!(send(&mut c, "@X", 3001), "@X04<0d>");
+    }
+
+    #[test]
+    fn rules_from_spec_and_captures() {
+        let mut c = SimCore::new(SimConfig::default());
+        assert_eq!(send(&mut c, "#C52,800", 0), "*021<0d>", "[CAP g_init]");
+        assert_eq!(send(&mut c, "#C35,1", 0), "<0d>", "[CAP g_init]");
+        assert_eq!(send(&mut c, "#R,100", 0), "<0d>", "[CAP g_init]");
+        assert_eq!(send(&mut c, "@M2", 0), "*041<0d>", "mode 2 requires homing");
+        assert_eq!(send(&mut c, "$Hz", 0), "*001<0d>", "$ commands only in mode 1");
+        assert_eq!(send(&mut c, "@Q", 0), "@Q,0<0d>");
+        assert_eq!(send(&mut c, "@K", 0), "*029<0d>", "unknown master command");
+    }
+
+    #[test]
+    fn mode_change_only_at_standstill() {
+        let mut c = homed();
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,x4000", 0);
+        assert_eq!(send(&mut c, "@M0", 10), "*028<0d>");
+        assert_eq!(send(&mut c, "@M0", 2000), "<0d>");
+    }
+
+    #[test]
+    fn brake_mid_jog_keeps_position_and_signals() {
+        // [CAP g_motions]: $L20,x-999999 … @B → CR 0x01, then @LX reads where it stopped.
+        let mut c = homed();
+        send(&mut c, "#C5,1", 0);
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,x999999", 0);
+        assert_eq!(send(&mut c, "@B", 500), "<0d><01>");
+        let x = c.snapshot(ms(500)).position[X];
+        assert!((4000..=6000).contains(&x), "≈ 0.5 s at 10000 steps/s, got {x}");
+        assert_eq!(send(&mut c, "@LX", 600), format!("@LX{x}<0d>"));
+        assert!(c.snapshot(ms(600)).homed, "@B keeps the reference");
+    }
+
+    #[test]
+    fn emergency_stop_loses_reference() {
+        let mut c = homed();
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,x999", 0);
+        send(&mut c, "@S", 10);
+        assert!(!c.snapshot(ms(10)).homed);
+        assert_eq!(send(&mut c, "@X", 11), "@X00<0d>");
+    }
+
+    #[test]
+    fn limit_switch_stops_motion_with_error() {
+        let mut c = homed();
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,X70000", 0); // beyond the 60000 envelope
+        let out = text(&c.tick(ms(60_000)));
+        assert_eq!(out, "*033<0d>", "EENDP1");
+        let s = c.snapshot(ms(60_000));
+        assert_eq!((s.position[X], s.error, s.moving), (60_000, 33, false));
+        assert_eq!(send(&mut c, "@X", 60_001), "@X06<0d>", "error flag set");
+        assert_eq!(send(&mut c, "@@", 60_002), "<0d>");
+        assert_eq!(send(&mut c, "@X", 60_003), "@X04<0d>");
+    }
+
+    #[test]
+    fn flow_control_signals_and_overrun() {
+        let cfg = SimConfig { homed_at_start: true, buffer_capacity: 400, ..SimConfig::default() };
+        // Without #C7: no warning, overrun is *022.
+        let mut c = SimCore::new(cfg.clone());
+        send(&mut c, "@M2", 0);
+        let mut replies = String::new();
+        for i in 0..40 {
+            replies += &send(&mut c, &format!("L20,X{},Y0,Z0", i * 10), 0);
+        }
+        assert!(replies.contains("*022"), "overrun reported: {replies}");
+
+        // With #C7,1: 0x03 before full, 0x02 once drained to half.
+        let mut c = SimCore::new(cfg);
+        send(&mut c, "#C7,1", 0);
+        send(&mut c, "@M2", 0);
+        let mut replies = String::new();
+        for i in 0..16 { // ~240 bytes queued: inside the 200-byte warning zone, below 400
+            replies += &send(&mut c, &format!("L20,X{},Y0,Z0", i * 10), 0);
+        }
+        assert!(replies.contains("<03>") && !replies.contains("*022"), "{replies}");
+        assert_eq!(text(&c.tick(ms(5_000))), "<02>");
+    }
+
+    #[test]
+    fn host_watchdog_aborts_motion() {
+        let mut c = homed();
+        send(&mut c, "#C19,200", 0);
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$L20,x999999", 0);
+        assert_eq!(text(&c.tick(ms(150))), "", "host still within 200 ms");
+        assert_eq!(text(&c.tick(ms(250))), "*068<0d>", "no host byte for > 200 ms");
+        assert!(!c.snapshot(ms(250)).moving);
+    }
+
+    #[test]
+    fn start_button() {
+        let mut c = homed();
+        assert_eq!(send(&mut c, "@I221", 0), "@I221,0<0d>");
+        c.press_start_button();
+        assert_eq!(send(&mut c, "@I221", 1), "@I221,1<0d>");
+        assert_eq!(send(&mut c, "@I221", 2), "@I221,0<0d>", "reads 1 once");
+
+        send(&mut c, "@M2", 3);
+        send(&mut c, "L20,X100000,Y0,Z0", 3);
+        c.tick(ms(500));
+        assert_eq!(c.press_start_button(), vec![0x07], "0x07 during a cut");
+    }
+}

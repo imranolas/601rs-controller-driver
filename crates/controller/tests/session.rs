@@ -65,7 +65,7 @@ fn cfg() -> Config {
         reply_timeout: Duration::from_millis(200),
         poll_interval: Duration::from_millis(5),
         flow_timeout: Duration::from_millis(200),
-        quiet_period: Duration::from_millis(20),
+        ..Config::default()
     }
 }
 
@@ -95,7 +95,7 @@ fn connect_probes_reads_version_and_enters_mode_0() {
     let (link, fake) = fake(|l, _| standard(l));
     let (ctl, version) = connect(link, cfg()).expect("connect");
     assert_eq!(version, "@V2.00/55W 19.10.10 2807001");
-    assert_eq!(finish(ctl, fake), ["@X", "@V", "@M0"]);
+    assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0"]);
 }
 
 #[test]
@@ -114,9 +114,9 @@ fn typed_queries() {
 fn full_journey_through_the_modes() {
     let polls = AtomicUsize::new(0);
     let (link, fake) = fake(move |l, _| match l {
-        // connect probe, then 2× "homing in progress", then homed and idle
+        // 2× "homing in progress", then homed and idle
         "@X" => match polls.fetch_add(1, Ordering::SeqCst) {
-            1 | 2 => reply("@X18\r"),
+            0 | 1 => reply("@X18\r"),
             _ => reply("@X04\r"),
         },
         other => standard(other),
@@ -140,7 +140,7 @@ fn full_journey_through_the_modes() {
     assert_eq!(
         finish(params, fake),
         [
-            "@X", "@V", "@M0", // connect
+            "@I100", "@V", "@M0", // connect: unique resync probe, version, mode 0
             "@M1", "$Hxy", "@X", "@X", "@X", "$A42", // home + clamp
             "@M2", "L20,X9695,Y10775,Z774", "L20,X9695,Y2615,Z774", "@X", // stream, then wait
             "@M0", "#G20,36000",
@@ -163,7 +163,7 @@ fn rejected_command_keeps_pairing() {
     }
     ctl.status().expect("still in sync");
     // No resync was needed: the *021 *was* the reply.
-    assert_eq!(finish(ctl, fake), ["@X", "@V", "@M0", "#C19,500", "@X"]);
+    assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0", "#C19,500", "@X"]);
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn timeout_then_late_reply_is_resynced() {
     // GMC would now read "@LX44149" as the answer to whatever it sent next.
     let s = ctl.status().expect("status after resync");
     assert!(s.homed);
-    assert_eq!(finish(ctl, fake), ["@X", "@V", "@M0", "@LX", "@X", "@X"], "resync probe, then the real @X");
+    assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0", "@LX", "@I101", "@X"], "unique resync probe, then the real @X");
 }
 
 #[test]

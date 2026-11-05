@@ -199,9 +199,11 @@ impl<M: ModeMarker> Controller<M> {
         self.session.shared.bus.subscribe()
     }
 
-    /// After a stop: resynchronise with the controller and release the stop latch.
+    /// After a stop: resynchronise with the controller, release the stop latch and return
+    /// the current status.
     pub fn clear_stop(&mut self) -> Result<Status> {
-        self.session.clear_stop()
+        self.session.clear_stop()?;
+        self.status()
     }
 
     /// `@M<n>`: switch mode (the controller only allows this at standstill, else `*028`).
@@ -273,6 +275,12 @@ impl Controller<mode::Jog> {
     /// `$A<hh>`: set the auxiliary outputs (head/clamp bitmask).
     pub fn set_outputs(&mut self, bits: u8) -> Result<()> {
         self.ack(&Command::SetOutputs(bits))
+    }
+
+    /// `$L<entry>,<axis><steps>`: start jogging one axis. Returns when accepted; the motion
+    /// runs on. `steps = ±999_999` (relative) runs until [`Controller::brake`].
+    pub fn jog_steps(&mut self, speed_entry: u8, axis: Axis, steps: i32, relative: bool) -> Result<()> {
+        self.ack(&Command::JogSteps { speed_entry, axis, steps, relative })
     }
 }
 

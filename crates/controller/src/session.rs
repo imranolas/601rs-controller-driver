@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use link::{Link, Reader, Writer};
-use protocol::{Command, Decoder, Frame, Reply, Signal, Status};
+use protocol::{Command, Decoder, Frame, Reply, Signal, reply};
 
 use crate::event::{Bus, Event};
 use crate::{Config, ControllerError, Result};
@@ -18,6 +18,9 @@ use crate::{Config, ControllerError, Result};
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+/// Inputs used as unique resync probes. GMC and the 601 use 221 and 229–247 [SPEC p.10; SYS].
+const PROBE_INPUTS: std::ops::Range<u8> = 100..120;
 
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -71,6 +74,10 @@ pub(crate) struct Session {
     /// First unsolicited `*NNN` not yet reported to the caller.
     async_error: Option<u16>,
     closed: Option<String>,
+    /// Resync probes sent so far (selects the probe input).
+    probes: u8,
+    /// Mode-2 bytes streamed since the buffer level was last confirmed below high water.
+    streamed_since_check: usize,
 }
 
 impl fmt::Debug for Session {
@@ -107,6 +114,8 @@ impl Session {
             needs_resync: false,
             async_error: None,
             closed: None,
+            probes: 0,
+            streamed_since_check: 0,
         })
     }
 
@@ -221,9 +230,40 @@ impl Session {
         self.ensure_usable()?;
         self.drain_unsolicited()?;
         self.take_async_error()?;
+        let bytes = cmd.encode();
+        self.pace_by_buffer_level(bytes.len())?;
         self.wait_for_buffer_room()?;
-        self.shared.write(&cmd.encode())?;
+        self.shared.write(&bytes)?;
+        self.streamed_since_check += bytes.len();
         Ok(())
+    }
+
+    /// Host-side pacing: the 0x03 warning alone cannot stop a fast host in time (the OS serial
+    /// buffer alone can hold more than its 200-byte margin). So after every
+    /// `stream_window_bytes` streamed, ask `@H` (a master command, answered even when the
+    /// buffer is full) and wait while the buffer is above `stream_high_water_pct`.
+    fn pace_by_buffer_level(&mut self, next: usize) -> Result<()> {
+        let Some(window) = self.cfg.stream_window_bytes else { return Ok(()) };
+        if self.streamed_since_check + next <= window {
+            return Ok(());
+        }
+        let deadline = Instant::now() + self.cfg.flow_timeout;
+        loop {
+            let reply = self.request(&Command::BufferLevel, true)?;
+            let level = match &reply {
+                Reply::Value(v) => reply::parse_buffer_level(v),
+                _ => None,
+            };
+            let Some(level) = level else { return Err(self.unexpected(&Command::BufferLevel, &reply)) };
+            if level < self.cfg.stream_high_water_pct {
+                self.streamed_since_check = 0;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(ControllerError::FlowTimeout { timeout_ms: millis(self.cfg.flow_timeout) });
+            }
+            thread::sleep(self.cfg.poll_interval);
+        }
     }
 
     fn wait_for_buffer_room(&self) -> Result<()> {
@@ -249,48 +289,48 @@ impl Session {
 
     // ---------------------------------------------------------------- recovery
 
-    /// Re-establish reply pairing: wait until the line is quiet (discarding late replies),
-    /// then probe with `@X` and wait for a status reply.
-    pub(crate) fn resync(&mut self) -> Result<Status> {
+    /// Re-establish reply pairing.
+    ///
+    /// The controller answers strictly in order, so once the reply to a *unique* probe
+    /// arrives, every reply to anything sent earlier has arrived too. The probe reads an input
+    /// nothing else uses (`@I100`–`@I119`, rotating), so a stale reply can never be mistaken
+    /// for it, unlike a stale `@X04` answering an `@X` probe. Everything before the probe's
+    /// reply is discarded (and reported as unsolicited).
+    pub(crate) fn resync(&mut self) -> Result<()> {
         if let Some(why) = &self.closed {
             return Err(ControllerError::Disconnected(why.clone()));
         }
-        let give_up = Instant::now() + self.cfg.reply_timeout * 3;
-        while let Some(line) = self.recv(self.cfg.quiet_period)? {
-            self.unsolicited(line);
-            if Instant::now() >= give_up {
-                break;
-            }
-        }
+        let input = PROBE_INPUTS.start + self.probes % PROBE_INPUTS.len() as u8;
+        self.probes = self.probes.wrapping_add(1);
+        let probe = Command::ReadInput(input);
+        self.shared.write(&probe.encode())?;
 
-        self.shared.write(&Command::Status.encode())?;
         let deadline = Instant::now() + self.cfg.reply_timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let Some(line) = self.recv(remaining)? else {
                 self.needs_resync = true;
                 return Err(ControllerError::Timeout {
-                    command: Command::Status.to_string(),
+                    command: probe.to_string(),
                     timeout_ms: millis(self.cfg.reply_timeout),
                 });
             };
-            match Status::parse(&line) {
-                Some(status) => {
-                    self.needs_resync = false;
-                    return Ok(status);
-                }
-                None => self.unsolicited(line),
+            if reply::parse_input(&line, input).is_some() {
+                self.needs_resync = false;
+                self.streamed_since_check = 0;
+                return Ok(());
             }
+            self.unsolicited(line);
         }
     }
 
     /// Release the stop latch after resynchronising. Errors that arrived around the stop
     /// have already been delivered as `Event::Unsolicited` and are not reported again.
-    pub(crate) fn clear_stop(&mut self) -> Result<Status> {
-        let status = self.resync()?;
+    pub(crate) fn clear_stop(&mut self) -> Result<()> {
+        self.resync()?;
         self.async_error = None;
         self.shared.stopped.store(false, Ordering::SeqCst);
-        Ok(status)
+        Ok(())
     }
 }
 

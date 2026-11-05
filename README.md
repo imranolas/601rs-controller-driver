@@ -16,7 +16,9 @@ machine     SAFE operations: mm/deg, homed?, head state, soft limits, cut-as-a-u
 controller  VALID commands: one outstanding at a time, matched replies + deadlines,
             mode tracking (typestate), stop lane, async signals
 protocol    pure codec: Command → bytes, bytes → Frame/Reply. No I/O, no clock.
-link        Port trait: serial | simulator (todo) | capture replay
+link        Reader/Writer halves: serial port | in-memory pair; capture reader
+sim         controller simulator behind an in-memory link (tests, dry runs); checked
+            against every GMC capture by the fidelity test
 
 program     the Program format: types, parsing, validation (used by runner and apps)
 gunnar      CLI (currently: decode GMC serial captures)
