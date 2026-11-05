@@ -1,0 +1,16 @@
+[package]
+name = "controller"
+description = "Session with the controller: valid commands only, one at a time, matched replies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+protocol.workspace = true
+link.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

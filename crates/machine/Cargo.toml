@@ -1,0 +1,15 @@
+[package]
+name = "machine"
+description = "Safe machine operations in mm/deg on top of the controller session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+controller.workspace = true
+protocol.workspace = true
+
+[lints]
+workspace = true

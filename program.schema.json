@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/gunnar-program/v1.schema.json",
+  "title": "Gunnar 601rs program v1 (draft)",
+  "description": "One compiled machine run for one board. See PROGRAM_FORMAT.md. Rules V4, V5, V7, V8 and V10 need code-level validation beyond this schema.",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "id",
+    "board",
+    "material",
+    "ops"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "gunnar-program"
+    },
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "meta": {
+      "type": "object"
+    },
+    "board": {
+      "type": "object",
+      "required": [
+        "width_mm",
+        "height_mm",
+        "thickness_mm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "width_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "thickness_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "material": {
+      "type": "object",
+      "required": [
+        "name",
+        "speed_pct",
+        "head_settle_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "speed_pct": {
+          "$ref": "#/$defs/speed_pct"
+        },
+        "head_settle_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "blade_angle_offset_deg": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "straight": {
+              "type": "number"
+            },
+            "bevel": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/op_clamp"
+          },
+          {
+            "$ref": "#/$defs/op_cut"
+          },
+          {
+            "$ref": "#/$defs/op_move"
+          },
+          {
+            "$ref": "#/$defs/op_pause"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "speed_pct": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "point_mm": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "op_clamp": {
+      "type": "object",
+      "required": [
+        "op",
+        "side"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "clamp"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "left",
+            "right",
+            "both",
+            "none"
+          ]
+        }
+      }
+    },
+    "op_cut": {
+      "type": "object",
+      "required": [
+        "op",
+        "head",
+        "path_mm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "cut"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "head": {
+          "enum": [
+            "straight",
+            "bevel"
+          ]
+        },
+        "path_mm": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/point_mm"
+          }
+        },
+        "speed_pct": {
+          "$ref": "#/$defs/speed_pct"
+        }
+      }
+    },
+    "op_move": {
+      "type": "object",
+      "required": [
+        "op",
+        "to_mm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "move"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "to_mm": {
+          "$ref": "#/$defs/point_mm"
+        }
+      }
+    },
+    "op_pause": {
+      "type": "object",
+      "required": [
+        "op",
+        "message",
+        "resume"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "pause"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resume": {
+          "enum": [
+            "start_button",
+            "operator"
+          ]
+        }
+      }
+    }
+  }
+}

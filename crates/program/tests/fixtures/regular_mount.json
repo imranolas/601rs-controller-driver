@@ -1,0 +1,30 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "example-regular-mount",
+  "meta": { "source": "reconstruction of g_regular_mount capture" },
+  "board": { "width_mm": 200, "height_mm": 310, "thickness_mm": 1.5 },
+  "material": { "name": "MSK_1.5", "speed_pct": 95, "head_settle_ms": 250,
+                "blade_angle_offset_deg": { "straight": 3, "bevel": 3 } },
+  "ops": [
+    { "op": "clamp", "side": "left" },
+
+    { "op": "cut", "id": "o1-l", "label": "Opening — left",   "head": "bevel",
+      "path_mm": [[50, 261.35], [50, 58.65]] },
+    { "op": "cut", "id": "o1-b", "label": "Opening — bottom", "head": "bevel",
+      "path_mm": [[48.65, 60], [151.35, 60]] },
+    { "op": "cut", "id": "o1-r", "label": "Opening — right",  "head": "bevel",
+      "path_mm": [[150, 58.65], [150, 261.35]] },
+    { "op": "cut", "id": "o1-t", "label": "Opening — top",    "head": "bevel",
+      "path_mm": [[151.35, 260], [48.65, 260]] },
+
+    { "op": "cut", "id": "e-l", "label": "Outer — left",   "head": "straight",
+      "path_mm": [[0, 310], [0, 0]] },
+    { "op": "cut", "id": "e-b", "label": "Outer — bottom", "head": "straight",
+      "path_mm": [[0, 0], [200, 0]] },
+    { "op": "cut", "id": "e-r", "label": "Outer — right",  "head": "straight",
+      "path_mm": [[200, 0], [200, 310]] },
+    { "op": "cut", "id": "e-t", "label": "Outer — top",    "head": "straight",
+      "path_mm": [[200, 310], [0, 310]] }
+  ]
+}

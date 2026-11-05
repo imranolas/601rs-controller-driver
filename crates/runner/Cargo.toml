@@ -1,0 +1,15 @@
+[package]
+name = "runner"
+description = "Executes a validated program on the machine; pause, stop-now, progress events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+machine.workspace = true
+program.workspace = true
+
+[lints]
+workspace = true
