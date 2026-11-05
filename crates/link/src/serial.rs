@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
-use crate::Port;
+use crate::{Link, Reader, Writer};
 
 pub const DEFAULT_BAUD: u32 = 115_200;
 
@@ -26,48 +26,48 @@ impl SerialConfig {
     }
 }
 
-pub struct SerialPort {
-    inner: Box<dyn serialport::SerialPort>,
+/// Open the port and split it into independent reader and writer halves.
+pub fn open(cfg: &SerialConfig) -> serialport::Result<Link> {
+    let mut port = serialport::new(&cfg.path, cfg.baud)
+        .data_bits(DataBits::Eight)
+        .parity(Parity::None)
+        .stop_bits(StopBits::One)
+        .flow_control(FlowControl::None)
+        .timeout(cfg.read_timeout)
+        .open()?;
+    port.write_data_terminal_ready(true)?;
+    port.write_request_to_send(true)?;
+    let reader = port.try_clone()?;
+    Ok(Link {
+        name: cfg.path.clone(),
+        reader: Box::new(SerialReader(reader)),
+        writer: Box::new(SerialWriter(port)),
+    })
 }
 
-impl std::fmt::Debug for SerialPort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SerialPort").field("name", &self.inner.name()).finish()
-    }
+/// Candidate port names on this OS (e.g. `/dev/cu.usbserial-*`, `COM4`).
+pub fn available() -> Vec<String> {
+    serialport::available_ports()
+        .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
+        .unwrap_or_default()
 }
 
-impl SerialPort {
-    pub fn open(cfg: &SerialConfig) -> serialport::Result<Self> {
-        let mut inner = serialport::new(&cfg.path, cfg.baud)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::None)
-            .stop_bits(StopBits::One)
-            .flow_control(FlowControl::None)
-            .timeout(cfg.read_timeout)
-            .open()?;
-        inner.write_data_terminal_ready(true)?;
-        inner.write_request_to_send(true)?;
-        Ok(Self { inner })
-    }
+struct SerialReader(Box<dyn serialport::SerialPort>);
 
-    /// Candidate port names on this OS (e.g. `/dev/cu.usbserial-*`, `COM4`).
-    pub fn available() -> Vec<String> {
-        serialport::available_ports()
-            .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
-            .unwrap_or_default()
-    }
-}
-
-impl Port for SerialPort {
-    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.inner.write_all(bytes)?;
-        self.inner.flush()
-    }
-
+impl Reader for SerialReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.inner.read(buf) {
+        match self.0.read(buf) {
             Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(0),
             other => other,
         }
+    }
+}
+
+struct SerialWriter(Box<dyn serialport::SerialPort>);
+
+impl Writer for SerialWriter {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.write_all(bytes)?;
+        self.0.flush()
     }
 }

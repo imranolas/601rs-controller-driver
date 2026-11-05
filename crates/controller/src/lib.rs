@@ -1,54 +1,80 @@
-//! The **valid** layer: a session with the controller that sends only well-formed commands
-//! that are allowed in the current mode.
+//! The **valid** layer: a session with the CNC-Control controller that sends only
+//! well-formed commands, only in the mode that accepts them.
 //!
-//! Responsibilities (to implement):
-//! - Own the [`link::Port`]: one reader thread that decodes frames ([`protocol::Decoder`])
-//!   and one writer.
-//! - **One outstanding command** in modes 0/1, its reply matched before the next is sent,
-//!   every wait bounded by a deadline that returns an explicit error (never "carry on").
-//! - **Mode as a type** (typestate): `Controller<Parameters>`, `Controller<Jog>`,
-//!   `Controller<Cutting>`; methods exist only in the mode that accepts them.
-//! - Mode-2 streaming without per-command replies; flow control via
-//!   `Signal::BufferAlmostFull`/`BufferResume` or `@H`.
-//! - **Stop lane**: `@B`/`@S` bypass the queue and can be triggered from any thread
-//!   ([`StopHandle`]).
-//! - Surface async signals (positioned, homing done, start button) as events.
+//! What this layer guarantees:
+//! - **One outstanding command.** A command expecting a reply is matched with *its* reply
+//!   before anything else is sent. Every wait has a deadline that ends in an explicit
+//!   [`ControllerError`], never in "carry on".
+//! - **Resync.** After a timeout or an unexpected reply, the next operation first
+//!   re-establishes reply pairing (drain, then `@X` probe). GMC never did this.
+//! - **Mode as a type.** [`Controller<M>`] only has the methods its mode accepts; switching
+//!   mode consumes the controller and returns one in the new mode.
+//! - **Stop lane.** A [`StopHandle`] brakes (`@B`) or emergency-stops (`@S`) from any thread,
+//!   bypassing anything in progress. A stop **latches**: every operation fails with
+//!   [`ControllerError::Stopped`] until [`Controller::clear_stop`] is called.
+//! - **Mode-2 streaming** without per-command replies, honouring the controller's
+//!   0x03/0x02 buffer signals when enabled (`#C7,1`).
+//! - **Errors are never swallowed.** `*NNN` arriving while nobody asked (e.g. a limit switch
+//!   during a cut) is reported by the next operation as [`ControllerError::AsyncError`].
 //!
-//! Nothing here knows about millimetres, heads or programs; that is `machine`.
+//! Nothing here knows about millimetres, heads or programs; that is the `machine` crate.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use controller::{Axis, Config, connect};
+//!
+//! let link = link::serial::open(&link::serial::SerialConfig::new("/dev/cu.usbserial-1"))?;
+//! let (ctl, version) = connect(link, Config::default())?;     // Controller<Parameters>
+//! println!("controller {version}");
+//! let mut jog = ctl.into_jog().map_err(|e| e.error)?;        // Controller<Jog>
+//! jog.home(&[Axis::Z])?;
+//! jog.wait_idle(Duration::from_secs(60))?;
+//! # Ok(()) }
+//! ```
+//!
+//! Commands are only available in the right mode. This does not compile:
+//!
+//! ```compile_fail
+//! fn cut_in_parameter_mode(c: &mut controller::Controller<controller::mode::Parameters>) {
+//!     let _ = c.vector(20, 0, 0, 0); // vector() exists only on Controller<mode::Cutting>
+//! }
+//! ```
 
-use std::marker::PhantomData;
+mod error;
+mod event;
+mod session;
+mod stop;
+mod typed;
 
-/// Typestate markers for the controller mode.
-pub mod mode {
-    #[derive(Debug)]
-    pub struct Parameters;
-    #[derive(Debug)]
-    pub struct Jog;
-    #[derive(Debug)]
-    pub struct Cutting;
-}
+use std::time::Duration;
 
-/// A connected controller in mode `M`. Construction and methods to follow.
-#[derive(Debug)]
-pub struct Controller<M> {
-    _mode: PhantomData<M>,
-}
+pub use error::{ControllerError, Result};
+pub use event::{Event, StopKind};
+pub use protocol::{Axis, Mode, Signal, Status};
+pub use stop::StopHandle;
+pub use typed::{Controller, ModeMarker, ModeSwitchError, connect, mode};
 
-/// Cloneable handle that can brake or stop the machine from any thread, bypassing the
-/// command queue. To implement.
+/// Timing parameters of a session.
 #[derive(Debug, Clone)]
-pub struct StopHandle {
-    _private: (),
+pub struct Config {
+    /// Deadline for a reply to a single command.
+    pub reply_timeout: Duration,
+    /// Interval between `@X` polls while waiting for a condition.
+    pub poll_interval: Duration,
+    /// How long a mode-2 send may wait for the controller to signal buffer room (0x02).
+    pub flow_timeout: Duration,
+    /// Silence on the line that counts as "drained" during resync.
+    pub quiet_period: Duration,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ControllerError {
-    #[error("I/O on the link: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("no reply to `{command}` within {timeout_ms} ms")]
-    Timeout { command: String, timeout_ms: u64 },
-    #[error("controller rejected `{command}` with *{code:03}")]
-    Rejected { command: String, code: u16 },
-    #[error("unexpected reply to `{command}`: {reply:?}")]
-    UnexpectedReply { command: String, reply: String },
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            reply_timeout: Duration::from_millis(1000),
+            poll_interval: Duration::from_millis(50),
+            flow_timeout: Duration::from_secs(10),
+            quiet_period: Duration::from_millis(100),
+        }
+    }
 }

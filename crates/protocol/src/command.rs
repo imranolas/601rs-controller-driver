@@ -37,7 +37,7 @@ pub enum Axis {
 }
 
 impl Axis {
-    const fn upper(self) -> char {
+    pub const fn upper(self) -> char {
         match self {
             Axis::X => 'X',
             Axis::Y => 'Y',
@@ -71,6 +71,10 @@ pub enum Command {
     PositionSteps(Axis),
     /// `@I<n>`: read logical input (e.g. 221 = start button).
     ReadInput(u8),
+    /// `@E`: current error code (0 = none), same numbering as `*NNN` [SPEC p.13].
+    ErrorCode,
+    /// `@H`: interface buffer fill level in percent [SPEC p.15].
+    BufferLevel,
 
     // ---- mode 1 (`$`) [SPEC p.29–31] ----
     /// `$H<axes>`: home the axes in the given order.
@@ -85,6 +89,14 @@ pub enum Command {
     SetRampMs(u16),
     /// `#C1,<ms>`: mode-2 dead time before a path starts.
     SetDeadTimeMs(u16),
+    /// `#C5,<0|1>`: send 0x01 when a motion finishes [SPEC p.22].
+    SetPositionedSignal(bool),
+    /// `#C7,<0|1>`: 0x03/0x02 buffer flow-control bytes [SPEC p.22]. GMC never enables this,
+    /// so whoever enables it must disable it again before handing the machine back to GMC.
+    SetFlowControl(bool),
+    /// `#C19,<ms>`: host watchdog. The controller aborts motion if nothing arrives from the
+    /// host for this long; 0 disables it [SPEC p.25].
+    SetHostWatchdogMs(u16),
 
     // ---- mode 2 [SPEC p.31–34] ----
     /// `L<entry>,X<x>,Y<y>,Z<z>`: absolute vector in steps at speed-table entry.
@@ -97,9 +109,14 @@ impl Command {
         use Command::*;
         match self {
             Version | Status | SetMode(_) | Brake | EmergencyStop | PositionSteps(_)
-            | ReadInput(_) => None,
+            | ReadInput(_) | ErrorCode | BufferLevel => None,
             Home(_) | SetOutputs(_) => Some(Mode::Jog),
-            SetSpeed { .. } | SetRampMs(_) | SetDeadTimeMs(_) => Some(Mode::Parameters),
+            SetSpeed { .. }
+            | SetRampMs(_)
+            | SetDeadTimeMs(_)
+            | SetPositionedSignal(_)
+            | SetFlowControl(_)
+            | SetHostWatchdogMs(_) => Some(Mode::Parameters),
             Vector { .. } => Some(Mode::Cutting),
         }
     }
@@ -129,6 +146,8 @@ impl fmt::Display for Command {
             EmergencyStop => write!(f, "@S"),
             PositionSteps(a) => write!(f, "@L{}", a.upper()),
             ReadInput(n) => write!(f, "@I{n}"),
+            ErrorCode => write!(f, "@E"),
+            BufferLevel => write!(f, "@H"),
             Home(axes) => {
                 write!(f, "$H")?;
                 axes.iter().try_for_each(|a| write!(f, "{}", a.lower()))
@@ -137,6 +156,9 @@ impl fmt::Display for Command {
             SetSpeed { entry, value } => write!(f, "#G{entry},{value}"),
             SetRampMs(ms) => write!(f, "#R{ms}"),
             SetDeadTimeMs(ms) => write!(f, "#C1,{ms}"),
+            SetPositionedSignal(on) => write!(f, "#C5,{}", u8::from(*on)),
+            SetFlowControl(on) => write!(f, "#C7,{}", u8::from(*on)),
+            SetHostWatchdogMs(ms) => write!(f, "#C19,{ms}"),
             Vector { speed_entry, x, y, z } => write!(f, "L{speed_entry},X{x},Y{y},Z{z}"),
         }
     }
@@ -163,6 +185,11 @@ mod tests {
             (Command::SetSpeed { entry: 20, value: 36000 }, "#G20,36000\r"),
             (Command::SetRampMs(225), "#R225\r"),
             (Command::SetDeadTimeMs(100), "#C1,100\r"),
+            (Command::SetPositionedSignal(true), "#C5,1\r"),
+            (Command::SetFlowControl(false), "#C7,0\r"),
+            (Command::SetHostWatchdogMs(500), "#C19,500\r"),
+            (Command::ErrorCode, "@E\r"),
+            (Command::BufferLevel, "@H\r"),
             (
                 Command::Vector { speed_entry: 20, x: 9695, y: 10775, z: 774 },
                 "L20,X9695,Y10775,Z774\r",
