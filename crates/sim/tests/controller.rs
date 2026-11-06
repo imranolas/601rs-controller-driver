@@ -4,7 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use controller::{
-    Axis, Config, Controller, ControllerError, Event, Signal, StreamFlags, connect, mode,
+    Axis, Config, Controller, ControllerError, ErrorCode, Event, JogTarget, Level, LimitSwitch,
+    OverridePct, Setting, Side, Signal, SignalAcks, StreamFlags, WatchdogMs, connect, mode,
 };
 use sim::{Sim, SimConfig, spawn};
 
@@ -45,8 +46,12 @@ const LONG: Duration = Duration::from_secs(10);
 #[test]
 fn home_then_cut_a_rectangle() {
     let (mut p, sim) = start(SimConfig::default(), 20.0);
-    p.set_speed(20, 36_000).expect("#G20");
-    p.set_dead_time_ms(100).expect("#C1");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 36_000,
+    })
+    .expect("#G20");
+    p.set(Setting::DeadTimeMs(100)).expect("#C1");
 
     let mut jog = p.into_jog().expect("@M1");
     jog.home(&[Axis::Z]).expect("$Hz");
@@ -80,8 +85,12 @@ fn home_then_cut_a_rectangle() {
 #[test]
 fn status_shows_the_dead_time_then_motion() {
     let (mut p, _sim) = start(homed(), 1.0);
-    p.set_dead_time_ms(300).expect("#C1");
-    p.set_speed(20, 4000).expect("#G20");
+    p.set(Setting::DeadTimeMs(300)).expect("#C1");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 4000,
+    })
+    .expect("#G20");
     let mut cut = p.into_cutting().expect("@M2");
     cut.vector(20, 400, 0, 0).expect("vector");
     let s = cut.status().expect("@X");
@@ -97,7 +106,7 @@ fn stop_handle_brakes_a_running_jog() {
     let (p, sim) = start(homed(), 1.0);
     let mut jog = p.into_jog().expect("@M1");
     let stop = jog.stop_handle();
-    jog.jog_steps(20, Axis::X, 999_999, true)
+    jog.jog_steps(20, Axis::X, JogTarget::By(JogTarget::UNTIL_BRAKED))
         .expect("endless jog");
     let stopper = thread::spawn(move || {
         thread::sleep(Duration::from_millis(150));
@@ -109,7 +118,10 @@ fn stop_handle_brakes_a_running_jog() {
     let s = jog.clear_stop().expect("clear_stop");
     assert!(!s.moving && s.homed, "braked, reference kept: {s:?}");
     let x = jog.position_steps(Axis::X).expect("@LX");
-    assert!(x > 0 && x < 999_999, "stopped part-way, at {x}");
+    assert!(
+        x > 0 && x < JogTarget::UNTIL_BRAKED,
+        "stopped part-way, at {x}"
+    );
     assert_eq!(sim.snapshot().position[0], i64::from(x));
 }
 
@@ -124,7 +136,10 @@ fn emergency_stop_requires_rehoming() {
     let err = p.into_cutting().expect_err("mode 2 needs homing");
     assert!(matches!(
         err.error,
-        ControllerError::Rejected { code: 41, .. }
+        ControllerError::Rejected {
+            code: ErrorCode(41),
+            ..
+        }
     ));
 }
 
@@ -154,8 +169,12 @@ fn pacing_lets_a_long_curve_through_a_small_buffer() {
         20.0,
         paced,
     );
-    p.set_flow_control(true).expect("#C7,1");
-    p.set_speed(20, 40_000).expect("#G20");
+    p.set(Setting::FlowControl(true)).expect("#C7,1");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 40_000,
+    })
+    .expect("#G20");
     let events = p.subscribe();
     let mut cut = p.into_cutting().expect("@M2");
     stream_curve(&mut cut).expect("every vector accepted");
@@ -176,12 +195,21 @@ fn without_pacing_the_same_curve_overruns_even_with_0x03_signals() {
         },
         20.0,
     );
-    p.set_flow_control(true).expect("#C7,1");
-    p.set_speed(20, 40_000).expect("#G20");
+    p.set(Setting::FlowControl(true)).expect("#C7,1");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 40_000,
+    })
+    .expect("#G20");
     let mut cut = p.into_cutting().expect("@M2");
     let outcome = stream_curve(&mut cut).and_then(|()| cut.wait_idle(LONG).map(|_| ()));
     assert!(
-        matches!(outcome, Err(ControllerError::AsyncError { code: 22 })),
+        matches!(
+            outcome,
+            Err(ControllerError::AsyncError {
+                code: ErrorCode(22)
+            })
+        ),
         "buffer overrun (*022) must surface, got {outcome:?}"
     );
 }
@@ -195,8 +223,12 @@ fn limit_switch_during_a_cut_surfaces() {
     assert!(
         matches!(
             outcome,
-            Err(ControllerError::AsyncError { code: 33 }
-                | ControllerError::Fault { code: Some(33), .. })
+            Err(ControllerError::AsyncError {
+                code: ErrorCode(33)
+            } | ControllerError::Fault {
+                code: Some(ErrorCode(33)),
+                ..
+            })
         ),
         "limit switch must surface, got {outcome:?}"
     );
@@ -205,9 +237,12 @@ fn limit_switch_during_a_cut_surfaces() {
 #[test]
 fn host_watchdog_stops_the_machine_when_the_host_goes_quiet() {
     let (mut p, sim) = start(homed(), 1.0);
-    p.set_host_watchdog_ms(200).expect("#C19");
+    p.set(Setting::HostWatchdog(
+        WatchdogMs::new(200).expect("in range"),
+    ))
+    .expect("#C19");
     let mut jog = p.into_jog().expect("@M1");
-    jog.jog_steps(20, Axis::X, 999_999, true)
+    jog.jog_steps(20, Axis::X, JogTarget::By(JogTarget::UNTIL_BRAKED))
         .expect("endless jog");
     thread::sleep(Duration::from_millis(400)); // host silent
     assert!(!sim.snapshot().moving, "controller stopped on its own");
@@ -215,8 +250,12 @@ fn host_watchdog_stops_the_machine_when_the_host_goes_quiet() {
     assert!(
         matches!(
             outcome,
-            Err(ControllerError::AsyncError { code: 68 }
-                | ControllerError::Fault { code: Some(68), .. })
+            Err(ControllerError::AsyncError {
+                code: ErrorCode(68)
+            } | ControllerError::Fault {
+                code: Some(ErrorCode(68)),
+                ..
+            })
         ),
         "watchdog abort must surface, got {outcome:?}"
     );
@@ -241,7 +280,11 @@ fn slow_and_lost_replies_recover() {
 #[test]
 fn start_button_during_a_cut_is_an_event() {
     let (mut p, sim) = start(homed(), 1.0);
-    p.set_signal_acks(true, false).expect("#C35,1");
+    p.set(Setting::SignalAcks(SignalAcks {
+        input1: true,
+        input2: false,
+    }))
+    .expect("#C35,1");
     let events = p.subscribe();
     let mut cut = p.into_cutting().expect("@M2");
     cut.vector(20, 50_000, 0, 0).expect("long vector");
@@ -277,15 +320,23 @@ fn pulled_cable_is_a_disconnect() {
 #[test]
 fn in_stream_outputs_dwell_wait_and_progress() {
     let (mut p, sim) = start(homed(), 1.0);
-    p.set_speed(20, 40_000).expect("#G20");
-    p.set_dead_time_ms(0).expect("#C1");
-    p.set_signal_acks(true, false).expect("#C35");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 40_000,
+    })
+    .expect("#G20");
+    p.set(Setting::DeadTimeMs(0)).expect("#C1");
+    p.set(Setting::SignalAcks(SignalAcks {
+        input1: true,
+        input2: false,
+    }))
+    .expect("#C35");
     let mut cut = p.into_cutting().expect("@M2");
     cut.set_command_counter(0).expect("@N0");
 
     cut.outputs(0x01).expect("A01");
     cut.dwell_ms(50).expect("W50");
-    cut.wait_input(221, true).expect("I221");
+    cut.wait_input(221, Level::High).expect("I221");
     cut.flags(StreamFlags {
         no_dead_time: true,
         ..StreamFlags::default()
@@ -323,26 +374,30 @@ fn in_stream_outputs_dwell_wait_and_progress() {
         "A00 applied after the vector"
     );
     let sw = cut.switches().expect("@Y");
-    assert!(sw.ready && !sw.any_limit());
+    assert!(sw.ready() && !sw.any_limit());
 }
 
 #[test]
-fn override_range_is_checked_before_sending() {
+fn override_round_trips() {
+    // Out-of-range values cannot be built at all (`OverridePct::new(5)` is `None`), so there is
+    // nothing to reject at send time.
     let (mut p, _sim) = start(homed(), 1.0);
-    assert!(matches!(
-        p.set_override(5),
-        Err(ControllerError::OverrideOutOfRange(5))
-    ));
-    p.set_override(150).expect("@O150");
-    assert_eq!(p.override_pct().expect("@O"), 150);
+    let pct = OverridePct::new(150).expect("in range");
+    p.set_override(pct).expect("@O150");
+    assert_eq!(p.override_pct().expect("@O"), pct);
 }
 
 #[test]
 fn limit_switch_shows_in_switches() {
     let (mut p, _sim) = start(homed(), 1.0);
-    p.set_speed(20, 600_000).expect("#G20"); // reach the end of the envelope in ~100 ms
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 600_000,
+    })
+    .expect("#G20"); // reach the end of the envelope in ~100 ms
     let mut jog = p.into_jog().expect("@M1");
-    jog.jog_steps(20, Axis::X, 999_999, true).expect("$L");
+    jog.jog_steps(20, Axis::X, JogTarget::By(JogTarget::UNTIL_BRAKED))
+        .expect("$L");
     sim_brake_into_limit(&mut jog);
 }
 
@@ -352,12 +407,20 @@ fn sim_brake_into_limit(jog: &mut Controller<mode::Jog>) {
     assert!(
         matches!(
             err,
-            ControllerError::AsyncError { code: 33 } | ControllerError::Fault { .. }
+            ControllerError::AsyncError {
+                code: ErrorCode(33)
+            } | ControllerError::Fault { .. }
         ),
         "{err}"
     );
     let sw = jog.switches().expect("@Y");
-    assert!(sw.limit_plus[0], "X+ limit reported: {sw:?}");
+    assert!(
+        sw.limit(LimitSwitch {
+            axis: Axis::X,
+            side: Side::Plus
+        }),
+        "X+ limit reported: {sw:?}"
+    );
 }
 
 /// [SPEC1 p.5, p.26]: while the controller holds the stream (0x03), the host must still send
@@ -370,9 +433,16 @@ fn flow_pause_keeps_the_host_watchdog_fed() {
         ..homed()
     };
     let (mut p, _sim) = start(config, 1.0);
-    p.set_speed(20, 10_000).expect("#G20");
-    p.set_flow_control(true).expect("#C7");
-    p.set_host_watchdog_ms(100).expect("#C19");
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 10_000,
+    })
+    .expect("#G20");
+    p.set(Setting::FlowControl(true)).expect("#C7");
+    p.set(Setting::HostWatchdog(
+        WatchdogMs::new(100).expect("in range"),
+    ))
+    .expect("#C19");
     let mut cut = p.into_cutting().expect("@M2");
     // 20 vectors of 200 ms each against a 400-byte buffer: the stream is held (0x03) for
     // longer than the 100 ms watchdog. The sleep stands in for wire time (~1.4 ms/vector at

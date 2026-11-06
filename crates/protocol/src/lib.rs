@@ -9,11 +9,16 @@ pub mod command;
 pub mod decode;
 pub mod errors;
 pub mod reply;
+pub mod setting;
 pub mod status;
 pub mod switches;
 
-pub use command::{Axis, Command, Mode, StreamFlags};
+pub use command::{
+    Axis, Command, JogTarget, Level, Mode, OverridePct, Param, SpeedOverride, StreamFlags,
+};
 pub use decode::{Decoder, Frame, Signal};
-pub use reply::Reply;
+pub use errors::ErrorCode;
+pub use reply::{InputDef, Reply};
+pub use setting::{Setting, SettingKey, SignalAcks, Units, WatchdogMs};
 pub use status::Status;
-pub use switches::Switches;
+pub use switches::{LimitSwitch, Side, Switches};

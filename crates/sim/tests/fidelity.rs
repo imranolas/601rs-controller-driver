@@ -10,7 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use link::capture::{self, Direction};
+use link::Direction;
+use link::capture;
 use protocol::{Decoder, Frame};
 use sim::{SimConfig, SimCore};
 

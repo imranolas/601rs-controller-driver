@@ -49,11 +49,25 @@ pub fn open(cfg: &SerialConfig) -> serialport::Result<Link> {
     })
 }
 
-/// Candidate port names on this OS (e.g. `/dev/cu.usbserial-*`, `COM4`).
-pub fn available() -> Vec<String> {
-    serialport::available_ports()
-        .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
-        .unwrap_or_default()
+/// A serial port the OS offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortInfo {
+    /// The name to open: `/dev/cu.usbserial-1420`, `/dev/ttyUSB0`, `COM4`, …
+    pub name: String,
+    /// A USB device, such as a USB-serial adapter.
+    pub usb: bool,
+}
+
+/// The serial ports this OS offers, as it reports them (macOS lists each device twice, as
+/// `/dev/cu.*` and `/dev/tty.*`).
+pub fn available() -> serialport::Result<Vec<PortInfo>> {
+    Ok(serialport::available_ports()?
+        .into_iter()
+        .map(|p| PortInfo {
+            usb: matches!(p.port_type, serialport::SerialPortType::UsbPort(_)),
+            name: p.port_name,
+        })
+        .collect())
 }
 
 struct SerialReader(Box<dyn serialport::SerialPort>);

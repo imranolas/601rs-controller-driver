@@ -17,12 +17,14 @@ controller = { path = "crates/controller" }
 machine = { path = "crates/machine" }
 program = { path = "crates/program" }
 runner = { path = "crates/runner" }
+sim = { path = "crates/sim" }
 
 # external
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4"
 thiserror = "2"
+ctrlc = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

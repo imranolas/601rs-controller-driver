@@ -4,6 +4,8 @@
 //! 4 home position known, 8 homing in progress. Flag 4 = "homed" is settled by the captures:
 //! absent during homing (`@X18`), present in every state afterwards (`04`/`14`/`15`).
 
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Status {
     pub moving: bool,
@@ -42,6 +44,17 @@ impl Status {
     }
 }
 
+impl fmt::Display for Status {
+    /// The wire form, e.g. `@X14`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let flags = u8::from(self.waiting)
+            | (u8::from(self.error) << 1)
+            | (u8::from(self.homed) << 2)
+            | (u8::from(self.homing) << 3);
+        write!(f, "@X{}{flags:X}", u8::from(self.moving))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +72,14 @@ mod tests {
 
         let s = Status::parse("@X18").expect("parse");
         assert!(s.moving && s.homing && !s.homed);
+    }
+
+    #[test]
+    fn displays_as_the_wire_code() {
+        for code in ["@X04", "@X14", "@X15", "@X18", "@X06", "@X00"] {
+            let s = Status::parse(code).expect("parse");
+            assert_eq!(s.to_string(), code);
+        }
     }
 
     #[test]

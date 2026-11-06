@@ -16,6 +16,9 @@ pub enum Event {
     Signal(Signal),
     /// A control byte the decoder does not know.
     UnknownByte(u8),
+    /// A run of printable bytes too long to be a reply, without a CR: line noise, e.g. a wrong
+    /// baud rate. Its first bytes, as the decoder surfaced them.
+    Garbled(Vec<u8>),
     /// A reply line that no command was waiting for (late reply, async `*NNN`, …).
     Unsolicited(String),
     /// A stop was issued through a [`crate::StopHandle`].

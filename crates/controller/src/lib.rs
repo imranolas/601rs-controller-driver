@@ -6,7 +6,8 @@
 //!   before anything else is sent. Every wait has a deadline that ends in an explicit
 //!   [`ControllerError`], never in "carry on".
 //! - **Resync.** After a timeout or an unexpected reply, the next operation first
-//!   re-establishes reply pairing (drain, then `@X` probe). GMC never did this.
+//!   re-establishes reply pairing: it reads an input nothing else uses ([`RESYNC_PROBE_INPUTS`])
+//!   and discards everything that arrives before that reply. GMC never did this.
 //! - **Mode as a type.** [`Controller<M>`] only has the methods its mode accepts; switching
 //!   mode consumes the controller and returns one in the new mode.
 //! - **Stop lane.** A [`StopHandle`] brakes (`@B`) or emergency-stops (`@S`) from any thread,
@@ -51,7 +52,12 @@ use std::time::Duration;
 
 pub use error::{ControllerError, Result};
 pub use event::{Event, StopKind};
-pub use protocol::{Axis, Mode, Signal, Status, StreamFlags, Switches};
+pub use protocol::{
+    Axis, ErrorCode, InputDef, JogTarget, Level, LimitSwitch, Mode, OverridePct, Param, Setting,
+    SettingKey, Side, Signal, SignalAcks, SpeedOverride, Status, StreamFlags, Switches, Units,
+    WatchdogMs,
+};
+pub use session::RESYNC_PROBE_INPUTS;
 pub use stop::StopHandle;
 pub use typed::{Controller, ModeMarker, ModeSwitchError, connect, mode};
 

@@ -7,7 +7,10 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use link::Link;
-use protocol::{Axis, Command, Mode, Reply, Status, StreamFlags, Switches, reply};
+use protocol::{
+    Axis, Command, ErrorCode, InputDef, JogTarget, Level, Mode, OverridePct, Param, Reply, Setting,
+    SettingKey, Side, Status, StreamFlags, Switches, reply,
+};
 
 use crate::session::Session;
 use crate::{Config, ControllerError, Event, Result, StopHandle};
@@ -88,8 +91,18 @@ impl<M: ModeMarker> std::error::Error for ModeSwitchError<M> {
     }
 }
 
-/// Open a session: resync (probe with `@X`), read the version (`@V`), enter mode 0.
-/// Returns the controller and its version string (e.g. `@V2.00/55W 19.10.10 2807001`).
+/// For callers that give up on the controller when a switch fails: `?` drops it and keeps the
+/// error.
+impl<M> From<ModeSwitchError<M>> for ControllerError {
+    fn from(e: ModeSwitchError<M>) -> Self {
+        e.error
+    }
+}
+
+/// Open a session: resync (unique `@I1xx` probe, see [`crate::RESYNC_PROBE_INPUTS`]), read the
+/// version (`@V`), enter mode 0. Returns the controller and its version string
+/// (e.g. `@V2.00/55W 19.10.10 2807001`). If the controller never answers the probe, the
+/// [`ControllerError::ResyncFailed`] says what came back instead.
 pub fn connect(link: Link, cfg: Config) -> Result<(Controller<mode::Parameters>, String)> {
     let mut session = Session::start(link, cfg)?;
     session.resync()?;
@@ -146,7 +159,7 @@ impl<M: ModeMarker> Controller<M> {
     }
 
     /// `@E`: current error code (0 = none).
-    pub fn error_code(&mut self) -> Result<u16> {
+    pub fn error_code(&mut self) -> Result<ErrorCode> {
         self.value(&Command::ErrorCode, reply::parse_error_code)
     }
 
@@ -190,16 +203,19 @@ impl<M: ModeMarker> Controller<M> {
         self.ack(&Command::SetCommandCounter(value))
     }
 
-    /// `@O`: speed override in percent.
-    pub fn override_pct(&mut self) -> Result<u16> {
+    /// `@O`: the speed override.
+    pub fn override_pct(&mut self) -> Result<OverridePct> {
         self.value(&Command::Override, reply::parse_override)
     }
 
-    /// `@O<pct>`: set the speed override (10–200 %); takes effect immediately in all modes.
-    pub fn set_override(&mut self, pct: u16) -> Result<()> {
-        if !(10..=200).contains(&pct) {
-            return Err(ControllerError::OverrideOutOfRange(pct));
-        }
+    /// `@@`: clear the controller's error state. Not in the spec; GMC sends it before homing
+    /// and after faults [CAP g_init].
+    pub fn clear_error(&mut self) -> Result<()> {
+        self.ack(&Command::ClearError)
+    }
+
+    /// `@O<pct>`: set the speed override; takes effect immediately in all modes.
+    pub fn set_override(&mut self, pct: OverridePct) -> Result<()> {
         self.ack(&Command::SetOverride(pct))
     }
 
@@ -302,55 +318,39 @@ impl<M: ModeMarker> Controller<M> {
 // ------------------------------------------------------------------ mode 0
 
 impl Controller<mode::Parameters> {
-    /// `#G<entry>,<value>`: speed of a speed-table entry.
-    pub fn set_speed(&mut self, entry: u8, value: u32) -> Result<()> {
-        self.ack(&Command::SetSpeed { entry, value })
+    /// `#…`: change a setting. See [`Setting`] for what each one does.
+    pub fn set(&mut self, setting: Setting) -> Result<()> {
+        self.ack(&Command::Set(setting))
     }
 
-    /// `#R<ms>`: maximum ramp time.
-    pub fn set_ramp_ms(&mut self, ms: u16) -> Result<()> {
-        self.ack(&Command::SetRampMs(ms))
+    /// Read a setting back (`&…`), typed, ready to be restored later with [`Self::set`].
+    pub fn read_setting(&mut self, key: SettingKey) -> Result<Setting> {
+        self.value(&Command::QueryParam(key.param()), |v| {
+            Setting::from_reply(key, v)
+        })
     }
 
-    /// `#C1,<ms>`: mode-2 dead time before a path starts.
-    pub fn set_dead_time_ms(&mut self, ms: u16) -> Result<()> {
-        self.ack(&Command::SetDeadTimeMs(ms))
+    /// `&I<n>`: how logical input `n` is wired, or whether it is wired at all.
+    pub fn input_def(&mut self, input: u8) -> Result<InputDef> {
+        self.value(&Command::QueryParam(Param::InputDef(input)), |v| {
+            reply::parse_input_def(v, input)
+        })
     }
 
-    /// `#C5`: 0x01 "positioned" signal on/off.
-    pub fn set_positioned_signal(&mut self, on: bool) -> Result<()> {
-        self.ack(&Command::SetPositionedSignal(on))
+    /// `&D<a>`: the end `axis` homes towards. Any reply other than direction 0 or 1 is an
+    /// [`ControllerError::UnexpectedReply`], never a guess.
+    pub fn homing_side(&mut self, axis: Axis) -> Result<Side> {
+        self.value(&Command::QueryParam(Param::Homing(axis)), |v| {
+            reply::parse_homing_side(v, axis)
+        })
     }
 
-    /// `#C7`: 0x03/0x02 buffer flow control on/off. Turn it off again before handing the
-    /// machine back to GMC, which does not expect these bytes.
-    pub fn set_flow_control(&mut self, on: bool) -> Result<()> {
-        self.ack(&Command::SetFlowControl(on))
-    }
-
-    /// `#C19`: host watchdog in ms (0 = off, max 10000). While axes move the controller aborts
-    /// with `*068` if no character arrives from the host for this long [SPEC1 p.26]. The session
-    /// keeps talking during waits (`@X` polls, `@H` while the stream is held), each at
-    /// `Config::poll_interval`, so choose a value well above that (e.g. ≥ 4×).
-    pub fn set_host_watchdog_ms(&mut self, ms: u16) -> Result<()> {
-        self.ack(&Command::SetHostWatchdogMs(ms))
-    }
-
-    /// `#C6`: 0x04 after homing. Keep it on: when off, the controller holds back the reply
-    /// to `$H` until homing has finished, which exceeds any sensible reply deadline.
-    pub fn set_homing_done_signal(&mut self, on: bool) -> Result<()> {
-        self.ack(&Command::SetHomingDoneSignal(on))
-    }
-
-    /// `#C8`: 0x05 heartbeat after `ms` without traffic from the controller (0 = off).
-    pub fn set_heartbeat_ms(&mut self, ms: u16) -> Result<()> {
-        self.ack(&Command::SetHeartbeatMs(ms))
-    }
-
-    /// `#C35`: level-change bytes for signal input 1 (I221, start button: 0x06/0x07) and
-    /// signal input 2 (I222: 0x08/0x09).
-    pub fn set_signal_acks(&mut self, input1: bool, input2: bool) -> Result<()> {
-        self.ack(&Command::SetSignalAcks { input1, input2 })
+    /// Read any parameter back as the raw fields of its reply (`&C13` → `["1"]`,
+    /// `&DX` → `["0","10","11","0"]`), for diagnostics. Prefer the typed reads above.
+    pub fn query_param(&mut self, param: Param) -> Result<Vec<String>> {
+        self.value(&Command::QueryParam(param), |v| {
+            reply::parse_param(v, param)
+        })
     }
 }
 
@@ -368,20 +368,14 @@ impl Controller<mode::Jog> {
         self.ack(&Command::SetOutputs(bits))
     }
 
-    /// `$L<entry>,<axis><steps>`: start jogging one axis. Returns when accepted; the motion
-    /// runs on. `steps = ±999_999` (relative) runs until [`Controller::brake`].
-    pub fn jog_steps(
-        &mut self,
-        speed_entry: u8,
-        axis: Axis,
-        steps: i32,
-        relative: bool,
-    ) -> Result<()> {
+    /// `$L<entry>,<axis><steps>`: start jogging one axis to or by a number of steps. Returns
+    /// when accepted; the motion runs on. A relative jog of
+    /// [`JogTarget::UNTIL_BRAKED`] runs until [`Controller::brake`].
+    pub fn jog_steps(&mut self, speed_entry: u8, axis: Axis, target: JogTarget) -> Result<()> {
         self.ack(&Command::JogSteps {
             speed_entry,
             axis,
-            steps,
-            relative,
+            target,
         })
     }
 }
@@ -417,10 +411,10 @@ impl Controller<mode::Cutting> {
             .send_streamed(&Command::StreamSetSpeed { entry, value })
     }
 
-    /// `I<n>` / `I-<n>`: wait here until input `n` is high / low.
-    pub fn wait_input(&mut self, input: u8, high: bool) -> Result<()> {
+    /// `I<n>` / `I-<n>`: wait here until input `n` is at `level`.
+    pub fn wait_input(&mut self, input: u8, level: Level) -> Result<()> {
         self.session
-            .send_streamed(&Command::StreamWaitInput { input, high })
+            .send_streamed(&Command::StreamWaitInput { input, level })
     }
 
     /// `C<bits>`: one-shot special functions for the next motion.

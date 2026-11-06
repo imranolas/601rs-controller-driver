@@ -13,7 +13,8 @@ use crate::session::Shared;
 /// A stop **latches** the session: every operation returns
 /// [`ControllerError::Stopped`](crate::ControllerError::Stopped) until
 /// [`Controller::clear_stop`](crate::Controller::clear_stop) is called. The latch is set
-/// *before* the command is written, so nothing queued behind it can slip through.
+/// *before* the stop takes the writer lock, and the command path checks it *under* that lock,
+/// so nothing the session sends can follow the stop onto the wire.
 #[derive(Clone)]
 pub struct StopHandle {
     pub(crate) shared: Arc<Shared>,

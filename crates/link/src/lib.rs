@@ -12,6 +12,16 @@ pub mod capture;
 pub mod memory;
 #[cfg(feature = "serial")]
 pub mod serial;
+pub mod tap;
+
+/// Which way bytes travelled on a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Host → controller ("Written data" in a GMC capture, `>` in a transcript).
+    HostToController,
+    /// Controller → host ("Read data", `<`).
+    ControllerToHost,
+}
 
 /// The receiving half of a link.
 pub trait Reader: Send {

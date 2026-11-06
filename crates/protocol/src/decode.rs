@@ -62,6 +62,11 @@ impl Signal {
     }
 }
 
+/// The longest line the decoder collects; a longer run of printable bytes without a CR is
+/// noise, e.g. from a wrong baud rate. Replies are short, but the mode-9 licence exchange
+/// echoes hex records of up to 2368 bytes [CAP g_init], so the bound sits well above that.
+pub const MAX_LINE: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// A CR-terminated line, without the CR. Empty = bare acknowledgement.
@@ -69,11 +74,17 @@ pub enum Frame {
     Signal(Signal),
     /// A control byte this decoder does not know. Surfaced, never silently dropped.
     Unknown(u8),
+    /// The first [`MAX_LINE`] bytes of a printable run that never ended in a CR: noise. The
+    /// rest of the run, up to and including the next CR, is dropped, so it can never be
+    /// mistaken for a reply line.
+    Garbled(Vec<u8>),
 }
 
 #[derive(Debug, Default)]
 pub struct Decoder {
     line: Vec<u8>,
+    /// Inside a garbled run: drop printable bytes until the next CR.
+    garbled: bool,
 }
 
 impl Decoder {
@@ -86,10 +97,16 @@ impl Decoder {
         let mut out = Vec::new();
         for &b in bytes {
             match b {
+                b'\r' if std::mem::take(&mut self.garbled) => {}
                 b'\r' => {
                     let text = String::from_utf8_lossy(&self.line).into_owned();
                     self.line.clear();
                     out.push(Frame::Line(text));
+                }
+                0x20..=0x7E if self.garbled => {}
+                0x20..=0x7E if self.line.len() == MAX_LINE => {
+                    out.push(Frame::Garbled(std::mem::take(&mut self.line)));
+                    self.garbled = true;
                 }
                 0x20..=0x7E => self.line.push(b),
                 _ => out.push(match Signal::from_byte(b) {
@@ -162,6 +179,16 @@ mod tests {
             d.push(b"@X\x061\r"),
             vec![Frame::Signal(Signal::Input1High), line("@X1")]
         );
+    }
+
+    #[test]
+    fn an_endless_line_is_surfaced_once_then_dropped_to_the_next_cr() {
+        let mut d = Decoder::new();
+        let noise = vec![b'~'; MAX_LINE + 40];
+        assert_eq!(d.push(&noise), vec![Frame::Garbled(vec![b'~'; MAX_LINE])]);
+        assert!(d.pending().is_empty(), "the buffer stays bounded");
+        // The tail of the run ends at the CR without producing a line; the next one is clean.
+        assert_eq!(d.push(b"~~~\r@X04\r"), vec![line("@X04")]);
     }
 
     #[test]

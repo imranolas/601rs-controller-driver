@@ -7,13 +7,7 @@
 
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// "Written data": host → controller.
-    HostToController,
-    /// "Read data": controller → host.
-    ControllerToHost,
-}
+use crate::Direction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transfer {

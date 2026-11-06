@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use crate::Setting;
+
 /// Controller operating mode [SPEC1 p.6, p.12].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -39,6 +41,17 @@ pub enum Axis {
 }
 
 impl Axis {
+    pub const ALL: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
+
+    /// Position in `[x, y, z]` arrays.
+    pub const fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        }
+    }
+
     pub const fn upper(self) -> char {
         match self {
             Axis::X => 'X',
@@ -46,6 +59,7 @@ impl Axis {
             Axis::Z => 'Z',
         }
     }
+
     const fn lower(self) -> char {
         match self {
             Axis::X => 'x',
@@ -55,23 +69,124 @@ impl Axis {
     }
 }
 
+/// Where a `$L` jog goes, in steps [SPEC1 p.30–31; CAP].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JogTarget {
+    /// To an absolute position (`$L<entry>,X<steps>`).
+    To(i32),
+    /// By a distance from where the axis is (`$L<entry>,x<steps>`).
+    By(i32),
+}
+
+impl JogTarget {
+    /// A relative jog this long (either sign) runs until braked [SPEC p.30; CAP g_motions
+    /// `$L20,x-999999`].
+    pub const UNTIL_BRAKED: i32 = 999_999;
+}
+
+/// An input level, for mode-2 `I` waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Level {
+    High,
+    Low,
+}
+
+/// From the next motion on, does the `@O` speed override apply (`C8`) or not (`C16`)
+/// [SPEC1 p.35]?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpeedOverride {
+    /// Bit 8: the override applies (tool in the material).
+    On,
+    /// Bit 16: no override (tool not engaged, rapid move).
+    Off,
+}
+
 /// Mode-2 one-shot special functions `C<bits>` [SPEC1 p.35]. Only the implemented bits exist
 /// here; bits 2 (diagonal) and 4 (axes one at a time) are "noch nicht realisiert".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct StreamFlags {
     /// Bit 1: start the next vector without the `#C1` dead time.
     pub no_dead_time: bool,
-    /// Bit 8: from here, the speed override applies (tool in the material).
-    pub override_on: bool,
-    /// Bit 16: no speed override (tool not engaged, rapid move).
-    pub override_off: bool,
+    /// Bit 8 or 16: switch the speed override on or off; `None` leaves it as it is.
+    pub speed_override: Option<SpeedOverride>,
 }
 
 impl StreamFlags {
-    pub const fn bits(self) -> u8 {
-        (self.no_dead_time as u8)
-            | ((self.override_on as u8) << 3)
-            | ((self.override_off as u8) << 4)
+    pub fn bits(self) -> u8 {
+        let speed_override = match self.speed_override {
+            None => 0,
+            Some(SpeedOverride::On) => 8,
+            Some(SpeedOverride::Off) => 16,
+        };
+        u8::from(self.no_dead_time) | speed_override
+    }
+}
+
+/// A speed override in percent, 10–200 [SPEC1 p.16]. Values outside that range cannot be
+/// built, so `@O` can only carry a valid one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OverridePct(u16);
+
+impl OverridePct {
+    pub const MIN: u16 = 10;
+    pub const MAX: u16 = 200;
+    /// 100 %: speeds as programmed.
+    pub const NORMAL: Self = Self(100);
+
+    /// `None` outside 10–200.
+    pub const fn new(pct: u16) -> Option<Self> {
+        if pct >= Self::MIN && pct <= Self::MAX {
+            Some(Self(pct))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl fmt::Display for OverridePct {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} %", self.0)
+    }
+}
+
+/// A parameter that can be read back with `&…` in mode 0 [SPEC1 p.29–30]. Reading is
+/// harmless; nothing here writes a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Param {
+    /// `&C<n>`: configuration value `#C<n>`.
+    Config(u8),
+    /// `&G<entry>`: speed of a table entry.
+    Speed(u8),
+    /// `&R`: maximum ramp time (ms).
+    Ramp,
+    /// `&M`: maximum speed.
+    MaxSpeed,
+    /// `&S`: start/stop speed.
+    StartSpeed,
+    /// `&O<a>`: offset driven after homing.
+    HomeOffset(Axis),
+    /// `&D<a>`: homing direction and speed entries (`dir,g1,g2,g3`; dir 0 = negative).
+    Homing(Axis),
+    /// `&I<n>`: input definition (`port,bit,invert`; port `000h` = not mapped).
+    InputDef(u8),
+}
+
+impl fmt::Display for Param {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Param::Config(n) => write!(f, "&C{n}"),
+            Param::Speed(g) => write!(f, "&G{g}"),
+            Param::Ramp => write!(f, "&R"),
+            Param::MaxSpeed => write!(f, "&M"),
+            Param::StartSpeed => write!(f, "&S"),
+            Param::HomeOffset(a) => write!(f, "&O{}", a.upper()),
+            Param::Homing(a) => write!(f, "&D{}", a.upper()),
+            Param::InputDef(n) => write!(f, "&I{n}"),
+        }
     }
 }
 
@@ -109,47 +224,29 @@ pub enum Command {
     SetCommandCounter(u32),
     /// `@O`: query the speed override in percent.
     Override,
-    /// `@O<pct>`: set the speed override, 10–200 %; applies immediately in all modes.
-    SetOverride(u16),
+    /// `@O<pct>`: set the speed override; applies immediately in all modes [SPEC1 p.16].
+    SetOverride(OverridePct),
+    /// `@@`: not in either spec. GMC sends it before homing and after errors; the controller
+    /// answers `\r` and the error state clears [CAP g_init; GMC].
+    ClearError,
 
     // ---- mode 1 (`$`) [SPEC1 p.30–32] ----
     /// `$H<axes>`: home the axes in the given order [CAP].
     Home(Vec<Axis>),
     /// `$A<hh>`: set auxiliary outputs (head/clamp bitmask) [CAP].
     SetOutputs(u8),
-    /// `$L<entry>,<axis><steps>`: jog one axis in steps at speed-table entry; `relative`
-    /// selects the lowercase (relative) axis letter. ±999999 means "run until braked" [CAP].
+    /// `$L<entry>,<axis><steps>`: jog one axis at a speed-table entry [CAP].
     JogSteps {
         speed_entry: u8,
         axis: Axis,
-        steps: i32,
-        relative: bool,
+        target: JogTarget,
     },
 
-    // ---- mode 0 (`#`) [SPEC1 p.17–29] ----
-    /// `#G<entry>,<v>`: speed of speed-table entry [CAP].
-    SetSpeed { entry: u8, value: u32 },
-    /// `#R<ms>`: maximum ramp time [CAP].
-    SetRampMs(u16),
-    /// `#C1,<ms>`: mode-2 dead time before a path starts [CAP].
-    SetDeadTimeMs(u16),
-    /// `#C5,<0|1>`: send 0x01 when a motion finishes [CAP].
-    SetPositionedSignal(bool),
-    /// `#C6,<0|1>`: send 0x04 after homing. When off, the CR reply to `$H` is held back until
-    /// homing has finished [SPEC1 p.23].
-    SetHomingDoneSignal(bool),
-    /// `#C7,<0|1>`: 0x03/0x02 buffer flow-control bytes. GMC never enables this, so whoever
-    /// enables it must disable it again before handing the machine back to GMC.
-    SetFlowControl(bool),
-    /// `#C8,<ms>`: heartbeat; the controller sends 0x05 after this long without sending
-    /// anything; 0 disables it [SPEC1 p.23].
-    SetHeartbeatMs(u16),
-    /// `#C19,<ms>`: host watchdog. The controller aborts motion (`*068`) if nothing arrives from
-    /// the host for this long while axes move; 0 disables it [SPEC1 p.26].
-    SetHostWatchdogMs(u16),
-    /// `#C35,<0..3>`: level-change bytes for signal inputs I221 (0x06 high / 0x07 low) and
-    /// I222 (0x08 / 0x09) [SPEC1 p.28]. GMC sends `#C35,1` [CAP].
-    SetSignalAcks { input1: bool, input2: bool },
+    // ---- mode 0 (`#` set, `&` query) [SPEC1 p.17–30] ----
+    /// `#…`: change a setting.
+    Set(Setting),
+    /// `&…`: read a parameter back; reply `&C13,1`, `&R300`, `&DX,0,10,11,0`, …
+    QueryParam(Param),
 
     // ---- mode 2: buffered, no reply [SPEC1 p.32–35] ----
     /// `L<entry>,X<x>,Y<y>,Z<z>`: absolute vector in steps at speed-table entry [CAP].
@@ -166,7 +263,7 @@ pub enum Command {
     /// `G<entry>,<v>`: change a speed-table entry, in sequence with the path.
     StreamSetSpeed { entry: u8, value: u32 },
     /// `I<n>` / `I-<n>`: wait until input `n` is high / low. Undefined inputs don't wait.
-    StreamWaitInput { input: u8, high: bool },
+    StreamWaitInput { input: u8, level: Level },
     /// `C<bits>`: one-shot special functions for the next motion.
     StreamFlags(StreamFlags),
 }
@@ -197,19 +294,10 @@ impl Command {
         match self {
             Version | Status | QueryMode | SetMode(_) | Brake | EmergencyStop
             | PositionSteps(_) | ReadInput(_) | ReadOutput(_) | Switches | ErrorCode
-            | BufferLevel | CommandCounter | SetCommandCounter(_) | Override | SetOverride(_) => {
-                None
-            }
+            | BufferLevel | CommandCounter | SetCommandCounter(_) | Override | SetOverride(_)
+            | ClearError => None,
             Home(_) | SetOutputs(_) | JogSteps { .. } => Some(Mode::Jog),
-            SetSpeed { .. }
-            | SetRampMs(_)
-            | SetDeadTimeMs(_)
-            | SetPositionedSignal(_)
-            | SetHomingDoneSignal(_)
-            | SetFlowControl(_)
-            | SetHeartbeatMs(_)
-            | SetHostWatchdogMs(_)
-            | SetSignalAcks { .. } => Some(Mode::Parameters),
+            Set(_) | QueryParam(_) => Some(Mode::Parameters),
             Vector { .. }
             | StreamOutputs(_)
             | StreamDwellMs(_)
@@ -252,7 +340,8 @@ impl fmt::Display for Command {
             CommandCounter => write!(f, "@N"),
             SetCommandCounter(n) => write!(f, "@N{n}"),
             Override => write!(f, "@O"),
-            SetOverride(pct) => write!(f, "@O{pct}"),
+            SetOverride(pct) => write!(f, "@O{}", pct.get()),
+            ClearError => write!(f, "@@"),
             Home(axes) => {
                 write!(f, "$H")?;
                 axes.iter().try_for_each(|a| write!(f, "{}", a.lower()))
@@ -261,27 +350,13 @@ impl fmt::Display for Command {
             JogSteps {
                 speed_entry,
                 axis,
-                steps,
-                relative,
-            } => {
-                let a = if *relative {
-                    axis.lower()
-                } else {
-                    axis.upper()
-                };
-                write!(f, "$L{speed_entry},{a}{steps}")
-            }
-            SetSpeed { entry, value } => write!(f, "#G{entry},{value}"),
-            SetRampMs(ms) => write!(f, "#R{ms}"),
-            SetDeadTimeMs(ms) => write!(f, "#C1,{ms}"),
-            SetPositionedSignal(on) => write!(f, "#C5,{}", u8::from(*on)),
-            SetHomingDoneSignal(on) => write!(f, "#C6,{}", u8::from(*on)),
-            SetFlowControl(on) => write!(f, "#C7,{}", u8::from(*on)),
-            SetHeartbeatMs(ms) => write!(f, "#C8,{ms}"),
-            SetHostWatchdogMs(ms) => write!(f, "#C19,{ms}"),
-            SetSignalAcks { input1, input2 } => {
-                write!(f, "#C35,{}", u8::from(*input1) | (u8::from(*input2) << 1))
-            }
+                target,
+            } => match target {
+                JogTarget::To(steps) => write!(f, "$L{speed_entry},{}{steps}", axis.upper()),
+                JogTarget::By(steps) => write!(f, "$L{speed_entry},{}{steps}", axis.lower()),
+            },
+            Set(setting) => write!(f, "{setting}"),
+            QueryParam(p) => write!(f, "{p}"),
             Vector {
                 speed_entry,
                 x,
@@ -291,9 +366,10 @@ impl fmt::Display for Command {
             StreamOutputs(bits) => write!(f, "A{bits:02X}"),
             StreamDwellMs(ms) => write!(f, "W{ms}"),
             StreamSetSpeed { entry, value } => write!(f, "G{entry},{value}"),
-            StreamWaitInput { input, high } => {
-                write!(f, "I{}{input}", if *high { "" } else { "-" })
-            }
+            StreamWaitInput { input, level } => match level {
+                Level::High => write!(f, "I{input}"),
+                Level::Low => write!(f, "I-{input}"),
+            },
             StreamFlags(flags) => write!(f, "C{}", flags.bits()),
         }
     }
@@ -304,7 +380,7 @@ mod tests {
     use super::*;
 
     /// Encodings must match what GMC sent in the captures byte for byte, and the spec's
-    /// examples for commands GMC never sends.
+    /// examples for commands GMC never sends. (Settings: see `setting.rs`.)
     #[test]
     fn encodes_like_gmc_and_the_spec() {
         let cases: &[(Command, &str)] = &[
@@ -323,8 +399,7 @@ mod tests {
                 Command::JogSteps {
                     speed_entry: 20,
                     axis: Axis::X,
-                    steps: -999_999,
-                    relative: true,
+                    target: JogTarget::By(-JogTarget::UNTIL_BRAKED),
                 },
                 "$L20,x-999999\r",
             ),
@@ -332,27 +407,16 @@ mod tests {
                 Command::JogSteps {
                     speed_entry: 10,
                     axis: Axis::X,
-                    steps: 3,
-                    relative: false,
+                    target: JogTarget::To(3),
                 },
                 "$L10,X3\r",
             ),
             (
-                Command::SetSpeed {
+                Command::Set(Setting::Speed {
                     entry: 20,
                     value: 36000,
-                },
+                }),
                 "#G20,36000\r",
-            ),
-            (Command::SetRampMs(225), "#R225\r"),
-            (Command::SetDeadTimeMs(100), "#C1,100\r"),
-            (Command::SetPositionedSignal(true), "#C5,1\r"),
-            (
-                Command::SetSignalAcks {
-                    input1: true,
-                    input2: false,
-                },
-                "#C35,1\r",
             ),
             (
                 Command::Vector {
@@ -372,17 +436,9 @@ mod tests {
             (Command::CommandCounter, "@N\r"),
             (Command::SetCommandCounter(0), "@N0\r"),
             (Command::Override, "@O\r"),
-            (Command::SetOverride(120), "@O120\r"),
-            (Command::SetHomingDoneSignal(true), "#C6,1\r"),
-            (Command::SetFlowControl(false), "#C7,0\r"),
-            (Command::SetHeartbeatMs(400), "#C8,400\r"),
-            (Command::SetHostWatchdogMs(500), "#C19,500\r"),
             (
-                Command::SetSignalAcks {
-                    input1: true,
-                    input2: true,
-                },
-                "#C35,3\r",
+                Command::SetOverride(OverridePct::new(120).expect("in range")),
+                "@O120\r",
             ),
             (Command::StreamOutputs(0x1B), "A1B\r"),
             (Command::StreamDwellMs(250), "W250\r"),
@@ -396,14 +452,14 @@ mod tests {
             (
                 Command::StreamWaitInput {
                     input: 233,
-                    high: true,
+                    level: Level::High,
                 },
                 "I233\r",
             ),
             (
                 Command::StreamWaitInput {
                     input: 255,
-                    high: false,
+                    level: Level::Low,
                 },
                 "I-255\r",
             ),
@@ -416,15 +472,14 @@ mod tests {
             ),
             (
                 Command::StreamFlags(StreamFlags {
-                    override_on: true,
-                    override_off: false,
                     no_dead_time: true,
+                    speed_override: Some(SpeedOverride::On),
                 }),
                 "C9\r",
             ),
             (
                 Command::StreamFlags(StreamFlags {
-                    override_off: true,
+                    speed_override: Some(SpeedOverride::Off),
                     ..Default::default()
                 }),
                 "C16\r",
@@ -433,6 +488,14 @@ mod tests {
         for (cmd, wire) in cases {
             assert_eq!(cmd.encode(), wire.as_bytes(), "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn override_range() {
+        assert_eq!(OverridePct::new(9), None);
+        assert_eq!(OverridePct::new(10).map(OverridePct::get), Some(10));
+        assert_eq!(OverridePct::new(200).map(OverridePct::get), Some(200));
+        assert_eq!(OverridePct::new(201), None);
     }
 
     #[test]
@@ -453,5 +516,9 @@ mod tests {
         assert!(Command::Status.expects_reply());
         assert_eq!(Command::Brake.required_mode(), None);
         assert_eq!(Command::CommandCounter.required_mode(), None);
+        assert_eq!(
+            Command::Set(Setting::RampMs(300)).required_mode(),
+            Some(Mode::Parameters)
+        );
     }
 }

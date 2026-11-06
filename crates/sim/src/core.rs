@@ -6,6 +6,9 @@ use std::time::Duration;
 /// Simulated time since the core was created.
 pub type SimTime = Duration;
 
+/// How long a simulated press of the green button holds I221 high.
+pub const BUTTON_HOLD: Duration = Duration::from_millis(200);
+
 const ENDLESS_JOG: i64 = 999_999;
 
 const X: usize = 0;
@@ -44,6 +47,10 @@ pub struct SimConfig {
     pub start_counter_exhausted: bool,
     /// Steps per mm on X/Y, for the µm-based commands (`@P`, `$E`, `V`). [GCF ScaleX/Y]
     pub steps_per_mm: f64,
+    /// Input definitions present at start (`&I<n>` → `port,bit,invert`). Empty by default,
+    /// like the 601 as far as the captures show (`&I240,000h,0,0` [CAP g_init]). Limit errors
+    /// come from the envelope either way.
+    pub input_defs: Vec<(u8, String)>,
 }
 
 impl Default for SimConfig {
@@ -60,6 +67,7 @@ impl Default for SimConfig {
             homing_done_signal: true,
             steps_per_mm: 40.0,
             start_counter_exhausted: false,
+            input_defs: Vec::new(),
         }
     }
 }
@@ -158,7 +166,8 @@ pub struct SimCore {
     /// chain back-to-back however coarse the ticks are.
     free_at: SimTime,
     flow_paused: bool,
-    start_button_latched: bool,
+    /// The green button is held down until this time (a press lasts [`BUTTON_HOLD`]).
+    button_release_at: Option<SimTime>,
     /// Limit-switch error code while the machine stands on that switch (for `@Y`).
     limit_hit: Option<u16>,
     /// `C1`: start the next path without the `#C1` dead time.
@@ -225,6 +234,7 @@ impl SimCore {
     pub fn new(cfg: SimConfig) -> Self {
         let mut c = BTreeMap::new();
         c.insert(6, i64::from(cfg.homing_done_signal));
+        let input_defs = cfg.input_defs.iter().cloned().collect();
         Self {
             homed: cfg.homed_at_start,
             pos: cfg.start_position,
@@ -239,7 +249,7 @@ impl SimCore {
             dead_until: None,
             outputs: 0,
             inputs: BTreeMap::new(),
-            input_defs: BTreeMap::new(),
+            input_defs,
             speeds: BTreeMap::new(),
             brake_angles: BTreeMap::new(),
             ramp_ms: 0,
@@ -256,7 +266,7 @@ impl SimCore {
             last_host: Duration::ZERO,
             free_at: Duration::ZERO,
             flow_paused: false,
-            start_button_latched: false,
+            button_release_at: None,
             limit_hit: None,
             next_no_dead_time: false,
             override_active: true,
@@ -318,19 +328,13 @@ impl SimCore {
     /// Is the head of the queue an `I` command whose input is not yet at the wanted level?
     fn blocked_on_input(&self) -> bool {
         matches!(self.queue.front(), Some(Queued { item: Item::WaitInput { input, high }, .. })
-            if self.input_defined(*input) && self.level_seen(*input, *high) != *high)
+            if self.input_defined(*input) && self.input(*input) != *high)
     }
 
     /// Spec: "if the input is not defined at all, execution continues immediately".
     fn input_defined(&self, input: u8) -> bool {
         // I221 and up are fixed hardware inputs (signal, reference, stop) [SPEC1 p.7].
         input >= 221 || self.inputs.contains_key(&input) || self.input_defs.contains_key(&input)
-    }
-
-    /// The level a wait sees. A button press is momentary; the firmware samples it, so a
-    /// wait for I221 high also accepts a press since the last read (the latch).
-    fn level_seen(&self, input: u8, high: bool) -> bool {
-        self.input(input) || (high && input == 221 && self.start_button_latched)
     }
 
     fn input(&self, input: u8) -> bool {
@@ -367,14 +371,13 @@ impl SimCore {
         out
     }
 
-    /// Press and release the green start button (signal input 1, I221). With `#C35` bit 1 the
-    /// controller reports the level changes as 0x06 (high) then 0x07 (low) [SPEC1 p.7, p.28];
-    /// GMC enables this with `#C35,1` and reacts to the 0x07. A poll of `@I221` reads `1` once.
-    pub fn press_start_button(&mut self) -> Vec<u8> {
-        let mut out = self.set_input(221, true);
-        out.extend(self.set_input(221, false));
-        self.start_button_latched = true;
-        out
+    /// Press the green start button (signal input 1, I221) at `now`; it is released
+    /// [`BUTTON_HOLD`] later by [`tick`](Self::tick). With `#C35` bit 1 the controller reports
+    /// the level changes as 0x06 (high) and then 0x07 (low) [SPEC1 p.7, p.28]; GMC enables this
+    /// with `#C35,1` and reacts to the 0x07. While held, `@I221` reads 1 and `I221` waits pass.
+    pub fn press_start_button(&mut self, now: SimTime) -> Vec<u8> {
+        self.button_release_at = Some(now + BUTTON_HOLD);
+        self.set_input(221, true)
     }
 
     /// Set an input level. Level changes on the two signal inputs I221/I222 produce the
@@ -496,11 +499,7 @@ impl SimCore {
             }
             ('I', n) => match n.parse::<u8>() {
                 Ok(n) => {
-                    let mut v = self.inputs.get(&n).copied().unwrap_or(false);
-                    if n == 221 && self.start_button_latched {
-                        v = true;
-                        self.start_button_latched = false;
-                    }
+                    let v = self.inputs.get(&n).copied().unwrap_or(false);
                     push_line(out, &format!("@I{n},{}", u8::from(v)));
                 }
                 Err(_) => push_err(out, 3),
@@ -668,11 +667,17 @@ impl SimCore {
                 },
                 None => false,
             },
-            'Z' | 'N' | 'U' | 'Y' | 'D' => {
-                self.axis_params
-                    .insert(format!("{key}{arg}"), arg.to_owned());
-                arg.contains(',')
-            }
+            // Per-axis parameters, stored by key and axis letter (`DX` → `0,10,11,0`).
+            'Z' | 'N' | 'U' | 'Y' | 'D' => match arg.split_once(',') {
+                Some((a, v))
+                    if a.len() == 1 && axis_index(a.chars().next().unwrap_or(' ')).is_some() =>
+                {
+                    self.axis_params
+                        .insert(format!("{key}{}", a.to_ascii_uppercase()), v.to_owned());
+                    true
+                }
+                _ => false,
+            },
             'I' | 'Q' => match arg.split_once(',') {
                 Some((n, def)) => match n.parse::<u8>() {
                     Ok(n) => {
@@ -762,6 +767,24 @@ impl SimCore {
                 Ok(n) => format!("&H{n},{}", self.counters.get(&n).copied().unwrap_or(0)),
                 Err(_) => return push_err(out, 3),
             },
+            Some('O') => match arg.chars().next().and_then(axis_index) {
+                Some((axis, _)) => format!("&O{},{}", arg.to_ascii_uppercase(), self.offsets[axis]),
+                None => return push_err(out, 12),
+            },
+            Some(k @ ('D' | 'Z' | 'N' | 'U' | 'Y')) => {
+                let a = arg.to_ascii_uppercase();
+                if a.len() != 1 || axis_index(a.chars().next().unwrap_or(' ')).is_none() {
+                    return push_err(out, 12);
+                }
+                // Default homing: search negative with entries 10/11 (the 601's home is at
+                // the minus end; GMC homes with #G10/#G11) [CAP g_init].
+                let default = if k == 'D' { "0,10,11,0" } else { "0" };
+                let v = self
+                    .axis_params
+                    .get(&format!("{k}{a}"))
+                    .map_or(default, String::as_str);
+                format!("&{k}{a},{v}")
+            }
             Some('M') => format!("&M{}", self.max_speed),
             Some('R') => format!("&R{}", self.ramp_ms),
             Some('S') => format!("&S{}", self.start_speed),
@@ -1056,6 +1079,10 @@ impl SimCore {
             Duration::from_millis(self.c_val(1).max(0) as u64)
         };
         let heartbeat = self.c_val(8);
+        if self.button_release_at.is_some_and(|t| now >= t) {
+            self.button_release_at = None;
+            out.extend(self.set_input(221, false));
+        }
 
         loop {
             let mut progressed = false;
@@ -1114,18 +1141,6 @@ impl SimCore {
                 match front.flatten() {
                     Some(None) if self.blocked_on_input() => break,
                     Some(None) => {
-                        if matches!(
-                            self.queue.front(),
-                            Some(Queued {
-                                item: Item::WaitInput {
-                                    input: 221,
-                                    high: true
-                                },
-                                ..
-                            })
-                        ) {
-                            self.start_button_latched = false; // the press is consumed
-                        }
                         self.pop_front_item();
                         continue;
                     }
@@ -1415,25 +1430,29 @@ mod tests {
 
     #[test]
     fn start_button() {
+        // A press holds I221 high for BUTTON_HOLD, then tick releases it.
         let mut c = homed();
         assert_eq!(send(&mut c, "@I221", 0), "@I221,0<0d>");
-        c.press_start_button();
-        assert_eq!(send(&mut c, "@I221", 1), "@I221,1<0d>");
-        assert_eq!(send(&mut c, "@I221", 2), "@I221,0<0d>", "reads 1 once");
-
         assert_eq!(
-            c.press_start_button(),
+            c.press_start_button(ms(0)),
             Vec::<u8>::new(),
             "no bytes without #C35"
         );
-        send(&mut c, "#C35,1", 3);
+        assert_eq!(send(&mut c, "@I221", 100), "@I221,1<0d>", "held");
+        assert_eq!(c.tick(ms(200)), Vec::<u8>::new());
+        assert_eq!(send(&mut c, "@I221", 201), "@I221,0<0d>", "released");
+
+        send(&mut c, "#C35,1", 300);
         assert_eq!(
-            c.press_start_button(),
-            vec![0x06, 0x07],
-            "#C35 bit 1: I221 high, low"
+            c.press_start_button(ms(300)),
+            vec![0x06],
+            "#C35 bit 1: high"
         );
-        send(&mut c, "#C35,2", 4);
-        assert_eq!(c.press_start_button(), Vec::<u8>::new(), "bit 1 off");
+        assert_eq!(c.tick(ms(500)), vec![0x07], "then low on release");
+
+        send(&mut c, "#C35,2", 600);
+        assert_eq!(c.press_start_button(ms(600)), Vec::<u8>::new(), "bit 1 off");
+        c.tick(ms(800));
         assert_eq!(c.set_input(222, true), vec![0x08]);
         assert_eq!(
             c.set_input(222, true),
@@ -1441,6 +1460,25 @@ mod tests {
             "only level changes"
         );
         assert_eq!(c.set_input(222, false), vec![0x09]);
+    }
+
+    #[test]
+    fn button_pressed_before_a_wait_does_not_satisfy_it() {
+        // A press is a level, not a latch: an earlier press must not release a later I221.
+        let mut c = homed();
+        for cmd in ["#G20,4000", "@M2"] {
+            send(&mut c, cmd, 0);
+        }
+        c.press_start_button(ms(0));
+        c.tick(ms(300));
+        send(&mut c, "I221", 400);
+        send(&mut c, "L20,X400,Y0,Z0", 400);
+        c.tick(ms(1000));
+        assert_eq!(c.snapshot(ms(1000)).position[0], 0, "still held");
+        c.press_start_button(ms(1000));
+        c.tick(ms(1001));
+        c.tick(ms(1500));
+        assert_eq!(c.snapshot(ms(1500)).position[0], 400);
     }
 
     #[test]

@@ -4,10 +4,14 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use controller::{Axis, Config, Controller, ControllerError, Event, Signal, connect, mode};
+use controller::{
+    Axis, Config, Controller, ControllerError, ErrorCode, Event, Setting, Signal, WatchdogMs,
+    connect, mode,
+};
 use link::memory::{self, Remote};
 
 // ----------------------------------------------------------------------------- fake controller
@@ -98,6 +102,57 @@ fn connect_probes_reads_version_and_enters_mode_0() {
     assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0"]);
 }
 
+/// The error `connect` fails with, against a fake that answers the probe with `respond`.
+fn connect_error<F>(respond: F) -> ControllerError
+where
+    F: FnMut(&str, &Remote) -> Act + Send + 'static,
+{
+    let (link, fake) = fake(respond);
+    let Err(e) = connect(link, cfg()) else {
+        panic!("connect should fail");
+    };
+    fake.join().expect("fake controller thread");
+    e
+}
+
+/// A failed first contact says what came back, so a dead link, a wrong baud rate and a
+/// firmware that refuses the probe input are told apart (the probe is the first command).
+#[test]
+fn failed_resync_says_what_came_back() {
+    match connect_error(|_, _| Act::Silent) {
+        ControllerError::ResyncFailed {
+            bytes_heard: 0,
+            lines_heard,
+            ..
+        } => assert!(lines_heard.is_empty()),
+        other => panic!("silent controller: {other:?}"),
+    }
+
+    // Noise without a CR, as at the wrong baud rate.
+    match connect_error(|_, _| Act::Reply(b"@#~".to_vec())) {
+        ControllerError::ResyncFailed {
+            bytes_heard: 3,
+            lines_heard,
+            ..
+        } => assert!(lines_heard.is_empty()),
+        other => panic!("noise: {other:?}"),
+    }
+
+    // A firmware that rejects the probe input.
+    let e = connect_error(|l, _| match l {
+        l if l.starts_with("@I") => reply("*003\r"),
+        other => standard(other),
+    });
+    match &e {
+        ControllerError::ResyncFailed { lines_heard, .. } => assert_eq!(lines_heard, &["*003"]),
+        other => panic!("refused probe: {other:?}"),
+    }
+    assert!(
+        e.to_string().contains(r#"only other replies: ["*003"]"#),
+        "{e}"
+    );
+}
+
 #[test]
 fn typed_queries() {
     let (link, fake) = fake(|l, _| standard(l));
@@ -105,7 +160,7 @@ fn typed_queries() {
     assert_eq!(ctl.position_steps(Axis::X).expect("@LX"), 44149);
     assert!(!ctl.read_input(221).expect("@I221"));
     assert_eq!(ctl.buffer_level_pct().expect("@H"), 12);
-    assert_eq!(ctl.error_code().expect("@E"), 0);
+    assert_eq!(ctl.error_code().expect("@E"), ErrorCode(0));
     assert!(ctl.status().expect("@X").homed);
     finish(ctl, fake);
 }
@@ -137,7 +192,12 @@ fn full_journey_through_the_modes() {
     cut.wait_idle(Duration::from_secs(1)).expect("idle");
 
     let mut params = cut.into_parameters().expect("@M0");
-    params.set_speed(20, 36000).expect("#G20");
+    params
+        .set(Setting::Speed {
+            entry: 20,
+            value: 36000,
+        })
+        .expect("#G20");
 
     assert_eq!(
         finish(params, fake),
@@ -168,9 +228,14 @@ fn rejected_command_keeps_pairing() {
         other => standard(other),
     });
     let mut ctl = open(link);
-    match ctl.set_host_watchdog_ms(500) {
+    match ctl.set(Setting::HostWatchdog(
+        WatchdogMs::new(500).expect("in range"),
+    )) {
         Err(ControllerError::Rejected { command, code }) => {
-            assert_eq!((command.as_str(), code), ("#C19,500", 21));
+            assert_eq!(
+                (command.to_string().as_str(), code),
+                ("#C19,500", ErrorCode(21))
+            );
         }
         other => panic!("expected Rejected, got {other:?}"),
     }
@@ -218,7 +283,7 @@ fn fault_flag_reports_error_code() {
     match ctl.wait_idle(Duration::from_secs(1)) {
         Err(ControllerError::Fault { status, code }) => {
             assert!(status.error);
-            assert_eq!(code, Some(41));
+            assert_eq!(code, Some(ErrorCode(41)));
         }
         other => panic!("expected Fault, got {other:?}"),
     }
@@ -277,6 +342,49 @@ fn stop_from_another_thread_interrupts_a_wait_and_latches() {
     assert!(finish(ctl, fake).iter().any(|l| l == "@B"));
 }
 
+/// Nothing may reach the wire after the stop lane's `@B`, however the stop races the command
+/// path. A vector that slipped through would start a new motion right after the brake.
+/// Before the latch was checked under the writer lock, about one run in seven leaked one.
+#[test]
+fn nothing_is_written_after_a_stop() {
+    for run in 0..300 {
+        let (link, fake) = fake(|l, _| standard(l));
+        let mut cut = open(link).into_cutting().expect("@M2");
+        let stop = cut.stop_handle();
+        let go = Arc::new(Barrier::new(2));
+        let stopper = {
+            let go = Arc::clone(&go);
+            thread::spawn(move || {
+                go.wait();
+                for _ in 0..(run % 50) * 20 {
+                    std::hint::spin_loop(); // vary where in the stream the stop lands
+                }
+                stop.brake().expect("brake");
+            })
+        };
+        go.wait();
+        let mut x = 0;
+        loop {
+            match cut.vector(20, x, 0, 0) {
+                Ok(()) => x += 1,
+                Err(ControllerError::Stopped) => break,
+                Err(e) => panic!("run {run}: {e}"),
+            }
+        }
+        stopper.join().expect("stopper");
+        let lines = finish(cut, fake);
+        let brake = lines
+            .iter()
+            .position(|l| l == "@B")
+            .expect("@B on the wire");
+        assert!(
+            lines[brake + 1..].is_empty(),
+            "run {run}: written after @B: {:?}",
+            &lines[brake + 1..]
+        );
+    }
+}
+
 #[test]
 fn mode_two_respects_buffer_flow_control() {
     let vectors = AtomicUsize::new(0);
@@ -332,7 +440,9 @@ fn async_error_during_a_cut_is_reported() {
     cut.vector(20, 999_999, 0, 0).expect("streamed");
     assert!(matches!(
         cut.wait_idle(Duration::from_secs(1)),
-        Err(ControllerError::AsyncError { code: 33 })
+        Err(ControllerError::AsyncError {
+            code: ErrorCode(33)
+        })
     ));
     finish(cut, fake);
 }
@@ -347,7 +457,10 @@ fn rejected_mode_switch_hands_the_controller_back() {
     let err = ctl.into_cutting().expect_err("must be rejected");
     assert!(matches!(
         err.error,
-        ControllerError::Rejected { code: 28, .. }
+        ControllerError::Rejected {
+            code: ErrorCode::MODE_CHANGE_WHILE_MOVING,
+            ..
+        }
     ));
     let mut ctl = *err.controller; // still Controller<Parameters>
     ctl.status().expect("still usable");
@@ -396,7 +509,12 @@ fn fault_racing_a_status_poll_is_async_not_a_rejection() {
         .wait_idle(Duration::from_secs(1))
         .expect_err("fault reported");
     assert!(
-        matches!(err, ControllerError::AsyncError { code: 33 }),
+        matches!(
+            err,
+            ControllerError::AsyncError {
+                code: ErrorCode(33)
+            }
+        ),
         "{err}"
     );
     let s = ctl.status().expect("still in step");

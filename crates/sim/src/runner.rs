@@ -154,7 +154,8 @@ impl Sim {
 
     pub fn press_start_button(&self) {
         self.with(|st| {
-            let out = st.core.press_start_button();
+            let now = st.now();
+            let out = st.core.press_start_button(now);
             st.enqueue(out, Duration::ZERO);
         });
     }

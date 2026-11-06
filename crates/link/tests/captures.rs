@@ -4,7 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use link::capture::{self, Direction};
+use link::Direction;
+use link::capture;
 use protocol::{Decoder, Frame, Reply};
 
 fn captures() -> Vec<PathBuf> {
@@ -46,6 +47,7 @@ fn every_capture_parses_and_decodes() {
             for frame in decoder.push(&t.bytes) {
                 match frame {
                     Frame::Unknown(b) => panic!("{name}: unknown control byte {b:#04x}"),
+                    Frame::Garbled(b) => panic!("{name}: {} bytes without a CR", b.len()),
                     Frame::Line(l) => {
                         lines += 1;
                         // Anything that looks like a status reply must parse as one.
