@@ -148,7 +148,7 @@ pub fn parse_param(line: &str, param: Param) -> Option<Vec<String>> {
     // that continues the number, so numbered queries need a comma.
     let numbered = matches!(
         param,
-        Param::Config(_) | Param::Speed(_) | Param::InputDef(_)
+        Param::Config(_) | Param::Speed(_) | Param::BrakeAngle(_) | Param::InputDef(_)
     );
     let rest = match rest.strip_prefix(',') {
         Some(fields) => fields,
@@ -244,6 +244,17 @@ mod tests {
             f("&I240,000h,0,0", Param::InputDef(240)),
             Some(vec!["000h".into(), "0".into(), "0".into()])
         );
+        // The spec's examples [SPEC1 p.29]; `&B` asked per entry, like `&G`.
+        assert_eq!(
+            f("&ZX,1000", Param::StepsPerRev(Axis::X)),
+            Some(vec!["1000".into()])
+        );
+        assert_eq!(
+            f("&NY,123000", Param::MicrometresPerRev(Axis::Y)),
+            Some(vec!["123000".into()])
+        );
+        assert_eq!(f("&B20,90", Param::BrakeAngle(20)), Some(vec!["90".into()]));
+        assert_eq!(f("&B20,90", Param::BrakeAngle(2)), None, "&B2 vs &B20");
     }
 
     #[test]

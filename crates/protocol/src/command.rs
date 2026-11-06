@@ -167,6 +167,14 @@ pub enum Param {
     MaxSpeed,
     /// `&S`: start/stop speed.
     StartSpeed,
+    /// `&B<entry>`: braking angle of a table entry, 0–90° [SPEC1 p.18]. The query table on
+    /// p.29 shows `&B` without an entry, but `#B` takes one (`#By,xx`) and GMC sets it per
+    /// entry (`#B20,90` [CAP]), so this asks per entry, like `&G`.
+    BrakeAngle(u8),
+    /// `&Z<a>`: axis resolution numerator, steps per revolution (GMC: `#ZZ,3000` [CAP g_init]).
+    StepsPerRev(Axis),
+    /// `&N<a>`: axis resolution denominator, µm per revolution (GMC: `#NZ,10000` [CAP g_init]).
+    MicrometresPerRev(Axis),
     /// `&O<a>`: offset driven after homing.
     HomeOffset(Axis),
     /// `&D<a>`: homing direction and speed entries (`dir,g1,g2,g3`; dir 0 = negative).
@@ -183,6 +191,9 @@ impl fmt::Display for Param {
             Param::Ramp => write!(f, "&R"),
             Param::MaxSpeed => write!(f, "&M"),
             Param::StartSpeed => write!(f, "&S"),
+            Param::BrakeAngle(g) => write!(f, "&B{g}"),
+            Param::StepsPerRev(a) => write!(f, "&Z{}", a.upper()),
+            Param::MicrometresPerRev(a) => write!(f, "&N{}", a.upper()),
             Param::HomeOffset(a) => write!(f, "&O{}", a.upper()),
             Param::Homing(a) => write!(f, "&D{}", a.upper()),
             Param::InputDef(n) => write!(f, "&I{n}"),
@@ -256,11 +267,18 @@ pub enum Command {
         y: i32,
         z: i32,
     },
+    /// `x<dx>,y<dy>,z<dz>`: a follow-on vector, relative to the previous vector's target, at
+    /// that vector's speed entry [SPEC1 p.33: lowercase = relative; after the first vector "the
+    /// L and the speed entry can be omitted"]. Axes that do not move are left out. Only valid
+    /// after a [`Command::Vector`] in the same stream; [`Command::path`] builds them.
+    Step { x: i32, y: i32, z: i32 },
     /// `A<hh>`: set auxiliary outputs, in sequence with the path.
     StreamOutputs(u8),
     /// `W<ms>`: dwell, in sequence with the path (e.g. let a valve switch).
     StreamDwellMs(u32),
-    /// `G<entry>,<v>`: change a speed-table entry, in sequence with the path.
+    /// `G<entry>,<v>`: set a speed-table entry "for all subsequent moves with this entry"
+    /// [SPEC1 p.34]. Whether that means in sequence with the stream or from the moment it
+    /// arrives is not settled; `gunnar check` stage 5 measures it.
     StreamSetSpeed { entry: u8, value: u32 },
     /// `I<n>` / `I-<n>`: wait until input `n` is high / low. Undefined inputs don't wait.
     StreamWaitInput { input: u8, level: Level },
@@ -299,6 +317,7 @@ impl Command {
             Home(_) | SetOutputs(_) | JogSteps { .. } => Some(Mode::Jog),
             Set(_) | QueryParam(_) => Some(Mode::Parameters),
             Vector { .. }
+            | Step { .. }
             | StreamOutputs(_)
             | StreamDwellMs(_)
             | StreamSetSpeed { .. }
@@ -317,6 +336,35 @@ impl Command {
         let mut s = self.to_string();
         s.push('\r');
         s.into_bytes()
+    }
+
+    /// A path through `points` (absolute, in steps) at speed entry `speed_entry`, encoded
+    /// compactly: the first point as an absolute `L<entry>,X…,Y…,Z…`, every later one as a
+    /// relative [`Command::Step`] (`x31,y-2,z1`). That is about half the bytes per point, and
+    /// exact: each step is the difference of two integer positions, so the steps add up to the
+    /// last point. Repeated points are skipped.
+    pub fn path(speed_entry: u8, points: &[[i32; 3]]) -> Vec<Command> {
+        let Some((&first, rest)) = points.split_first() else {
+            return Vec::new();
+        };
+        let mut out = vec![Command::Vector {
+            speed_entry,
+            x: first[0],
+            y: first[1],
+            z: first[2],
+        }];
+        let mut prev = first;
+        for &p in rest {
+            if p != prev {
+                out.push(Command::Step {
+                    x: p[0] - prev[0],
+                    y: p[1] - prev[1],
+                    z: p[2] - prev[2],
+                });
+                prev = p;
+            }
+        }
+        out
     }
 }
 
@@ -363,6 +411,18 @@ impl fmt::Display for Command {
                 y,
                 z,
             } => write!(f, "L{speed_entry},X{x},Y{y},Z{z}"),
+            Step { x, y, z } => {
+                let moved: Vec<String> = [('x', x), ('y', y), ('z', z)]
+                    .into_iter()
+                    .filter(|(_, d)| **d != 0)
+                    .map(|(axis, d)| format!("{axis}{d}"))
+                    .collect();
+                if moved.is_empty() {
+                    write!(f, "x0") // no motion, but still a valid vector
+                } else {
+                    write!(f, "{}", moved.join(","))
+                }
+            }
             StreamOutputs(bits) => write!(f, "A{bits:02X}"),
             StreamDwellMs(ms) => write!(f, "W{ms}"),
             StreamSetSpeed { entry, value } => write!(f, "G{entry},{value}"),
@@ -488,6 +548,43 @@ mod tests {
         for (cmd, wire) in cases {
             assert_eq!(cmd.encode(), wire.as_bytes(), "{cmd:?}");
         }
+    }
+
+    /// The first points of GMC's oval [CAP g_oval_mount], encoded as a compact path.
+    #[test]
+    fn a_path_is_one_absolute_vector_then_relative_steps() {
+        let oval = [
+            [7323, 10159, 5],
+            [7346, 10158, 16],
+            [7370, 10157, 28],
+            [7370, 10157, 28], // repeated: skipped
+            [7393, 10157, 39], // y unchanged: left out
+        ];
+        let wire: Vec<String> = Command::path(20, &oval)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            wire,
+            [
+                "L20,X7323,Y10159,Z5",
+                "x23,y-1,z11",
+                "x24,y-1,z12",
+                "x23,z11"
+            ]
+        );
+        // Exact: the steps add up to the last point.
+        let end = Command::path(20, &oval)
+            .iter()
+            .fold([0; 3], |at, cmd| match *cmd {
+                Command::Vector { x, y, z, .. } => [x, y, z],
+                Command::Step { x, y, z } => [at[0] + x, at[1] + y, at[2] + z],
+                _ => at,
+            });
+        assert_eq!(end, oval[4]);
+        assert!(Command::path(20, &[]).is_empty());
+        assert_eq!(Command::Step { x: 0, y: 0, z: 0 }.to_string(), "x0");
+        assert!(!Command::Step { x: 1, y: 0, z: 0 }.expects_reply());
     }
 
     #[test]

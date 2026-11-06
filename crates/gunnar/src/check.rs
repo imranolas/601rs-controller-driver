@@ -5,8 +5,8 @@
 //! | 2 | no  | `0x05` heartbeat (`#C8`), green button edges `0x06`/`0x07` (`#C35`) |
 //! | 3 | yes | homing like GMC, `0x04`, jogs and `0x01`, `@B`, `@Q` vs `$A`, outputs across a mode switch, clamp sides |
 //! | 4 | yes | a mode-2 square the way GMC does it: `@X` 15 → 14 → 04, exact return; `@B` mid-path discards the rest |
-//! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16` |
-//! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream |
+//! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16`; compact paths, a second speed entry, in-stream `G`, what `@N` counts and how wide it is |
+//! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream; no overrun at full speed; `@B` on a held stream discards it |
 //! | 7 | yes | `@S` loses the position; a limit switch arrives as an async `*03x` and shows in `@Y` (the drive towards it ends 20 mm past GMC's drivable range) |
 //!
 //! Safety rules: the head stays up (outputs `0x02`; only the spare bit `0x80` and, after
@@ -14,7 +14,7 @@
 //! (direction from `&D`). Nothing is saved (`#W` is never sent); the parameters a stage
 //! changes are read first and written back at the end. Ctrl-C brakes (`@B`) and exits.
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,9 @@ use crate::target::Res;
 
 /// Speed-table entry used for all test moves (GMC's choice too).
 const ENTRY: u8 = 20;
+/// A second entry, at half the speed: stage 5 checks that each vector's entry picks its feed,
+/// which is how one stream can travel and cut at different speeds.
+const TRAVEL_ENTRY: u8 = 21;
 /// X/Y scale [GCF `MachineScale` 400 /cm].
 const STEPS_PER_MM: i32 = 40;
 const STEP_20MM: i32 = 20 * STEPS_PER_MM;
@@ -59,6 +62,7 @@ const TOUCHED: &[SettingKey] = &[
     SettingKey::Speed(10),
     SettingKey::Speed(11),
     SettingKey::Speed(ENTRY),
+    SettingKey::Speed(TRAVEL_ENTRY),
     SettingKey::Ramp,
     SettingKey::HomeOffset(Axis::X),
     SettingKey::HomeOffset(Axis::Y),
@@ -100,6 +104,14 @@ impl Ctx {
                 Event::Signal(s) => Some(s),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The flow-control bytes (0x03, 0x02) among the signals since the last look.
+    fn flow_signals(&self) -> Vec<Signal> {
+        self.signals()
+            .into_iter()
+            .filter(|s| matches!(s, Signal::BufferAlmostFull | Signal::BufferResume))
             .collect()
     }
 
@@ -614,9 +626,9 @@ fn time_to_motion(c: &mut Controller<mode::Cutting>) -> Res<Duration> {
     }
 }
 
-fn timed_move(c: &mut Controller<mode::Cutting>, x: i32, y: i32, z: i32) -> Res<Duration> {
+fn timed_move(c: &mut Controller<mode::Cutting>, entry: u8, [x, y, z]: [i32; 3]) -> Res<Duration> {
     let start = Instant::now();
-    c.vector(ENTRY, x, y, z)?;
+    c.vector(entry, x, y, z)?;
     idle(c)?;
     Ok(start.elapsed())
 }
@@ -635,6 +647,7 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     }
     setup_moves(&mut p, ctx)?;
     let d = STEP_20MM * away(&mut p, Axis::X)?;
+    let dy = STEP_20MM * away(&mut p, Axis::Y)?;
     let [x0, y0, z0] = pos(&mut p)?;
     let mut c = p.into_cutting()?;
 
@@ -646,12 +659,22 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     c.outputs(0x02)?;
     thread::sleep(ctx.t(400));
     let s = c.status()?;
+    let n_dwell = c.command_counter()?;
     let q = c.read_output(249)?;
     let at = pos(&mut c)?;
     ctx.r.check(
         s.waiting,
         "W dwell reports waiting",
         format!("{s} during W1000"),
+    );
+    // "The command currently being processed" [SPEC1 p.15]: the dwell is the second command.
+    ctx.r.info(
+        "@N during the dwell",
+        match n_dwell {
+            2 => "2: it numbers the command being executed".to_owned(),
+            1 => "1: it counts the commands finished".to_owned(),
+            n => format!("{n}: see the @N count after A, W, L, A below"),
+        },
     );
     ctx.r.check(
         q,
@@ -725,12 +748,12 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         speed_override: Some(SpeedOverride::Off),
         ..StreamFlags::default()
     })?;
-    let t_off = timed_move(&mut c, x0 + d2, y0, z0)?;
+    let t_off = timed_move(&mut c, ENTRY, [x0 + d2, y0, z0])?;
     c.flags(StreamFlags {
         speed_override: Some(SpeedOverride::On),
         ..StreamFlags::default()
     })?;
-    let t_on = timed_move(&mut c, x0, y0, z0)?;
+    let t_on = timed_move(&mut c, ENTRY, [x0, y0, z0])?;
     c.set_override(OverridePct::NORMAL)?;
     ctx.r.check(
         t_on.as_secs_f64() > 1.4 * t_off.as_secs_f64(),
@@ -761,6 +784,111 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         at[0] == x0 + d,
         "stream resumes on the button",
         format!("X {}", at[0]),
+    );
+    c.vector(ENTRY, x0, y0, z0)?;
+    idle(&mut c)?;
+
+    // (f) A compact path [SPEC1 p.33]: one absolute vector, then relative steps without the
+    //     `L20,` prefix, unchanged axes left out. Every step goes away from home, so a firmware
+    //     that read them as absolute would still stay within 20 mm of home.
+    let path = [
+        [x0, y0, z0],
+        [x0 + d / 2, y0, z0],
+        [x0 + d, y0 + dy / 2, z0],
+        [x0 + d, y0 + dy, z0 + 150], // and turn the blade
+    ];
+    c.path(ENTRY, &path)?;
+    idle(&mut c)?;
+    let end = pos(&mut c)?;
+    let compact: usize = Command::path(ENTRY, &path)
+        .iter()
+        .map(|cmd| cmd.encode().len())
+        .sum();
+    let absolute: usize = path.iter().map(|&[x, y, z]| vector_bytes(x, y, z)).sum();
+    ctx.r.check(
+        end == path[3],
+        "compact path lands exactly",
+        format!("{end:?}; {compact} bytes against {absolute} as absolute vectors"),
+    );
+    c.vector(ENTRY, x0, y0, z0)?;
+    idle(&mut c)?;
+
+    // ...and a second speed entry: each vector names its entry, so one stream can travel and
+    // cut at different feeds without changing anything mid-stream.
+    let mut p = c.into_parameters()?;
+    p.set(Setting::Speed {
+        entry: TRAVEL_ENTRY,
+        value: (ctx.speed / 2).max(1),
+    })?;
+    let mut c = p.into_cutting()?;
+    let t20 = timed_move(&mut c, ENTRY, [x0 + d2, y0, z0])?;
+    let t21 = timed_move(&mut c, TRAVEL_ENTRY, [x0, y0, z0])?;
+    ctx.r.check(
+        t21.as_secs_f64() > 1.4 * t20.as_secs_f64(),
+        "each vector's speed entry picks its feed",
+        format!(
+            "40 mm: {} ms with L{ENTRY}, {} ms with L{TRAVEL_ENTRY} at half the speed",
+            t20.as_millis(),
+            t21.as_millis()
+        ),
+    );
+
+    // (g) In-stream G sets an entry "for all subsequent moves with this entry" [SPEC1 p.34]:
+    //     in sequence with the stream, or from the moment it arrives? Out at full speed, G
+    //     halves the entry, back: in sequence, the way back takes about twice as long.
+    let started = Instant::now();
+    c.vector(ENTRY, x0 + d2, y0, z0)?;
+    c.stream_speed(ENTRY, (ctx.speed / 2).max(1))?;
+    c.vector(ENTRY, x0, y0, z0)?;
+    let t_out = loop {
+        if (c.position_steps(Axis::X)? - x0).abs() >= d2.abs() {
+            break started.elapsed();
+        }
+        if started.elapsed() > Duration::from_secs(120) {
+            return Err("the outward move never arrived".into());
+        }
+    };
+    idle(&mut c)?;
+    let t_back = started.elapsed().saturating_sub(t_out);
+    let ratio = t_back.as_secs_f64() / t_out.as_secs_f64().max(1e-3);
+    ctx.r.info(
+        "in-stream G",
+        format!(
+            "40 mm out in {} ms, back in {} ms after G halved the entry: {}",
+            t_out.as_millis(),
+            t_back.as_millis(),
+            if ratio > 1.5 {
+                "applied in sequence with the stream"
+            } else if ratio < 1.25 {
+                "applied on receipt (the move ahead slowed too)"
+            } else {
+                "unclear"
+            }
+        ),
+    );
+    c.stream_speed(ENTRY, ctx.speed)?;
+
+    // (h) How wide is @N (shown as `@Nxxxx` [SPEC1 p.15])? Set it near 10 000 and run three
+    //     short vectors, the kind of command it certainly counts.
+    let step = STEPS_PER_MM * d.signum(); // 1 mm away from home
+    c.set_command_counter(9998)?;
+    for x in [x0 + step, x0, x0 + step] {
+        c.vector(ENTRY, x, y0, z0)?;
+    }
+    idle(&mut c)?;
+    let n = c.command_counter()?;
+    ctx.r.info(
+        "@N width",
+        format!(
+            "@N9998, then three vectors: {n} ({})",
+            if n >= 10_000 {
+                "more than four digits"
+            } else if n < 9998 {
+                "it wraps after 9999"
+            } else {
+                "the vectors were not counted"
+            }
+        ),
     );
     c.vector(ENTRY, x0, y0, z0)?;
     idle(&mut c)?;
@@ -846,17 +974,46 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         p.set(Setting::DeadTimeMs(100))?;
     }
 
-    // (b) Full stream with #C7,1: which byte comes first, and does the watchdog stay fed?
+    // (b) and (c) stream with flow control on.
+    p.set(Setting::FlowControl(true))?;
+    let mut c = p.into_cutting()?;
+    let start = [x0, y0, z0];
+    let mut reversed = false;
     if ctx.op.confirm(
         "Stream 5 laps of the circle (~22 KB) with flow control (#C7,1) and the host watchdog \
          (#C19,400). Head up.",
-    ) != Confirm::Go
+    ) == Confirm::Go
     {
+        reversed = stream_with_flow_control(&mut c, ctx, &pts, start)?;
+    } else {
         ctx.r.skip("flow control", "skipped");
-        return Ok(p);
     }
-    p.set(Setting::FlowControl(true))?;
-    let mut c = p.into_cutting()?;
+    if reversed {
+        ctx.r.skip(
+            "@B on a held stream",
+            "0x02/0x03 are the other way round: the driver's flow control must be fixed first",
+        );
+    } else if ctx.op.confirm(
+        "Stream the circle again and brake (@B) the moment the controller holds the stream \
+         (0x03), or once everything is sent: nothing may move afterwards. Head up.",
+    ) == Confirm::Go
+    {
+        brake_held_stream(&mut c, ctx, &pts, start)?;
+    } else {
+        ctx.r.skip("@B on a held stream", "skipped");
+    }
+    Ok(c.into_parameters()?)
+}
+
+/// (b) The full stream with `#C7,1`: which flow byte comes first, and does the host watchdog
+/// stay fed? Returns true if `0x02`/`0x03` turned out to be the other way round.
+fn stream_with_flow_control(
+    c: &mut Controller<mode::Cutting>,
+    ctx: &mut Ctx,
+    pts: &[(i32, i32)],
+    start: [i32; 3],
+) -> Res<bool> {
+    let [x0, y0, z0] = start;
     ctx.drain();
     let mut flow = Vec::new();
     let mut reversed = false;
@@ -868,22 +1025,14 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
             c.vector(ENTRY, x, y, z0)?;
         }
         thread::sleep(ctx.t(30).max(Duration::from_millis(3)));
-        for s in ctx.signals() {
-            if matches!(s, Signal::BufferAlmostFull | Signal::BufferResume) {
-                flow.push(s);
-            }
-        }
+        flow.extend(ctx.flow_signals());
         if flow.first() == Some(&Signal::BufferResume) {
             reversed = true;
             break; // 0x02 first: the prose on p.5 is right. Stop before overrunning.
         }
     }
-    idle(&mut c)?;
-    for s in ctx.signals() {
-        if matches!(s, Signal::BufferAlmostFull | Signal::BufferResume) {
-            flow.push(s);
-        }
-    }
+    idle(c)?;
+    flow.extend(ctx.flow_signals());
     let bytes: usize = pts.iter().map(|&(x, y)| vector_bytes(x, y, z0)).sum();
     ctx.r.info(
         "stream",
@@ -893,16 +1042,6 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
             started.elapsed().as_secs_f64()
         ),
     );
-    let names: Vec<&str> = flow
-        .iter()
-        .map(|s| {
-            if *s == Signal::BufferAlmostFull {
-                "0x03"
-            } else {
-                "0x02"
-            }
-        })
-        .collect();
     if flow.is_empty() {
         ctx.r
             .info("flow bytes", "none: the buffer never got close to full");
@@ -910,20 +1049,161 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         ctx.r.check(
             !reversed,
             "0x03 = almost full, 0x02 = room (table p.7)",
-            format!("seen in order: {}", names.join(" ")),
+            format!("seen in order: {}", flow_names(&flow)),
         );
     }
     if reversed {
         c.vector(ENTRY, x0, y0, z0)?;
-        idle(&mut c)?;
+        idle(c)?;
     }
-    let end = pos(&mut c)?;
+    let end = pos(c)?;
     ctx.r.check(
         end == [x0, y0, z0],
         "long stream completes (no *068, no *022)",
         format!("ended at {end:?}"),
     );
-    Ok(c.into_parameters()?)
+    Ok(reversed)
+}
+
+/// (c) Brake a long stream while the controller is holding it, the way the runner's stop-now
+/// will: through the stop lane, from another thread, the moment `0x03` arrives (or once
+/// everything is sent, if the buffer never fills). Afterwards nothing may move.
+///
+/// The spec says `@B` stops the axes [SPEC1 p.14], not what becomes of path data already
+/// received; and master commands are handled even while the stream is held [SPEC1 p.5, p.12],
+/// so a brake could overtake queued vectors that then start afterwards. Stage 4 brakes a
+/// four-vector path, which cannot show that. The path stays on the circle either way.
+fn brake_held_stream(
+    c: &mut Controller<mode::Cutting>,
+    ctx: &mut Ctx,
+    pts: &[(i32, i32)],
+    start: [i32; 3],
+) -> Res<()> {
+    let [x0, y0, z0] = start;
+    ctx.drain();
+    let events = c.subscribe();
+    let stop = c.stop_handle();
+    let (sent_all, all_sent) = mpsc::channel::<()>();
+    let braker = thread::spawn(move || {
+        loop {
+            // Dropped sender: everything went out without the stream being held.
+            if !matches!(all_sent.try_recv(), Err(TryRecvError::Empty)) {
+                return (false, stop.brake());
+            }
+            if let Ok(Event::Signal(Signal::BufferAlmostFull)) =
+                events.recv_timeout(Duration::from_millis(2))
+            {
+                return (true, stop.brake());
+            }
+        }
+    });
+    let mut sent = 0;
+    let mut failed = None;
+    for &(x, y) in pts {
+        match c.vector(ENTRY, x, y, z0) {
+            Ok(()) => sent += 1,
+            Err(ControllerError::Stopped) => break, // the brake landed
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    drop(sent_all);
+    let (held, braked) = braker.join().map_err(|_| "the brake thread panicked")?;
+    braked?;
+    if let Some(e) = failed {
+        return Err(e.into());
+    }
+    c.clear_stop()?;
+    idle(c)?;
+    let stopped_at = pos(c)?;
+    let level = c.buffer_level_pct()?;
+    thread::sleep(ctx.t(3000)); // well past the dead time and many legs of the circle
+    let s = c.status()?;
+    let later = pos(c)?;
+    // Everything since the start of the step. `clear_stop` has dropped faults that arrived
+    // around the stop, so they are read from the events here.
+    let seen: Vec<Event> = ctx.events.try_iter().collect();
+    let flow: Vec<Signal> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::Signal(s @ (Signal::BufferAlmostFull | Signal::BufferResume)) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    let faults: Vec<&str> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::Unsolicited(line) if line.starts_with('*') => Some(line.as_str()),
+            _ => None,
+        })
+        .collect();
+    ctx.r.check(
+        faults.is_empty(),
+        "no overrun streaming at full speed with #C7,1",
+        if faults.is_empty() {
+            "the controller's 0x03 came in time over this link".to_owned()
+        } else {
+            format!(
+                "{}: 0x03 came too late over this link (adapter buffering?), so pace by @H as \
+                 well (Config::stream_window_bytes)",
+                faults.join(" ")
+            )
+        },
+    );
+    let when = if held {
+        format!(
+            "while the stream was held (0x03), after {sent} of {} vectors",
+            pts.len()
+        )
+    } else {
+        format!(
+            "with all {} vectors sent; the stream was never held",
+            pts.len()
+        )
+    };
+    ctx.r.check(
+        later == stopped_at && !s.moving,
+        "@B discards queued path data",
+        format!(
+            "braked {when}; @H{level} after; {later:?} 3 s later, {s}; flow bytes: {}",
+            flow_names(&flow)
+        ),
+    );
+    if held && flow.last() == Some(&Signal::BufferAlmostFull) {
+        ctx.r.fail(
+            "0x02 after the brake",
+            "none came: the stream stays held after @B, so the driver would wait for room \
+             that never comes (reset the flow state on a stop)",
+        );
+        return Ok(()); // a return move would only wait out the flow timeout
+    }
+    idle(c)?; // if it did resume, let it finish before driving back
+    c.vector(ENTRY, x0, y0, z0)?;
+    idle(c)?;
+    let end = pos(c)?;
+    ctx.r.check(
+        end == start,
+        "stream usable after the brake",
+        format!("back at {end:?}"),
+    );
+    Ok(())
+}
+
+/// `0x03 0x02 …`, or `none`.
+fn flow_names(flow: &[Signal]) -> String {
+    if flow.is_empty() {
+        return "none".to_owned();
+    }
+    let names: Vec<&str> = flow
+        .iter()
+        .map(|s| match s {
+            Signal::BufferAlmostFull => "0x03",
+            _ => "0x02",
+        })
+        .collect();
+    names.join(" ")
 }
 
 // ------------------------------------------------------------------ stage 7

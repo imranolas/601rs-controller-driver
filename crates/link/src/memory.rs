@@ -5,12 +5,32 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{Link, Reader, Writer};
 
 /// Create a connected pair. `read_timeout` bounds each host-side `read`, like a serial port's.
+/// Writes are instant, so the host can get any number of bytes ahead of the remote side.
 pub fn pair(read_timeout: Duration) -> (Link, Remote) {
+    make(read_timeout, None)
+}
+
+/// Like [`pair`], but each host write takes as long as its bytes would on a line carrying
+/// `bytes_per_sec`, and returns once they are "sent", as a serial port's write and flush do.
+/// The host then cannot get ahead of the line, so flow control and a path that needs more
+/// bytes than the line carries behave as they do on the machine.
+pub fn paced_pair(read_timeout: Duration, bytes_per_sec: f64) -> (Link, Remote) {
+    make(
+        read_timeout,
+        Some(Pace {
+            bytes_per_sec,
+            free_at: Instant::now(),
+        }),
+    )
+}
+
+fn make(read_timeout: Duration, pace: Option<Pace>) -> (Link, Remote) {
     let (host_tx, remote_rx) = mpsc::channel::<Vec<u8>>();
     let (remote_tx, host_rx) = mpsc::channel::<Vec<u8>>();
     let link = Link {
@@ -20,7 +40,7 @@ pub fn pair(read_timeout: Duration) -> (Link, Remote) {
             pending: VecDeque::new(),
             timeout: read_timeout,
         }),
-        writer: Box::new(MemWriter { tx: host_tx }),
+        writer: Box::new(MemWriter { tx: host_tx, pace }),
     };
     (
         link,
@@ -60,12 +80,27 @@ impl Reader for MemReader {
     }
 }
 
+/// A line that sends one byte after another at a fixed rate.
+struct Pace {
+    bytes_per_sec: f64,
+    /// When the line has sent everything written so far.
+    free_at: Instant,
+}
+
 struct MemWriter {
     tx: Sender<Vec<u8>>,
+    pace: Option<Pace>,
 }
 
 impl Writer for MemWriter {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if let Some(pace) = &mut self.pace {
+            let now = Instant::now();
+            let wire_time = Duration::from_secs_f64(bytes.len() as f64 / pace.bytes_per_sec);
+            pace.free_at = pace.free_at.max(now) + wire_time;
+            // The far end has the bytes once they have crossed the line, and not before.
+            thread::sleep(pace.free_at.saturating_duration_since(now));
+        }
         self.tx
             .send(bytes.to_vec())
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "remote end closed"))
@@ -147,6 +182,22 @@ mod tests {
         assert!(
             link.reader.read(&mut buf).is_err(),
             "closed remote is an error"
+        );
+    }
+
+    #[test]
+    fn a_paced_link_takes_the_line_time() {
+        // 1 000 bytes at 10 000 bytes/s: at least 100 ms, however they are split.
+        let (mut link, mut remote) = paced_pair(Duration::from_millis(5), 10_000.0);
+        let started = Instant::now();
+        for _ in 0..10 {
+            link.writer.write_all(&[b'x'; 99]).expect("write");
+            link.writer.write_all(b"\r").expect("write");
+        }
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(
+            remote.recv_line(Duration::from_millis(50)).map(|l| l.len()),
+            Some(99)
         );
     }
 }

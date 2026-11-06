@@ -15,10 +15,12 @@ fn fault_code(code: &Option<ErrorCode>) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControllerError {
+    /// The link is gone: the reader saw it close, or a write to it failed.
     #[error("link closed: {0}")]
     Disconnected(String),
 
-    #[error("I/O error on the link: {0}")]
+    /// The session could not start (its reader thread could not be spawned).
+    #[error("cannot start the session: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("no reply to `{command}` within {timeout_ms} ms")]
@@ -69,3 +71,8 @@ pub enum ControllerError {
 }
 
 pub type Result<T> = std::result::Result<T, ControllerError>;
+
+/// A duration as whole milliseconds, for the `timeout_ms` fields above.
+pub(crate) fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}

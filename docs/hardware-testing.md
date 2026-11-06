@@ -1,15 +1,16 @@
 # Testing against the machine
 
 Two commands, both from the workspace root. Every byte in both directions is written to a
-timestamped log (`gunnar-<cmd>-<time>.log`, or `--log FILE`). Bring the logs back: each one
-becomes a capture we can replay against the simulator and cite in the docs.
+timestamped log (`gunnar-<cmd>-<time>.log`, or `--log FILE`). Bring the logs back and put
+them in `testdata/sessions/`: `cargo test` replays each one against the simulator and points
+at every reply where the simulator differs from the box (see the README there).
 
 ## Before you go
 
 ```sh
 cargo build --release -p gunnar
 ./target/release/gunnar probe sim            # dry run, read-only
-./target/release/gunnar check sim            # dry run of every stage (~30 s)
+./target/release/gunnar check sim            # dry run of every stage (~45 s)
 ./target/release/gunnar check sim-limits     # same, with limit inputs mapped (stage 7 path)
 ```
 
@@ -24,8 +25,9 @@ cargo build --release -p gunnar
      but no reply (line settings), or replies that were not the driver's `@I100` probe.
    - Answers: baud/framing, whether the firmware answers the resync probe inputs
      `@I100`–`@I119`, v1.00 commands on firmware 2.00, which inputs are mapped,
-     what the box boots with versus what GMC sets, and whether it needs GMC's licence
-     exchange (`@M1 accepted` vs `*007`).
+     and whether it needs GMC's licence exchange (`@M1 accepted` vs `*007`).
+   - Reads back every parameter GMC writes. The line **box vs GMC at connect** says whether
+     the box boots with GMC's configuration or a driver must write it at connect, as GMC does.
 5. **Stages 2–7:** `./target/release/gunnar check /dev/cu.usbserial-XXXX --stage 2`, then
    `--stage 3`, and so on (or `--stage 2-7`). Each step says what it will do and waits for
    Enter (`s` skips the step, `q` at a stage prompt ends the run).
@@ -35,8 +37,8 @@ cargo build --release -p gunnar
 | 2 | no | `#C8` heartbeat `0x05`; `#C35` green-button bytes `0x06`/`0x07` (you press the button) |
 | 3 | yes | homing exactly as GMC does it; 20 mm jogs away from home and back; `@B` brakes a jog; `@Q249` follows `$A` bit 7 (spare output); outputs across a mode switch; which clamp each bit closes (you answer) |
 | 4 | yes | 20 mm square in mode 2, GMC style; `@X` 15 → 14 → 04; exact return; `@B` during the square discards the rest of the path instead of resuming it (stop-now depends on this) |
-| 5 | yes | in-stream `A`/`W`/`I221`/`C`; `@N` progress (does `C` count?); `C1` skips the dead time; `@O50` with `C16`/`C8`; the stream waits for the green button (you press it) |
-| 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full" (the spec contradicts itself); a 22 KB stream with `#C7,1` and `#C19,400` completes |
+| 5 | yes | in-stream `A`/`W`/`I221`/`C`; `@N` progress (does `C` count? the command running or those finished? does it wrap after 9999?); `C1` skips the dead time; `@O50` with `C16`/`C8`; the stream waits for the green button (you press it); a compact path (relative steps without the `L20,` prefix) lands exactly; a second speed entry gives its own feed; whether in-stream `G` applies in sequence or on receipt |
+| 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full" (the spec contradicts itself); a 22 KB stream with `#C7,1` and `#C19,400` completes; streaming at full speed does not overrun (else 0x03 comes too late over this link); `@B` while the stream is held discards the queued path, nothing moves afterwards, and `0x02` follows |
 | 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past GMC's drivable range (X 1560 mm): async `*033`, `@Y` limit bit, recovery |
 
 ## Safety

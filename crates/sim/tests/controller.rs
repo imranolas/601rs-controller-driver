@@ -185,10 +185,16 @@ fn pacing_lets_a_long_curve_through_a_small_buffer() {
     drop(events);
 }
 
+/// On a line the host cannot run ahead of (writes block until sent, as a serial port's write
+/// and flush do), the controller's 0x03 warning alone keeps a small buffer from overflowing:
+/// its ~200-byte margin is far more than the line carries while the host reacts.
+///
+/// What this cannot show: a USB-serial adapter buffers bytes the host has already "sent" and
+/// holds back the controller's 0x03 (its latency timer, often 16 ms). Whether 0x03 is still in
+/// time with those is measured on the machine, by `gunnar check` stage 6.
 #[test]
-fn without_pacing_the_same_curve_overruns_even_with_0x03_signals() {
-    // The 200-byte early warning cannot stop a host that writes faster than it can react.
-    let (mut p, _sim) = start(
+fn on_a_real_line_0x03_alone_keeps_the_buffer_from_overflowing() {
+    let (mut p, sim) = start(
         SimConfig {
             buffer_capacity: 1000,
             ..homed()
@@ -201,17 +207,17 @@ fn without_pacing_the_same_curve_overruns_even_with_0x03_signals() {
         value: 40_000,
     })
     .expect("#G20");
+    // A long dead time holds the motion back, so the line fills the buffer before it drains.
+    p.set(Setting::DeadTimeMs(3000)).expect("#C1");
+    let events = p.subscribe();
     let mut cut = p.into_cutting().expect("@M2");
-    let outcome = stream_curve(&mut cut).and_then(|()| cut.wait_idle(LONG).map(|_| ()));
-    assert!(
-        matches!(
-            outcome,
-            Err(ControllerError::AsyncError {
-                code: ErrorCode(22)
-            })
-        ),
-        "buffer overrun (*022) must surface, got {outcome:?}"
-    );
+    stream_curve(&mut cut).expect("every vector accepted");
+    cut.wait_idle(LONG).expect("no *022");
+    assert_eq!(sim.snapshot().error, 0);
+    let held = events
+        .try_iter()
+        .any(|e| e == Event::Signal(Signal::BufferAlmostFull));
+    assert!(held, "the 1000-byte buffer did fill: 0x03 was needed");
 }
 
 #[test]
@@ -313,6 +319,38 @@ fn pulled_cable_is_a_disconnect() {
     sim.disconnect();
     thread::sleep(Duration::from_millis(20));
     assert!(matches!(p.status(), Err(ControllerError::Disconnected(_))));
+}
+
+/// A dense curve streamed as a compact path (one absolute vector, then relative steps without
+/// the `L20,` prefix [SPEC1 p.33]) lands exactly on its last point.
+#[test]
+fn a_compact_path_lands_exactly() {
+    let (mut p, sim) = start(homed(), 20.0);
+    p.set(Setting::Speed {
+        entry: 20,
+        value: 40_000,
+    })
+    .expect("#G20");
+    let mut cut = p.into_cutting().expect("@M2");
+    let circle: Vec<[i32; 3]> = (0..=200)
+        .map(|k: i32| {
+            let a = std::f64::consts::TAU * f64::from(k) / 200.0;
+            [
+                (3000.0 + 1200.0 * a.cos()).round() as i32,
+                (3000.0 + 1200.0 * a.sin()).round() as i32,
+                k * 9, // the blade turns along the curve
+            ]
+        })
+        .collect();
+    cut.path(20, &circle).expect("streamed");
+    cut.wait_idle(LONG).expect("finished");
+    assert_eq!(sim.snapshot().position, circle[200].map(i64::from));
+    let steps = sim
+        .received()
+        .iter()
+        .filter(|l| l.starts_with(['x', 'y', 'z']))
+        .count();
+    assert_eq!(steps, 200, "every point after the first is a relative step");
 }
 
 /// v1.00 in-stream journey: outputs and dwell in the buffer, a wait for the green button,

@@ -16,8 +16,6 @@ use crate::switches::{LimitSwitch, Side};
 pub struct ErrorCode(pub u16);
 
 impl ErrorCode {
-    /// `@E0`: no error.
-    pub const NONE: Self = Self(0);
     /// `*007`: service code required. Also what a used-up start counter is expected to give
     /// (the spec does not name that error) [SPEC1 p.10].
     pub const SERVICE_CODE_REQUIRED: Self = Self(7);

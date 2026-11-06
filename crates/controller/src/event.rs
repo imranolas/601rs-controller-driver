@@ -5,13 +5,10 @@ use protocol::Signal;
 
 use crate::session::lock;
 
-/// Something observed on the link, delivered to every subscriber.
+/// Something observed on the link, delivered to every subscriber. (For a byte-level trace of
+/// the link, wrap it with `link::tap`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// Bytes written to the controller (for tracing / GMC-format logs).
-    Sent(Vec<u8>),
-    /// Bytes received from the controller, as read (for tracing).
-    Received(Vec<u8>),
     /// An out-of-band signal byte (positioned, homing done, start button, flow control …).
     Signal(Signal),
     /// A control byte the decoder does not know.

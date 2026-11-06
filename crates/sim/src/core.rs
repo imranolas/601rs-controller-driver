@@ -756,6 +756,11 @@ impl SimCore {
                 ),
                 Err(_) => return push_err(out, 3),
             },
+            // Braking angle per table entry, like `&G` (`#By,xx` [SPEC1 p.18]).
+            Some('B') => match arg.parse::<u8>() {
+                Ok(g) => format!("&B{g},{}", self.brake_angles.get(&g).copied().unwrap_or(0)),
+                Err(_) => return push_err(out, 3),
+            },
             Some('I') => match arg.parse::<u8>() {
                 Ok(n) => format!(
                     "&I{n},{}",
@@ -924,6 +929,9 @@ impl SimCore {
                 Ok(ms) => Item::Dwell(Duration::from_millis(ms)),
                 Err(_) => return push_err(out, 45),
             },
+            // "From now on, for all subsequent moves with this entry" [SPEC1 p.34]. Modelled
+            // as applied on receipt (not queued, not counted by @N); whether the firmware
+            // applies it in sequence with the stream instead is what check stage 5 measures.
             'G' => {
                 match split_entry(&line[1..]).and_then(|(g, v)| Some((g, v.parse::<u32>().ok()?))) {
                     Some((g, v)) => {

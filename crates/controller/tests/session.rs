@@ -153,6 +153,51 @@ fn failed_resync_says_what_came_back() {
     );
 }
 
+/// A writer that refuses everything after its first `left` writes, like a cable pulled mid-
+/// session while the reader is still up.
+struct FailAfter {
+    inner: Box<dyn link::Writer>,
+    left: usize,
+}
+
+impl link::Writer for FailAfter {
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.left == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "cable pulled",
+            ));
+        }
+        self.left -= 1;
+        self.inner.write_all(bytes)
+    }
+}
+
+/// A failed write means the link is gone: that operation, every later one and a stop all
+/// report `Disconnected`, the same as when the reader sees the link close.
+#[test]
+fn a_failed_write_is_a_disconnect() {
+    let (mut link, fake) = fake(|l, _| standard(l));
+    link.writer = Box::new(FailAfter {
+        inner: link.writer,
+        left: 3, // @I100, @V, @M0
+    });
+    let mut ctl = open(link);
+    assert!(matches!(
+        ctl.status(),
+        Err(ControllerError::Disconnected(why)) if why == "cable pulled"
+    ));
+    assert!(matches!(
+        ctl.status(),
+        Err(ControllerError::Disconnected(_))
+    ));
+    assert!(matches!(
+        ctl.stop_handle().brake(),
+        Err(ControllerError::Disconnected(_))
+    ));
+    finish(ctl, fake);
+}
+
 #[test]
 fn typed_queries() {
     let (link, fake) = fake(|l, _| standard(l));

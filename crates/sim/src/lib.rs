@@ -15,4 +15,4 @@ mod core;
 mod runner;
 
 pub use crate::core::{SimConfig, SimCore, SimTime, Snapshot};
-pub use crate::runner::{Sim, spawn};
+pub use crate::runner::{LINE_BYTES_PER_SEC, Sim, spawn};

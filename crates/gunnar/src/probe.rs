@@ -11,22 +11,61 @@ use controller::{
 use crate::report::Report;
 use crate::target::Res;
 
-/// What GMC writes at init [CAP g_init]. The probe reports where the box differs, i.e. what
-/// it boots with versus what GMC assumes.
-const GMC_INIT: &[(Param, &str)] = &[
+/// Every parameter GMC writes once at connect and then relies on [CAP g_init]. GMC never saves
+/// them (`#W`), so after a power cycle the box runs on its own values; where those differ, a
+/// driver that does not write these too runs the machine differently from GMC.
+const GMC_AT_CONNECT: &[(Param, &str)] = &[
     (Param::Config(2), "0"),
     (Param::Config(5), "1"),
     (Param::Config(11), "0"),
     (Param::Config(12), "1"),
     (Param::Config(13), "1"),
     (Param::Config(14), "13"),
+    (Param::Config(16), "4"),
+    (Param::Config(31), "105"),
+    (Param::Config(32), "109"),
+    (Param::Config(33), "113"),
+    (Param::Config(34), "123"),
     (Param::Config(35), "1"),
-    (Param::Config(20), "400"),
-    (Param::Config(21), "12000"),
-    (Param::Speed(20), "36000"),
-    (Param::Ramp, "300"),
+    (Param::Config(37), "1"), // accepted [CAP g_init], but not in the spec's query table
+    (Param::StepsPerRev(Axis::Z), "3000"),
+    (Param::MicrometresPerRev(Axis::Z), "10000"),
     (Param::MaxSpeed, "36000"),
-    (Param::StartSpeed, "4000"),
+];
+
+/// Every parameter GMC writes before each use (a move, a cut, homing), with the values seen in
+/// the captures [CAP g_*]. A driver has to write these itself whatever the box boots with, so
+/// the probe only records them.
+const GMC_PER_USE: &[(Param, &str)] = &[
+    (Param::Config(1), "0–200, the dead time per move"),
+    (Param::Config(20), "400"),
+    (Param::Config(21), "5000 / 12000"),
+    (Param::Config(24), "30"),
+    (Param::Config(25), "100"),
+    (Param::Config(26), "5"),
+    (Param::Config(27), "5"),
+    (Param::Config(28), "1"),
+    (Param::Speed(20), "3600–36000 as the feed"),
+    (Param::Ramp, "100–700"),
+    (Param::StartSpeed, "400–4000"),
+    (Param::BrakeAngle(20), "90"),
+    (Param::Speed(10), "1750 / 3000 for homing"),
+    (Param::Speed(11), "750 for homing"),
+    (Param::HomeOffset(Axis::X), "300"),
+    (Param::HomeOffset(Axis::Y), "300"),
+    (Param::HomeOffset(Axis::Z), "0"),
+];
+
+/// Parameters GMC never writes but the driver or the checks depend on.
+const DRIVER_READS: &[Param] = &[
+    Param::Config(4),
+    Param::Config(6),
+    Param::Config(7),
+    Param::Config(8),
+    Param::Config(19),
+    Param::Homing(Axis::X),
+    Param::Homing(Axis::Y),
+    Param::Homing(Axis::Z),
 ];
 
 /// Logical inputs: name, number [SPEC1 p.11].
@@ -150,41 +189,59 @@ pub fn run(mut p: Controller<mode::Parameters>, version: &str, r: &mut Report) -
         );
     }
 
-    r.heading("Parameters (&…) against GMC's init values");
-    for &(param, gmc) in GMC_INIT {
+    r.heading("Parameters GMC writes at connect: does the box boot with the same?");
+    let mut differ = Vec::new();
+    let mut unreadable = Vec::new();
+    for &(param, gmc) in GMC_AT_CONNECT {
+        let name = param.to_string();
         match p.query_param(param) {
-            Ok(v) => {
-                let v = v.join(",");
-                let note = if v == gmc {
-                    "same as GMC".to_owned()
-                } else {
-                    format!("GMC sets {gmc}")
-                };
-                r.info(&param.to_string(), format!("{v} ({note})"));
+            Ok(fields) if fields.join(",") == gmc => r.info(&name, format!("{gmc} (same as GMC)")),
+            Ok(fields) => {
+                r.info(&name, format!("{} (GMC sets {gmc})", fields.join(",")));
+                differ.push(name);
             }
-            Err(e) => r.fail(&param.to_string(), e.to_string()),
+            Err(e) => {
+                r.info(&name, format!("cannot be read back: {e}"));
+                unreadable.push(name);
+            }
         }
     }
-    for param in [
-        Param::Config(1),
-        Param::Config(4),
-        Param::Config(6),
-        Param::Config(7),
-        Param::Config(8),
-        Param::Config(19),
-        Param::Speed(10),
-        Param::Speed(11),
-        Param::HomeOffset(Axis::X),
-        Param::HomeOffset(Axis::Y),
-        Param::HomeOffset(Axis::Z),
-        Param::Homing(Axis::X),
-        Param::Homing(Axis::Y),
-        Param::Homing(Axis::Z),
-    ] {
-        match p.query_param(param) {
-            Ok(v) => r.info(&param.to_string(), v.join(",")),
-            Err(e) => r.fail(&param.to_string(), e.to_string()),
-        }
+    let total = GMC_AT_CONNECT.len();
+    let mut verdict = if differ.is_empty() {
+        format!(
+            "all {} readable values match GMC's",
+            total - unreadable.len()
+        )
+    } else {
+        format!(
+            "{} of {total} differ ({}): a driver must write them at connect, as GMC does",
+            differ.len(),
+            differ.join(" ")
+        )
+    };
+    if !unreadable.is_empty() {
+        verdict += &format!(
+            "; {} could not be read back ({})",
+            unreadable.len(),
+            unreadable.join(" ")
+        );
+    }
+    r.info("box vs GMC at connect", verdict);
+
+    r.heading("Parameters GMC writes before each use (a driver must write them too)");
+    for &(param, gmc) in GMC_PER_USE {
+        let value = p
+            .query_param(param)
+            .map_or_else(|e| format!("cannot be read back: {e}"), |f| f.join(","));
+        r.info(&param.to_string(), format!("{value} (GMC writes {gmc})"));
+    }
+
+    r.heading("Parameters the driver relies on");
+    for &param in DRIVER_READS {
+        let value = p
+            .query_param(param)
+            .map_or_else(|e| format!("cannot be read back: {e}"), |f| f.join(","));
+        r.info(&param.to_string(), value);
     }
 
     r.heading("Mode switch without GMC's licence exchange");

@@ -12,6 +12,7 @@ use protocol::{
     SettingKey, Side, Status, StreamFlags, Switches, reply,
 };
 
+use crate::error::millis;
 use crate::session::Session;
 use crate::{Config, ControllerError, Event, Result, StopHandle};
 
@@ -91,14 +92,6 @@ impl<M: ModeMarker> std::error::Error for ModeSwitchError<M> {
     }
 }
 
-/// For callers that give up on the controller when a switch fails: `?` drops it and keeps the
-/// error.
-impl<M> From<ModeSwitchError<M>> for ControllerError {
-    fn from(e: ModeSwitchError<M>) -> Self {
-        e.error
-    }
-}
-
 /// Open a session: resync (unique `@I1xx` probe, see [`crate::RESYNC_PROBE_INPUTS`]), read the
 /// version (`@V`), enter mode 0. Returns the controller and its version string
 /// (e.g. `@V2.00/55W 19.10.10 2807001`). If the controller never answers the probe, the
@@ -106,11 +99,11 @@ impl<M> From<ModeSwitchError<M>> for ControllerError {
 pub fn connect(link: Link, cfg: Config) -> Result<(Controller<mode::Parameters>, String)> {
     let mut session = Session::start(link, cfg)?;
     session.resync()?;
-    let version = match session.request(&Command::Version, false)? {
+    let version = match session.request(&Command::Version)? {
         Reply::Value(v) if v.starts_with("@V") => v,
         other => return Err(session.unexpected(&Command::Version, &other)),
     };
-    session.expect_ack(&Command::SetMode(Mode::Parameters), false)?;
+    session.expect_ack(&Command::SetMode(Mode::Parameters))?;
     Ok((
         Controller {
             session,
@@ -123,16 +116,12 @@ pub fn connect(link: Link, cfg: Config) -> Result<(Controller<mode::Parameters>,
 // ------------------------------------------------------------------ every mode (master commands)
 
 impl<M: ModeMarker> Controller<M> {
-    fn in_stream() -> bool {
-        M::MODE == Mode::Cutting
-    }
-
     fn query(&mut self, cmd: &Command) -> Result<Reply> {
-        self.session.request(cmd, Self::in_stream())
+        self.session.request(cmd)
     }
 
     fn ack(&mut self, cmd: &Command) -> Result<()> {
-        self.session.expect_ack(cmd, Self::in_stream())
+        self.session.expect_ack(cmd)
     }
 
     fn value<T>(&mut self, cmd: &Command, parse: impl FnOnce(&str) -> Option<T>) -> Result<T> {
@@ -247,13 +236,13 @@ impl<M: ModeMarker> Controller<M> {
                 return Ok(status);
             }
             if Instant::now() >= deadline {
-                let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+                let timeout_ms = millis(timeout);
                 return Err(ControllerError::WaitTimeout {
                     timeout_ms,
                     last: status,
                 });
             }
-            std::thread::sleep(self.session.cfg.poll_interval);
+            self.session.pause(self.session.poll_interval())?;
         }
     }
 
@@ -265,13 +254,13 @@ impl<M: ModeMarker> Controller<M> {
     /// A handle that can brake or stop from any thread.
     pub fn stop_handle(&self) -> StopHandle {
         StopHandle {
-            shared: Arc::clone(&self.session.shared),
+            shared: Arc::clone(self.session.shared()),
         }
     }
 
     /// Receive every [`Event`] from now on.
     pub fn subscribe(&self) -> Receiver<Event> {
-        self.session.shared.bus.subscribe()
+        self.session.shared().bus.subscribe()
     }
 
     /// After a stop: resynchronise with the controller, release the stop latch and return
@@ -285,12 +274,15 @@ impl<M: ModeMarker> Controller<M> {
     pub fn into_mode<N: ModeMarker>(
         mut self,
     ) -> std::result::Result<Controller<N>, ModeSwitchError<M>> {
-        // A `*NNN` here is the reply to this command, even when leaving mode 2.
-        match self.session.expect_ack(&Command::SetMode(N::MODE), false) {
-            Ok(()) => Ok(Controller {
-                session: self.session,
-                _mode: PhantomData,
-            }),
+        match self.session.expect_ack(&Command::SetMode(N::MODE)) {
+            Ok(()) => {
+                // The type and the controller's acknowledged mode change together.
+                debug_assert_eq!(self.session.mode(), Some(N::MODE));
+                Ok(Controller {
+                    session: self.session,
+                    _mode: PhantomData,
+                })
+            }
             Err(error) => Err(ModeSwitchError {
                 controller: Box::new(self),
                 error,
@@ -387,7 +379,7 @@ impl Controller<mode::Cutting> {
     /// written; the controller does not acknowledge mode-2 commands. Blocks while the
     /// controller signals "buffer almost full" (requires `#C7,1`).
     pub fn vector(&mut self, speed_entry: u8, x: i32, y: i32, z: i32) -> Result<()> {
-        self.session.send_streamed(&Command::Vector {
+        self.session.stream(&Command::Vector {
             speed_entry,
             x,
             y,
@@ -395,30 +387,42 @@ impl Controller<mode::Cutting> {
         })
     }
 
+    /// Stream a path through `points` (absolute, in steps) at speed entry `speed_entry`, in the
+    /// compact form of [`protocol::Command::path`]: about half the bytes per point of
+    /// [`Self::vector`], which is what lets a dense curve keep up with its feed over the serial
+    /// line. Each call starts with an absolute vector, so nothing depends on what was streamed
+    /// before it (a stop, a mode switch).
+    pub fn path(&mut self, speed_entry: u8, points: &[[i32; 3]]) -> Result<()> {
+        for command in Command::path(speed_entry, points) {
+            self.session.stream(&command)?;
+        }
+        Ok(())
+    }
+
     /// `A<hh>`: switch the auxiliary outputs at this point in the path (head/clamp valves).
     pub fn outputs(&mut self, bits: u8) -> Result<()> {
-        self.session.send_streamed(&Command::StreamOutputs(bits))
+        self.session.stream(&Command::StreamOutputs(bits))
     }
 
     /// `W<ms>`: dwell at this point in the path, timed by the controller.
     pub fn dwell_ms(&mut self, ms: u32) -> Result<()> {
-        self.session.send_streamed(&Command::StreamDwellMs(ms))
+        self.session.stream(&Command::StreamDwellMs(ms))
     }
 
     /// `G<entry>,<v>`: change a speed-table entry at this point in the path.
     pub fn stream_speed(&mut self, entry: u8, value: u32) -> Result<()> {
         self.session
-            .send_streamed(&Command::StreamSetSpeed { entry, value })
+            .stream(&Command::StreamSetSpeed { entry, value })
     }
 
     /// `I<n>` / `I-<n>`: wait here until input `n` is at `level`.
     pub fn wait_input(&mut self, input: u8, level: Level) -> Result<()> {
         self.session
-            .send_streamed(&Command::StreamWaitInput { input, level })
+            .stream(&Command::StreamWaitInput { input, level })
     }
 
     /// `C<bits>`: one-shot special functions for the next motion.
     pub fn flags(&mut self, flags: StreamFlags) -> Result<()> {
-        self.session.send_streamed(&Command::StreamFlags(flags))
+        self.session.stream(&Command::StreamFlags(flags))
     }
 }

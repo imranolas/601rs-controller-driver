@@ -18,6 +18,10 @@
 //! - **Errors are never swallowed.** `*NNN` arriving while nobody asked (e.g. a limit switch
 //!   during a cut) is reported by the next operation as [`ControllerError::AsyncError`].
 //!
+//! How it is built: [`core::HostCore`] holds every one of those rules and is pure (bytes and
+//! time in, bytes and outcomes out), like the simulator's `SimCore`. The session runs it on a
+//! real link with a reader thread and the clock, and [`Controller<M>`] is the typed API on top.
+//!
 //! Nothing here knows about millimetres, heads or programs; that is the `machine` crate.
 //!
 //! ```no_run
@@ -42,6 +46,7 @@
 //! }
 //! ```
 
+pub mod core;
 mod error;
 mod event;
 mod session;
@@ -50,6 +55,7 @@ mod typed;
 
 use std::time::Duration;
 
+pub use crate::core::RESYNC_PROBE_INPUTS;
 pub use error::{ControllerError, Result};
 pub use event::{Event, StopKind};
 pub use protocol::{
@@ -57,7 +63,6 @@ pub use protocol::{
     SettingKey, Side, Signal, SignalAcks, SpeedOverride, Status, StreamFlags, Switches, Units,
     WatchdogMs,
 };
-pub use session::RESYNC_PROBE_INPUTS;
 pub use stop::StopHandle;
 pub use typed::{Controller, ModeMarker, ModeSwitchError, connect, mode};
 

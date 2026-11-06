@@ -48,10 +48,8 @@ impl SignalAcks {
 pub struct WatchdogMs(u16);
 
 impl WatchdogMs {
-    /// The longest timeout the controller accepts.
+    /// The longest timeout the controller accepts; 0 switches the watchdog off.
     pub const MAX: u16 = 10_000;
-    /// The watchdog switched off.
-    pub const OFF: Self = Self(0);
 
     /// `None` above [`Self::MAX`].
     pub const fn new(ms: u16) -> Option<Self> {

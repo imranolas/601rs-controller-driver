@@ -63,10 +63,15 @@ impl fmt::Debug for Sim {
     }
 }
 
+/// The serial line's rate: 115200 baud, 8-N-1, so ten bits per byte [SPEC p.6].
+pub const LINE_BYTES_PER_SEC: f64 = 11_520.0;
+
 /// Start a simulator. `speedup` scales simulated time (1.0 = real time; 20.0 = homing that
-/// takes 3 s simulated finishes in 150 ms). Returns the host side of the link and a handle.
+/// takes 3 s simulated finishes in 150 ms). The link is not sped up: it carries the host's
+/// bytes at [`LINE_BYTES_PER_SEC`], and writes block until sent, as on the real line. Returns
+/// the host side of the link and a handle.
 pub fn spawn(config: SimConfig, speedup: f64) -> (Link, Sim) {
-    let (link, mut remote) = memory::pair(Duration::from_millis(2));
+    let (link, mut remote) = memory::paced_pair(Duration::from_millis(2), LINE_BYTES_PER_SEC);
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             core: SimCore::new(config),
