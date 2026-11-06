@@ -36,7 +36,9 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 
 - **Board frame.** Origin (0,0) is the **bottom-left corner of the board** as it lies registered
   on the machine. +X is to the right and +Y is away from the operator (up in a plan view).
-  All coordinates are in **mm**, as JSON numbers, using at most 0.01 mm of precision.
+  All coordinates are in **mm**, as JSON numbers, to 0.001 mm. Blade angles come from the
+  directions between points (§4.2), and on the short segments of a tight curve, coordinates
+  rounded to 0.01 mm would make those directions wander by a degree or more.
 - The runner maps board frame → machine steps using the machine profile (§8): board origin
   offset, the selected head's offset (bevel −71.5 / straight +6.2 mm in X), and the scales
   (40 steps/mm, 8.333 steps/°).
@@ -58,7 +60,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
   "meta": { … },                       // free-form, ignored by the runner (order id, design, author)
   "board":    { "width_mm": 200, "height_mm": 310, "thickness_mm": 1.5 },
   "material": { "name": "MSK_1.5", "speed_pct": 95, "head_settle_ms": 250,
-                "blade_angle_offset_deg": { "straight": 3, "bevel": 3 } },
+                "blade_angle_offset_deg": { "straight": 0, "bevel": 3 } },
   "ops": [ … ]                         // executed strictly in order
 }
 ```
@@ -72,7 +74,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 | `material` | yes | Defaults for every cut. Values come from the material library (today: the `.gcf` profiles C1–C16). |
 | `material.speed_pct` | yes | Cutting speed as % of the machine maximum (1–100). |
 | `material.head_settle_ms` | yes | Wait after a head goes down or up (`.gcf` `HeadUpDown`). |
-| `material.blade_angle_offset_deg` | no | Per-head blade angle correction (`.gcf` `ZCorrection_Straight`), default 0. |
+| `material.blade_angle_offset_deg` | no | Per-head blade angle trim, default 0. GMC gives the bevel head the material's `ZCorrection_Straight` (3° on C10) and the straight head its own setting (0). On closed curves GMC gives the bevel `ZCorrection_Round` instead (0 on C10), which v1 can't express yet (§9 Q8). |
 | `ops` | yes | The operations. |
 
 ---
@@ -104,35 +106,74 @@ One continuous stroke **with the blade in the material**. The runner executes it
 1. Travel with the head up, at positioning speed, to `path_mm[0]`, turning the blade to the
    first segment's direction.
 2. Lower `head`, then wait `head_settle_ms`.
-3. Follow `path_mm` at the cutting speed. The blade angle follows each segment's direction, plus
-   `blade_angle_offset_deg[head]`.
+3. Follow `path_mm` at the cutting speed, with the blade angle set as below.
 4. Raise the head, then wait `head_settle_ms`.
 
-- `path_mm` is a polyline of ≥ 2 points. **Overcut is already included.** The compiler extends the
-  ends; the runner doesn't.
+- `path_mm` is a polyline of ≥ 2 points. **Overcut is already included**, and so is the overlap
+  of a closed curve (below). The compiler extends the ends; the runner doesn't.
 - **Direction matters.** For the bevel head, the travel direction decides which side the bevel
   faces. Convention: **the bevel faces the left of the direction of travel** (§9 Open).
-- **Corners:** the blade can turn while in the material only by up to the machine's break angle
-  (15°). Any sharper corner must be split into separate `cut` ops (validation rule V7). So a
-  rectangle is four cuts, as GMC does it, while an oval is one cut: about 300 points when
-  flattened as below (GMC sends about 1,100).
+- **Smooth points and corners.** At each interior point the path turns by some angle:
+  - **Smooth point** (turn ≤ 3°): part of a flattened curve. The blade passes it without
+    stopping. Compilers flatten curves to at most 2° (below); the extra degree is slack.
+  - **Corner** (turn over 3°, up to the break angle of 15°): the carriage stops there and the
+    blade turns in place, as tangential knives take small corners (§9 Q7). A corner can't be
+    smoothed over: turning across the next segment would start it up to 15° off.
+  - Any sharper corner must be split into separate `cut` ops (validation rule V7). So a
+    rectangle is four cuts, as GMC does it, while an oval is one cut.
+- **Blade angle.** Each vector moves X, Y and the blade together, in proportion (protocol
+  reference §3.2). So the blade turns *while* the carriage runs along a segment, and the angle
+  sent with a point is where the blade arrives there. Until it arrives, it is off its direction
+  of travel by however far it still has to turn. The runner sends, plus
+  `blade_angle_offset_deg[head]`:
+  - at the first point, the last point, and on arrival at a corner: the direction of the
+    segment it is on (at a corner the blade then turns to the next segment's direction in place);
+  - at a smooth point: the direction halfway between its two segments, which is the true
+    curve's tangent there.
+
+  With curves flattened to 2° per point, the blade is never more than 1° off its direction of
+  travel, and it is on the curve's tangent at every point. Angles are computed from `path_mm`,
+  before the runner rounds to motor steps. GMC instead sends each segment's own direction at its
+  end, so the blade starts every segment a whole segment's turn behind: about 1.3° on its oval.
+  With this format's longer segments that would grow to 3–15° on tight curves, enough to push the
+  blade hard sideways.
 - **Curves** are pre-flattened by the compiler, by **chord tolerance**: the most a chord may
   stray from the true curve. At radius of curvature r, a chord of length L strays by about
-  L²/8r, and the blade turns by about L/r at each vertex. Each chord's length is
+  L²/8r, and the path turns by about L/r at each point. Each chord's length is
   **L = min(√(8·r·e), r·θ, L_max)**:
   - **e = 0.02 mm** (no more than 0.05 mm): under one 0.025 mm motor step, so finer points
     can't change the cut.
-  - **θ = the break angle (15°)**, so a smooth curve never breaks V7. With e = 0.02 mm this
-    limit only applies below about 2.3 mm radius.
+  - **θ = 2°**, the most a curve may turn at one point, so the blade stays within 1° of its
+    travel. With e = 0.02 mm this limit takes over below about 130 mm radius. It is not the 15°
+    corner limit.
   - **L_max = 10 mm**, so nearly straight curves aren't reduced to a few long lines.
 
   The chords come out long where the curve is gentle and short where it's tight. GMC instead
   picks one spacing per curve from a table of radius bands, set by the curve's tightest point
-  (protocol reference §3). On a constant radius that gives 1–6× the points this tolerance needs,
-  and more where the radius varies. On GMC's oval it is 1,107 points where about 300 do. Sent the
-  way GMC sends them, those points need nearly twice what the serial line carries; flattened by
-  tolerance and sent compactly, about a third (protocol reference §5). The runner streams long
-  curve cuts as a single buffered path.
+  (protocol reference §3). On a constant radius that gives 1–6× the points the tolerance needs,
+  and more where the radius varies. GMC cut its oval, overlap included, in 1,107 points; this
+  flattening needs 425. Sent the way GMC sends them, GMC's points need nearly twice what the
+  serial line carries; these, sent compactly, need 43% (protocol reference §5). The runner
+  streams long curve cuts as a single buffered path.
+- **Closed curves overlap.** When a cut ends where it started and has no corner anywhere,
+  including where it closes, the compiler extends it in two ways:
+  1. **Overlap:** after the full loop it keeps cutting round, over the start again. The place
+     where the blade went in, and where the carriage was still speeding up, is cut again at
+     speed, and the blade stops far from it, on line already cut.
+  2. **Run-out:** toward the end of the overlap, the path drifts gradually sideways, up to a
+     small offset, toward the waste (the inside of an opening). The blade leaves the line
+     without marking the edge that shows.
+
+  GMC does both (protocol reference §7.1). Its values are the starting point for calibration
+  (§9 Q9):
+
+  | Head | Overlap | Run-out |
+  |------|---------|---------|
+  | bevel | 1,850 ms of cutting | 0.3 mm |
+  | straight | 500 ms of cutting | 0.3 mm |
+
+  GMC turns the time into a length assuming the carriage slows in proportion to the radius below
+  300 mm, as the controller is set to. On its oval at 95 % that came to 443 mm, 0.92 of a lap.
 
 ### 4.3 `move`
 ```json
@@ -161,7 +202,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | Phase | Runner behaviour |
 |-------|------------------|
 | Before | Check validation (§6) and soft limits against the profile's envelope. Require the machine to be homed (offer to home if not). Push controller configuration (`#C…`, I/O mapping). Require the operator to confirm that the board is loaded. |
-| During | Lower the program to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, blade-angle unwrapping (the rotary axis keeps counting past 360°, as in the captures), streaming and flow control, `@X` waits. Report progress per op `id`/`label`. |
+| During | Lower the program to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, blade angles by the rules in §4.2 and unwrapped (the rotary axis keeps counting past 360° along a cut, as in the captures), streaming and flow control, `@X` waits. Report progress per op `id`/`label`. |
 | After (normal) | Raise the head, release the clamps (`$A02`), park, and report the run as complete. |
 | Abort / error | `@B` brake, head up, release the clamps, then report *which op failed and why* in plain language. A run is never resumed silently in the middle of an op. |
 
@@ -200,7 +241,7 @@ Bevel overcut ≈ 1.5 × tan 42° ≈ 1.35 mm at each end. The `.gcf` trims are 
   "meta": { "source": "reconstruction of g_regular_mount capture" },
   "board": { "width_mm": 200, "height_mm": 310, "thickness_mm": 1.5 },
   "material": { "name": "MSK_1.5", "speed_pct": 95, "head_settle_ms": 250,
-                "blade_angle_offset_deg": { "straight": 3, "bevel": 3 } },
+                "blade_angle_offset_deg": { "straight": 0, "bevel": 3 } },
   "ops": [
     { "op": "clamp", "side": "left" },
 
@@ -245,8 +286,8 @@ Separate file, owned by the machine, produced by calibration (diagnostic tool) o
   "serial": { "baud": 115200 },
   "scale": { "x_steps_per_mm": 40, "y_steps_per_mm": 40, "z_steps_per_deg": 8.3333 },
   "board_origin_steps": [?, ?],                         // open: registration
-  "heads": { "bevel":    { "offset_mm": [-71.5, 1.9], "outputs": "0x05" },
-             "straight": { "offset_mm": [6.2, 1.7],   "outputs": "0x0A" } },
+  "heads": { "bevel":    { "offset_mm": [-71.5, 1.9], "blade_mount_deg": 0,   "outputs": "0x05" },
+             "straight": { "offset_mm": [6.2, 1.7],   "blade_mount_deg": 180, "outputs": "0x0A" } },
   "clamps": { "left": "0x40", "right": "0x20" },        // open: side naming
   "neutral_outputs": "0x02",
   "max_speed": 36000, "pos_speed_pct": 100,
@@ -268,9 +309,12 @@ Keeping this separate is what makes programs portable across recalibrations and 
 | Q1 | Board registration and Y direction (board frame → machine steps) | Golden test against `g_regular_mount`, then the first hardware session |
 | Q2 | Bevel-side convention: left or right of travel? Does GMC cut openings clockwise? | Path direction in `g_regular_mount` / `g_multi_*` |
 | Q3 | Where exactly GMC applies the Front/Back Begin/End overcut trims | Test cuts, one trim at a time |
-| Q4 | Blade-angle formula: `atan2(dy,dx)` + offset? (captures show Z = 774 ≈ 92.9° on a vertical edge) | Golden test |
+| ~~Q4~~ | Blade-angle formula | **Settled.** In machine steps, Z = 8.333 × (direction of travel, clockwise from +X − head's `blade_mount_deg` + trim), truncated toward zero. Checked against `g_regular_mount`: a bevel edge travelling −Y gives (90 + 3) → 774; a straight edge travelling +X gives (0 − 180 + 0) → −1499 (protocol reference §3.2) |
 | Q5 | Does a run wait for the start button before cutting (GMC polls I221)? Per program or per queue item? | Product decision |
 | Q6 | Does `pause` with clamps engaged work for flipping, or do flips need `clamp none` first? | Product + hardware |
+| Q7 | Corners: does a turn-only vector inside a stream stop the carriage and turn the blade at a safe speed? GMC only sends one on its own (`L20,z…`), never mid-path. Until the machine confirms it, the runner splits a corner into two strokes (head up, turn, head down) | Hardware check, to add to `gunnar check` stage 5 |
+| Q8 | A separate blade trim for closed curves, as GMC has (`ZCorrection_Round`)? | Format decision |
+| Q9 | Do the 2° turn limit, the blade-angle rule and GMC's overlap and run-out values cut clean on this machine? | Test cuts |
 
 ---
 

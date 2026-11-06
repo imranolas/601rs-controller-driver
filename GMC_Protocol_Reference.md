@@ -32,7 +32,8 @@ this document and cites it rather than repeating it.
 - `g_init`: power-on, licence exchange, configuration, homing (66 s)
 - `g_motions`: jogs on every axis, outputs (clamps, heads), `@B`
 - `g_regular_mount`: one rectangular window (100 × 200 mm), 1.5 mm board
-- `g_oval_mount`: one oval window: a curve streamed as 1,107 vectors
+- `g_oval_mount`: one oval window, cut as one lap plus GMC's overlap (1.9 laps, §7.1) in 1,107
+  vectors
 - `g_multi_C10`, `g_multi_C11`, `g_multi_C12`: twin windows with three profiles
 - `g_multi_Cx_20` … `g_multi_Cx_100`: speed sweep, 20–100 %
 
@@ -351,6 +352,9 @@ What GMC writes [CAP g_init, g_motions, g_regular_mount]:
 - `02` neutral (`i_bh` only), at the end of every job.
 - `62` both clamps, at connect.
 - Bevel edge: `45` head down (`40` + `05`: `i_t` + `i_b`), then `40` head up (clamp only).
+  `05` is GMC's default bevel head-down [GMC].
+- Bevel oval: `41` head down (`40` + `01`: `i_t` without `i_b`) [CAP g_oval_mount]. Which code
+  path drops `i_b` for the curve is not traced.
 - Straight edge: `4A` head down (`40` + `0A`: `i_bh` + `i_sh`), then `42` head up.
 - Between jobs and tools: `42` (`i_bh` + `i_pr`); `22` (`i_bh` + `i_pl`) in the jog capture.
 
@@ -431,13 +435,13 @@ exchange is the probe's first question.
 |----------|-------|--------|
 | **XY scale** | **40 steps/mm** (0.025 mm/step) | [GCF] `MachineScale.ScaleX/Y = 400 /cm`; GMC converts with it [GMC]. Matches the captures. |
 | **Z (blade angle) scale** | **3000 steps per revolution**, 8.333 steps/° | `#ZZ,3000` = `ScaleZ × 360` [GCF `ScaleZ = 8.3333`; GMC]. Z is rotary (`#C13,1`). |
-| **Z wrap** | GMC keeps Z in 0..2999: a window's edges go 774 → 1524 → 2274 → **24** | [CAP g_regular_mount]. The controller turns the shorter way. |
+| **Z wrap** | Between cuts GMC brings Z back into 0..2999: a window's edges go 774 → 1524 → 2274 → **24**. Along one cut it keeps counting: the oval's Z runs 5 → 5521 (§3.2) | [CAP g_regular_mount, g_oval_mount]. The controller turns the shorter way. |
 | **Step rate limit** | 40 kHz per axis (1000 mm/s on XY); higher speeds are clamped | [SPEC1 p.17] |
 | **Feed law** | **`#G20 = 360 × Speed%`** steps/s = **9 × Speed% mm/s**; 100 % = 900 mm/s | [GMC]: `AbsMaxSpeed × Speed% / 100` with `AbsMaxSpeed = 36000` [GCF], `#C11,0`. Matches the speed sweep exactly [CAP g_multi_Cx_*]. GMC's speed reduction factor is 1 on the 601. |
 | **Rapid (travel)** | `#G20,36000` = 900 mm/s (`PosSpeed = 100 %`) | [GCF] `PosSpeed`; [GMC] |
 | **Ramp law** | §3.1 | |
 | **Bevel blade inclination** | **42°** | [GCF] `Heads[Bevelled].Inclination` |
-| **Curve segment length** | One spacing per curve, picked by the curve's smallest radius from the `Distances` table: radius < 5 cm → 20/cm (0.5 mm); < 10 cm → 10/cm (1 mm); < 40 cm → 5/cm (2 mm); < 200 cm → 1/cm (10 mm). This is a chord **length**, not a deviation tolerance. On a constant radius the chords stray 0.001–0.006 mm in most bands (up to 0.03 mm for 10 mm chords just over 40 cm radius), and use 1–6× the points a 0.02 mm tolerance needs; more where the radius varies. The oval: 1,107 vectors over 928 mm, 0.28–1.27 mm apart (median 0.77); within 0.02 mm the same shape needs 316 (§5). See the note below. | [GCF] `Distances`; [GMC]; [CAP g_oval_mount] |
+| **Curve segment length** | One spacing per curve, picked by the curve's smallest radius from the `Distances` table: radius < 5 cm → 20/cm (0.5 mm); < 10 cm → 10/cm (1 mm); < 40 cm → 5/cm (2 mm); < 200 cm → 1/cm (10 mm). This is a chord **length**, not a deviation tolerance. On a constant radius the chords stray 0.001–0.006 mm in most bands (up to 0.03 mm for 10 mm chords just over 40 cm radius), and use 1–6× the points a 0.02 mm tolerance needs; more where the radius varies. The oval: 1,107 vectors over 928 mm (1.9 laps, §7.1), 0.28–1.27 mm apart (median 0.77); within 0.02 mm the same path needs 316 (§5). See the note below. | [GCF] `Distances`; [GMC]; [CAP g_oval_mount] |
 | **BreakAngle** | 15°. Over USB, GMC ends a smooth run of curve points at any joint sharper than this. It is not the controller's braking angle, which GMC sets to 90° (`#B20,90`) | [GCF]; [GMC] |
 
 **How GMC flattens curves.** For each curve, GMC samples about three points per cm,
@@ -471,8 +475,46 @@ v_ref   = (AbsMaxSpeed / ScaleY) × 10        = (36000 / 400) × 10 = 900   mm/s
 | `_RampeCut` | 420 | **700** (clamped) | tools with a slow ramp |
 | (dynamic) | — | 470 | thickness-dependent, between `DynamicMatSetting.MatLow/High` [GMC] |
 
-These account for every `#R` in the captures except `#R300` at connect and `#R,100` before
-homing [CAP g_init]. **`#R` is not a blade angle**; the blade angle travels in each vector's Z.
+These account for every `#R` in the captures except `#R300` at connect, `#R,100` before
+homing [CAP g_init] and `#R253` before the oval [CAP g_oval_mount]. **`#R` is not a blade
+angle**; the blade angle travels in each vector's Z (§3.2).
+
+### 3.2 Blade angle (Z) along a path
+
+**The formula.** In machine steps, GMC's Z for a vector is
+
+```
+Z = trunc(8.3333 × (heading − StartPZ + trim))
+heading = direction of travel, clockwise from +X (travel towards −Y = 90°)
+```
+
+- `StartPZ` is the head's blade mounting angle: bevel 0°, straight 180° [GCF].
+- `trim`: the bevel head takes the material's `ZCorrection_Straight` (3° on C10) on ordinary
+  cuts and its `ZCorrection_Round` (0° on C10) on closed smooth shapes (§7.1). The straight head
+  uses its own setting (`UseMatProfileSetting` false, `StraightCorrection` 0) [GMC; GCF].
+- Checks [CAP g_regular_mount]: a bevel edge travelling −Y gives trunc(8.3333 × 93) = **774**; a
+  straight edge travelling +X gives trunc(8.3333 × −180) = **−1499**. Both are in the capture.
+
+**Which heading.** Each vector carries the heading of **the chord it cuts**, the line from the
+previous point to its own [GMC]. Along a
+path Z stays continuous: an angle that would jump by more than 178° gets ±360° instead, so Z
+keeps counting past one revolution (the oval runs from 5 to 5521). On the oval, Z matches the
+heading of the chord it ends with to −0.5 ± 1.2 steps [CAP g_oval_mount].
+
+**What the controller does with it.** An `L` vector moves every axis it names together, in
+proportion [SPEC1 p.33], Z included. So the blade turns *during* each chord: it starts at the
+previous chord's heading and reaches this chord's heading only at the end. Until then it is
+off its direction of travel by the part of the turn still to go. On the oval the turn per chord
+is 1.3° at most and 0.6° on average: that is how far GMC's blade is off on curves.
+
+GMC also sends Z-only vectors (`L20,z<steps>`) [GMC], but on their own,
+never inside a path.
+
+**The driver's rule** (PROGRAM_FORMAT §4.2): at a smooth point, the direction halfway between
+its two chords, which is the curve's tangent; curves flattened to at most 2° of turn per point;
+at a corner, stop and turn in place. The blade is then never more than 1° off its travel, on the
+true tangent at every point. Copying GMC's rule with tolerance-based chords would leave it 3–15°
+off at the start of each chord on tight curves.
 
 ---
 
@@ -511,6 +553,10 @@ the head goes up at every corner, the blade turns, the head goes down again. GMC
    @M1  $A02                    release
    idle: poll @I221 (start button)
 ```
+
+**Curves** differ from straight edges [CAP g_oval_mount]: head down with `$A41` (§2.5),
+`#C1,200`, `#R253`, then every vector of the curve in one write. A closed smooth shape keeps
+cutting past its start before the head comes up (§7.1).
 
 **Abort:** `@B` (brake, positions kept) → head up (`$A02`) → park. `@S` only in an emergency: it
 loses the position and the machine must home again [SPEC1 p.14].
@@ -594,7 +640,7 @@ twice [GMC]. That is why every `@M` in the captures is doubled.
    before it sends anything. At 15 ms or more per command, that is 0.3–0.5 s of standing still
    per cut, on top of the dead time and the head's settle time.
 2. **On curves, the line cannot keep up.** At 855 mm/s (95 %) the controller consumes path data
-   faster than 115200 baud delivers it [CAP g_oval_mount: 928 mm of path]:
+   faster than 115200 baud delivers it [CAP g_oval_mount: 928 mm of path, 1.9 laps]:
 
    | Encoding of the oval | Vectors | Bytes | Bytes/s needed | Share of the line |
    |----------------------|---------|-------|----------------|-------------------|
@@ -602,6 +648,7 @@ twice [GMC]. That is why every `@M` in the captures is doubled.
    | Same points, compact relative (§2.4) | 1,107 | 12,647 | 11,651 | 101 %: borderline |
    | Within 0.02 mm of GMC's points, compact | 316 | 4,175 | 3,846 | **33 %** |
    | Within 0.05 mm of GMC's points, compact | 174 | 2,457 | 2,264 | 20 % |
+   | Within 0.02 mm and ≤ 2° of turn per point, compact (the driver's rule, §3.2) | 425 | 5,419 | 4,992 | **43 %** |
 
    When the buffer stays under 10 %, `#C14` bit 8 slows the carriage, and when it runs empty the
    controller brakes to a stop (§2.4.1). That is GMC's hesitation on contours. It is also why
@@ -612,9 +659,9 @@ twice [GMC]. That is why every `@M` in the captures is doubled.
 **What the driver does instead** (the machine layer's design: `crates/machine/src/lib.rs`):
 - A cut is **one mode-2 stream**: travel with `C1` (no dead time), `A` head down, `W` settle,
   the path, `A` head up. No mode switches, no polls in between.
-- Curves are flattened to a **chord tolerance**, not a fixed spacing (PROGRAM_FORMAT §4.2), and
-  sent in the **compact** form, so the bytes per second stay well inside the line (the table
-  above).
+- Curves are flattened to a **chord tolerance** and a 2° turn limit, not a fixed spacing
+  (PROGRAM_FORMAT §4.2), and sent in the **compact** form, so the bytes per second stay well
+  inside the line (the table above).
 - Travel and cutting use **two speed entries** set once per job (20 and 21), so a stream needs
   no `G`.
 - The next cut is streamed **just in time**, when `@N` shows the current one under way, so the
@@ -651,7 +698,7 @@ written.
 | Modes 0 and 1: one command, wait for its CR before the next | 6, 32 | Follows: one outstanding command; every wait has a deadline. After a timeout the session resyncs with a unique `@I100`–`@I119` probe before the next command |
 | Mode 2: always send several commands ahead, or the look-ahead cannot work | 6–7 | `stream()` writes without waiting. The machine layer streams a whole cut, not vector-then-poll as GMC does |
 | `#C1` dead time lets several vectors arrive before motion starts; `C1` skips it "for single moves with no path after them" | 22, 35 | `StreamFlags { no_dead_time }`. The machine layer uses it for travel instead of GMC's `@M0 #C1,0 @M2` |
-| Buffer under 10 % for long → jerky motion; `#C14` bit 8 slows down to compensate (on in the 601's config) | 8, 25 | `Command::path` sends compact vectors; the machine layer flattens to a chord tolerance. GMC's fastest curve then needs about a third of the line (§5) |
+| Buffer under 10 % for long → jerky motion; `#C14` bit 8 slows down to compensate (on in the 601's config) | 8, 25 | `Command::path` sends compact vectors; the machine layer flattens to a chord tolerance. GMC's fastest curve then needs under half the line (§5) |
 | Use `@H` to decide whether to send more vectors or wait | 16 | `Config::stream_window_bytes`, **off by default** until stage 6 measures the buffer |
 | `#C19`: the host must send a character within the time while axes move | 26 | The session sends `@H` while a stream is held (test `flow_pause_keeps_the_host_watchdog_fed`). Choose `#C19` ≥ 4 × `poll_interval` |
 | `#C8`: `0x05` can serve as a sign of life; it only comes in send pauses | 23 | Decoded and published as `Event::Signal`. No "controller silent" alarm yet (machine layer) |
@@ -710,6 +757,48 @@ trims [GCF]:
 ⚠️ Open: how Begin/End × Front/Back map onto each cut. Test cuts, one trim at a time, would
 settle it.
 
+### 7.1 Closed smooth shapes: the overlap lap
+
+GMC does not stop a closed curve where it started. It keeps cutting round, over the start again.
+
+**Which shapes.** A shape gets the overlap [GMC] if it is closed and every joint, including
+where it closes, turns by less than the break angle (15°). Ovals and
+circles qualify; rectangles don't. A tool with a negative `CurveAddon` never gets the overlap.
+
+**The overlap** [GMC]. After the loop, GMC
+appends the loop's first points again, a retrace of the start. How far it goes is a **time**,
+the head's `CurveAddon` in ms, at the cutting speed. Below `CurveMaxRadius` (30 cm) each segment
+counts as longer, in proportion to how much tighter it is, modelling the controller's radius
+slowdown. That 30 cm is the radius GMC gives the controller as `#C21,12000` (§2.4.1).
+
+**The run-out.** Toward the end, the appended points are pushed sideways, linearly from 0 up to
+`CurveAddonEndOffset` at the last point. The ramp covers the whole overlap, or its last half when
+the overlap is more than a third of the path. Which side depends on the cut's orientation
+settings. `CurveAddonStartOffset` would do the same at the start (0 on every head).
+
+**On the captured oval** [CAP g_oval_mount], bevel head at 95 %:
+- One lap is 483 mm (604 points). The overlap adds 443 mm, 0.92 of a lap, so the cut is 1.9 laps
+  and 928 mm.
+- By GMC's radius model those 443 mm count as 1,560 mm; 1,850 ms at 855 mm/s is 1,582 mm. The
+  overlap stops at the first point past that.
+- The second lap follows the first to 0.075 mm on average and ends 0.31 mm off it, inside the
+  oval, in the waste: the 0.3 mm run-out.
+
+**Why** (an operator's account, consistent with the code): the overlap re-cuts the place where
+the blade went in and the carriage was still speeding up, and moves the stop far away onto line
+already cut. The run-out takes the blade off the line gradually, on the waste side, so no exit
+mark lands on the visible edge.
+
+| Head | `CurveAddon` (overlap) | `CurveAddonEndOffset` (run-out) |
+|------|------------------------|---------------------------------|
+| Bevelled | 1,850 ms | 0.03 cm (0.3 mm) |
+| InvBev | 950 ms | 0 |
+| Straight | 500 ms | 0.03 cm (0.3 mm) |
+| Score, Deboss, Pen1–3 | 0 | 0 |
+
+[GCF]. The driver's compiler does the same for closed smooth cuts, starting from these values
+(PROGRAM_FORMAT §4.2).
+
 ---
 
 ## 8. Per-profile calibration table
@@ -753,7 +842,8 @@ See §2.7. Do not reproduce it; the machine moves without it.
 
 **Settled:** head spacing (77.7 mm, §4.2) · `@X` codes (§2.1) · `#R` = ramp time (§3.1) · `#C1`
 = dead time · `$C`, `#Z`/`#N`, `#O`, `#C20`–`#C28` (§2.3) · `#C35` (§1) · baud 115200 8-N-1 (§1) ·
-GMC's curve flattening (§3) · GMC's pauses (§5).
+GMC's curve flattening (§3) · GMC's blade angle per vector (§3.2) · GMC's overlap lap on closed
+curves (§7.1) · GMC's pauses (§5).
 
 **Open**, with what answers each. The probe is read-only; check stages 3–7 move the machine (see
 `docs/hardware-testing.md`).
@@ -782,6 +872,9 @@ GMC's curve flattening (§3) · GMC's pauses (§5).
 | Limit fault: async `*03x`, `@Y` bit, recovery | spec | stage 7 (only if a limit input is mapped) |
 | Fault attribution in modes 0 and 1 (§2.6): treat `*032`–`*039`, `*040`, `*068` always as events? What do `*056` and `*062` answer? | `*NNN` answers a non-query | stage 7 and real jobs |
 | No `0x01` after mode-2 paths? | none (captures) | any session log |
+| A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the runner splits corners until then | a stage-5 check, not yet written |
+| Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
+| Why the oval's head-down is `41`, not `05` | — | test cuts |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
 | `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |
@@ -826,8 +919,9 @@ SVG/DXF in  →  layers → tools (bevel / straight / score, by the cut-type con
             →  offset for bevel and kerf; overcut per §7
             →  nest (PackingSolver, rectangle guillotine — validated winner)
             →  sequence: interiors before the boundary; batch tools by priority
-            →  flatten curves by chord tolerance (0.02 mm, turn ≤ 15°; PROGRAM_FORMAT §4.2);
-               the blade tangent as Z on every vector
+            →  flatten curves by chord tolerance (0.02 mm, turn ≤ 2° per point; PROGRAM_FORMAT §4.2)
+            →  closed smooth cuts: overlap past the start, run-out toward the waste (§7.1)
+            →  blade angle: the curve's tangent at smooth points; stop and turn at corners (§3.2)
             →  check the byte budget: bytes/s at the feed must stay well inside 11,520 (§5)
             →  per cut, one mode-2 stream: C1 + travel at entry 21, A head down, W settle,
                the path at entry 20 (#G20 = 360 × Speed%), A head up; #R per §3.1
@@ -840,6 +934,15 @@ The machine controls **XY position and blade rotation** only. Depth is set by ha
 ---
 
 ## 13. Changelog
+
+### 2026-11-06: blade angle and closed curves
+
+| Was | Now | Source |
+|-----|-----|--------|
+| Blade angle "follows each segment's direction"; formula open | Z = trunc(8.3333 × (heading − StartPZ + trim)); each vector carries the heading of the chord it cuts, and the blade turns during the chord (§3.2) | GMC; SPEC1 p.33; CAP |
+| GMC keeps Z in 0..2999 | only between cuts; along a cut Z keeps counting (oval 5 → 5521) | CAP g_oval_mount |
+| The oval: one curve of 1,107 vectors | one lap plus GMC's overlap: 1.9 laps, the last 0.3 mm drifting into the waste (§7.1) | GMC; GCF; CAP g_oval_mount |
+| Bevel head down = `45` | `45` on straight edges, `41` on the oval | CAP g_oval_mount |
 
 ### 2026-11-06: rewrite
 
