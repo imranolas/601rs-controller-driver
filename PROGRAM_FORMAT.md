@@ -114,10 +114,25 @@ One continuous stroke **with the blade in the material**. The runner executes it
   faces. Convention: **the bevel faces the left of the direction of travel** (§9 Open).
 - **Corners:** the blade can turn while in the material only by up to the machine's break angle
   (15°). Any sharper corner must be split into separate `cut` ops (validation rule V7). So a
-  rectangle is four cuts, as GMC does it, while an oval is one cut of about 1,100 points.
-- **Curves** are pre-flattened by the compiler. The recommended chord tolerance is ≤ 0.05 mm of
-  deviation (GMC's chords are about 0.6 mm long). The runner streams long curve cuts as a single
-  buffered path (protocol reference §5).
+  rectangle is four cuts, as GMC does it, while an oval is one cut: about 300 points when
+  flattened as below (GMC sends about 1,100).
+- **Curves** are pre-flattened by the compiler, by **chord tolerance**: the most a chord may
+  stray from the true curve. At radius of curvature r, a chord of length L strays by about
+  L²/8r, and the blade turns by about L/r at each vertex. Each chord's length is
+  **L = min(√(8·r·e), r·θ, L_max)**:
+  - **e = 0.02 mm** (no more than 0.05 mm): under one 0.025 mm motor step, so finer points
+    can't change the cut.
+  - **θ = the break angle (15°)**, so a smooth curve never breaks V7. With e = 0.02 mm this
+    limit only applies below about 2.3 mm radius.
+  - **L_max = 10 mm**, so nearly straight curves aren't reduced to a few long lines.
+
+  The chords come out long where the curve is gentle and short where it's tight. GMC instead
+  picks one spacing per curve from a table of radius bands, set by the curve's tightest point
+  (protocol reference §3). On a constant radius that gives 1–6× the points this tolerance needs,
+  and more where the radius varies. On GMC's oval it is 1,107 points where about 300 do. Sent the
+  way GMC sends them, those points need nearly twice what the serial line carries; flattened by
+  tolerance and sent compactly, about a third (protocol reference §5). The runner streams long
+  curve cuts as a single buffered path.
 
 ### 4.3 `move`
 ```json

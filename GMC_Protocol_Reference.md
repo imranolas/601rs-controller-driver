@@ -1,241 +1,427 @@
 # 601rs — Protocol & Calibration Reference
 
-**Status:** Command semantics come from the **controller's programming manual** and from **how
-GMC does things**. Numeric constants, sequences and calibration come from **serial captures** and the
-**parameter file**. Where an earlier capture-only inference conflicted with spec/code, the
-spec/code reading is used and the old reading is recorded in the changelog (§13).
-Items marked *(unverified)* are not backed by spec, code or capture.
+**What this is.** Everything known about driving the CNC-Control controller in the Gunnar
+601rs from a host, with the source of every fact. The Rust driver in `crates/` is built against
+this document and cites it rather than repeating it.
 
-**Purpose:** Specification for building an independent driver + CAM pipeline. Covers the on-wire
-command grammar, the cut-sequence state machine, universal constants, the feed-rate and ramp
-laws, the overcut/thickness model, and per-profile calibration.
+**How far to trust each fact.**
+- Command semantics come from the controller's programming manual, v1.00/00b [SPEC1].
+- Where the captures or sessions show the 601 behaving differently, they win (§13.1).
+- Constants, sequences and calibration come from serial captures of GMC driving the 601 [CAP],
+  from how GMC does things [GMC] and from its parameter file [GCF].
+- *(unverified)* marks a claim nothing backs yet. *(sim assumption)* marks behaviour the
+  simulator assumes until a session on the machine settles it.
+- This driver has not yet run on the machine. §10 lists each open question with the
+  `gunnar probe` or `gunnar check` stage that answers it. Session logs from the machine go in
+  `testdata/sessions/` [SESSION], and this document is updated from them.
 
 ### Citation key
 
 | Tag | Source |
 |-----|--------|
-| **[SPEC p.N]** | The controller's programming manual, "CNC-Control — Bahnsteuerung für 4 Schrittmotorachsen", v0.99/69, 18 Apr 2000, SIG Positec / B. Lewetz (German). A draft. The controller runs firmware 2.00/55W, so newer behaviour can differ. Not included here. |
-| **[SPEC1 p.N]** | The same manual at **v1.00/00b, 20 Jul 2000**, which comes with a radius-slowdown flowchart. The newest version found. Where it differs from v0.99, **SPEC1 wins**. The driver is built to SPEC1 with no fallbacks; captures override it where they disagree (§13.1). Not included here. |
+| **[SPEC1 p.N]** | The controller's programming manual, "CNC-Control — Bahnsteuerung für 4 Schrittmotorachsen", **v1.00/00b, 20 Jul 2000**, SIG Positec / B. Lewetz (German). The newest version found, and the one the driver is built to, with no fallbacks. Not included here (`docs/spec/README.md`). |
+| **[SPEC p.N]** | The same manual at v0.99/69, 18 Apr 2000, a draft. Cited only where it differs from SPEC1. |
+| **[RADIUS]** | A flowchart of the controller's radius slowdown ("Tangentialverzögerung, Steuerung Weissenberger") that comes with the manual. |
 | **[GMC]** | How GMC, Gunnar's own software for the 601, does it: learned from studying GMC 4.0 and 5.0, and not reproduced here. The captures were made with GMC 4.0.502.683. |
-| **[CAP name]** | Serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 software port-monitor export; no line settings recorded). Decoded to W/R lines for analysis. |
-| **[GCF]** | `GMCParameters.gcf` (this folder) |
-| **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included) |
+| **[CAP name]** | GMC serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 export of a software port monitor, 1-second timestamps, no line settings). `gunnar capture <file>` decodes them. |
+| **[SESSION name]** | Logs written by `gunnar probe` / `gunnar check` at the machine, in `testdata/sessions/`. None yet. |
+| **[GCF]** | GMC's machine and tool parameters for the 601 (its `.gcf` file; not included). |
+| **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included). |
 
-**Source captures:**
-- `g_init`: power-on / homing / identify / licence handshake
-- `g_motions`: jog on all axes + actuators (L/R/U/D, rotate, clamps, blades)
-- `g_regular_mount`: single rectangular window (100×200mm), 1.5mm board
-- `g_oval_mount`: single oval window, used for curve flattening
-- `g_multi_C10`, `g_multi_C11`, `g_multi_C12`: twin windows at three profiles
-- `g_multi_Cx_20…100`: speed sweep, 1.5mm board, 20–100%
+**Captures** [CAP]:
+- `g_init`: power-on, licence exchange, configuration, homing (66 s)
+- `g_motions`: jogs on every axis, outputs (clamps, heads), `@B`
+- `g_regular_mount`: one rectangular window (100 × 200 mm), 1.5 mm board
+- `g_oval_mount`: one oval window: a curve streamed as 1,107 vectors
+- `g_multi_C10`, `g_multi_C11`, `g_multi_C12`: twin windows with three profiles
+- `g_multi_Cx_20` … `g_multi_Cx_100`: speed sweep, 20–100 %
 
 ---
 
 ## 1. Physical / transport layer
 
-- **Port:** RS-232, null-modem cable to the controller (a DOS compact PC running "CNC-Control") [SPEC p.4–5]. COM4 in captures [GCF `LastSuccessfullyUsedComPort`].
-- **Encoding:** ASCII. **Every command and reply ends with `\r` (0x0D)** [SPEC p.6].
-- **Baud: 115200**, **8-N-1** [SPEC p.6].
-  - **GMC sets 115200 in both v4 and v5.** `new ComPort(port, 115200, …)` appears in [GMC] and [GMC]. There is no other baud setting in either version.
-  - **The captures confirm it from timing.** In [CAP g_oval_mount], the host wrote 24,253 bytes in one burst ending with `@X`, and the controller's `@X14` reply is stamped ≤ 3 s later (the timestamps have 1-second resolution). That needs at least ~6,000 bytes/s on the wire. At 9600 baud (~960 B/s) the burst alone takes ~25 s. At 115200 baud it takes ~2.1 s.
-  - **Where the earlier "9600" came from:** the capture files hold only timestamped Written/Read events, with no baud value. The figure came from the monitor's own settings, not from the line. A software port monitor records the application's reads and writes regardless of baud rate, so the decoded data looks correct either way.
-  - The controller's baud rate is configurable with `#C18,<code>` (5 = 9600, 8 = 57600, 9 = 115200), taking effect after a reset [SPEC p.25]. The shipped [SYS] has `CB=9` (probably = 115200 *(unverified key)*).
-- **Host line settings:** no handshake, DTR and RTS asserted, read/write timeouts 128 ms [GMC].
-- **Acknowledgements** [SPEC p.6–7]:
-  - In modes 0, 1 and 4, every accepted command is answered with `\r`. A rejected command gets `*NNN\r` (§2.6).
-  - In **mode 2 (cutting), accepted commands get no reply**; only errors are sent [SPEC p.6–7]. Observed: `L20,…` gets no `\r` [CAP g_regular_mount].
-- **Async control bytes** from the controller, each switched on or off by a parameter [SPEC p.7, p.22]:
+- **Link:** RS-232 null-modem cable to the controller, a compact DOS PC running "CNC-Control"
+  [SPEC1 p.5]. GMC used COM4 [GCF `LastSuccessfullyUsedComPort`]; on macOS or Linux, a USB-serial
+  adapter (`gunnar ports` lists them).
+- **Encoding:** ASCII. Every command and reply ends with CR (0x0D); fields are separated by
+  commas [SPEC1 p.6]. Distances and positions are signed 32-bit integers in µm or steps
+  [SPEC1 p.7].
+- **Line: 115200 baud, 8-N-1, no hardware handshake.** The spec: "19200/57600/115200 baud
+  selectable (default 115200), 8 data bits, 1 stop bit, no parity" [SPEC1 p.6].
+  - GMC uses 115200 in v4 and v5, and has no other baud setting [GMC].
+  - The captures agree. In `g_oval_mount` the host wrote 24,253 bytes in one burst ending with
+    `@X`, and the `@X14` reply is stamped at most 3 s later. At 9600 baud the burst alone takes
+    25 s; at 115200, 2.1 s.
+  - An earlier "9600" came from the port monitor's own settings, not from the line: a software
+    monitor records the application's reads and writes whatever the baud rate.
+  - `#C18,<code>` sets the baud (5 = 9600, 6 = 19200, 7 = 38400, 8 = 57600, 9 = 115200),
+    effective after a restart [SPEC1 p.26]. [SYS] has `CB=9`. The driver never changes it.
+  - RTS/CTS is reserved for a binary protocol that was planned but never described; the text
+    protocol uses the 0x02/0x03 bytes below instead [SPEC1 p.5].
+- **GMC's port settings:** no handshake, DTR and RTS asserted, read and write timeouts 128 ms
+  [GMC].
+- **The line is the bottleneck.** Ten bits per byte gives **11,520 bytes/s**, 87 µs per byte.
+  GMC's vector `L20,X15696,Y10776,Z774⏎` is 23 bytes, so the line carries at most about 500 of
+  them per second. Polls, mode switches, parameters and path data all share it (§5).
 
-| Byte | Meaning | Enable | Observed |
-|------|---------|--------|----------|
-| `0x01` | motion finished ("positioned") | `#C5,1` | yes. GMC sends `#C5,1` at init. Seen after `@B` and homing [CAP g_init, g_motions] |
-| `0x02` | buffer has room again, resume sending (like XON) | `#C7,1` | no (`#C7` never sent) |
-| `0x03` | mode-2 buffer almost full (~200 chars left), pause sending (like XOFF) | `#C7,1` | no |
-| `0x04` | homing finished | `#C6,1` | yes, after `$Hz` [CAP g_init] |
-| `0x05` | keep-alive ("node guarding"): sent after `<ms>` with nothing else sent | `#C8,<ms>` | no |
-| `0x06` / `0x07` | signal input 1 (`I221`, the **green start button**) went high / low | `#C35` bit 1 | GMC sends `#C35,1` [CAP g_init] and reacts to `0x07` [GMC] [SPEC1 p.7, p.28] |
-| `0x08` / `0x09` | signal input 2 (`I222`) went high / low | `#C35` bit 2 | no [SPEC1 p.7, p.28] |
+**Replies** [SPEC1 p.6–7, p.12]:
+- In modes 0, 1 and 4, every command gets either CR or `*NNN` (§2.6).
+- In **mode 2, accepted commands get no reply**, only errors. The look-ahead needs several
+  commands queued ahead of the one running, so the host must not wait for each. Observed:
+  `L20,…` gets nothing back [CAP g_regular_mount].
+- **Master commands (`@`) are answered in every mode** and are processed at once, even when the
+  buffer is full and the host has been told to pause.
+- `*NNN` also reports **machine faults** (a limit switch, the stop input), which arrive when
+  they happen and answer nothing [SPEC1 p.6]. The host must tell the two kinds apart (§2.6).
 
-- **`0x02`/`0x03` contradiction in SPEC1.** The prose on p.5 says `0x02` = "stop, ~200 chars before XOFF" and `0x03` = "room again". The byte table on p.7, the v0.99 spec [SPEC p.7] and GMC (it stops sending on `0x03`) all say **`0x03` = almost full, `0x02` = room again**. The driver follows the table. Verify with `#C7,1` on hardware.
-- GMC's "`0x07` = start button" is therefore **I221 low = button released** [SPEC1]. Enable `#C35,1` to get both edges.
-- In the other direction, **`0x06`** is also the *host's* ACK during **mode-9 file transfer** (the licence exchange inside `@M9`) [CAP g_init; SPEC p.37]. The two never meet: the driver never enters mode 9.
+**Signal bytes** from the controller. Each is switched on by a parameter, and they can arrive
+between replies or inside one: `⏎@X18⏎<01><01><04>` [SPEC1 p.7, p.23, p.28; CAP g_init].
+
+| Byte | Meaning | Enable | Seen in the captures | GMC |
+|------|---------|--------|----------------------|-----|
+| `0x01` | an axis came to rest after a move ("positioned") | `#C5,1` | after mode-1 moves, homing and `@B` [CAP g_init, g_motions]. **Never after a mode-2 path**: none in any cut capture, although `#C5,1` is set | sets `#C5,1` at connect; its serial path polls `@X` instead |
+| `0x02` | buffer has room again (like XON) | `#C7,1` | never | never enables `#C7` |
+| `0x03` | mode-2 buffer almost full (like XOFF) | `#C7,1` | never | its USB path holds data while the buffer is almost full [GMC] |
+| `0x04` | homing finished | `#C6,1` | after `$Hz` and `$Hxy` [CAP g_init] | never sets `#C6`: the 601 boots with it on |
+| `0x05` | keep-alive ("node guarding"), after `<ms>` with nothing else sent | `#C8,<ms>` | never | never enables |
+| `0x06` / `0x07` | signal input 1 (I221, the **green start button**) went high / low | `#C35` bit 1 | never (the button was not pressed while connected) | sets `#C35,1`; a `0x07` during a poll means "start button while cutting" and stops the job [GMC] |
+| `0x08` / `0x09` | signal input 2 (I222) went high / low | `#C35` bit 2 | never | — |
+
+- **0x02/0x03 contradiction.** SPEC1's prose says 0x02 comes "about 200 characters before the
+  usual XOFF" and 0x03 when there is room again [SPEC1 p.5]. Its own byte table [SPEC1 p.7], the
+  v0.99 table [SPEC p.7] and GMC's USB code all say the opposite: **0x03 = almost full, 0x02 =
+  room again**. The driver follows the table; `gunnar check` stage 6 settles it.
+- **Why the controller has its own XON/XOFF.** With a real XOFF, a Windows serial driver can send
+  nothing, not even an abort, until XON comes. With these bytes the host itself holds back path
+  data and can still send master commands such as `@B` [SPEC1 p.5, p.7].
+- GMC's "`0x07` = start button" is I221 going **low**, i.e. the button being released.
+- **`0x06` in the other direction** is the host's ACK during mode-9 file transfer (GMC's licence
+  read, §2.7) [CAP g_init]. The driver never enters mode 9.
+- **Host watchdog `#C19`** ("node guarding master"): while axes move, if nothing arrives from the
+  host for this many ms (1–10000; 0 = off), the controller aborts the motion and sends `*068`
+  [SPEC1 p.26, p.40]. GMC never sets it.
 
 ---
 
 ## 2. Command grammar
 
-The controller works in **modes**, switched with `@M<n>`. Each mode accepts its own command
-family. **Master commands (`@`) work in every mode** and are handled immediately, even when the
-buffer is full [SPEC p.6, p.11].
+The controller works in **modes**, switched with `@M<n>`. Each mode accepts its own family of
+commands; **master commands (`@`) work in every mode** [SPEC1 p.6, p.12].
 
-| Mode | Purpose | Command prefix | Reply |
-|------|---------|----------------|-------|
-| any | master control / query | `@` | reply or `\r` |
-| 0 | parameters: set with `#`, query with `&` | `#`, `&` | `\r` / value |
-| 1 | jog, homing, outputs (one motion at a time, each with its own ramp) | `$` | `\r` |
-| 2 | **cutting**: buffered path vectors with look-ahead speed control | none (`L`, `V`, `A`, `W`, `I`, `C`, `G`) | **none** |
-| 3 | batch program (`CNCCON.CMD` on the controller) | — | — |
-| 4 | continuous velocity mode | `!` | `\r` |
-| 9 | file transfer / firmware update | — | — |
+| Mode | Purpose | Commands | Reply |
+|------|---------|----------|-------|
+| any | master control and queries | `@` | reply or CR |
+| 0 | parameters | `#` set, `&` query | CR or value |
+| 1 | setup moves: jog, homing, outputs. Every move ramps up and down on its own; no path optimisation | `$` | CR |
+| 2 | **machining**: a buffered path with look-ahead speed control | `L`, `V`, follow-on vectors, `G`, `A`, `D`, `W`, `I`, `C` | **none**, only errors |
+| 3 | batch: runs the text program `CNCCON.CMD` stored on the controller | (file) | — |
+| 4 | velocity: axes run endlessly at speeds that can change on the fly | `!` | CR |
+| 9 | file transfer and firmware update, "used only by external programs" | — | — |
 
-[SPEC p.6, p.12]. A mode can only be changed while the machine is stopped, otherwise `*028` [SPEC p.12, p.37].
+[SPEC1 p.6, p.12–13, p.30, p.32, p.36–38]. A mode can only be changed at standstill, otherwise
+`*028`. `@M` answers with two digits: `@M01` [SPEC1 p.12–13].
 
-**Axes:** X, Y, Z (the tangential blade rotation), U. In motion commands, an **uppercase axis
-letter means absolute, lowercase means relative** [SPEC p.29, p.32].
+- **Mode 3** starts by itself at power-on if `CNCCON.CMD` exists and input INOBATCH (I234) is not
+  active. Its commands are `REF`, `GOTO`, `MOVE`, `WAIT`, `INL`/`INH`/`INR`/`INF` (wait for low,
+  high, rising, falling), `SPEED`, `SET`, `RESET` [SPEC1 p.36]. GMC never uses it.
+- **Mode 4:** `!G<g>` picks the speed entry (default 1); `!X<v>[,Y<v>…]` sets signed per-axis
+  speeds, effective at once; `!A`, `!B` (brake), `!S` (stop) [SPEC1 p.37–38]. GMC jogs in
+  mode 1 instead.
+- The driver uses modes 0, 1 and 2 only.
+
+**Axes:** X, Y, Z (the blade's rotation) and U (not fitted). In mode-1 and mode-2 moves an
+**uppercase axis letter means absolute and lowercase relative**, chosen per coordinate
+[SPEC1 p.30, p.33].
+
+**Speed table:** 100 entries, each holding a speed and a braking angle. Every move names the
+entry it runs at [SPEC1 p.7, p.17]. Speeds above the 40 kHz step rate are clamped [SPEC1 p.17].
+GMC runs every vector and jog at entry 20 and homes with entries 10 and 11.
 
 ### 2.1 `@`: master commands (any mode)
 
 | Command | Reply | Meaning |
 |---------|-------|---------|
-| `@V` | `@V2.00/55W 19.10.10 2807001` | Version string: version/revision, date, serial [SPEC p.14; CAP g_init]. `@V1..@V4` return the parts separately [SPEC p.14]. GMC splits it into a high and a low version [GMC]. `@V7`/`@V8` are also sent [CAP g_init] *(not in the spec)*. |
-| `@M<n>` / `@M` | `\r` / `@M0n` | Set / query the mode [SPEC p.12]. |
-| `@X` | `@X<r><f>` | **Status** [SPEC p.12]. `r` = 0 stopped / 1 moving. `f` = hex flags: **1** waiting (dead time or input), **2** error, **4** home position known (see note), **8** homing in progress. Values seen: `04`, `14`, `15`, `18` (§5). |
-| `@Y` | `@Yhhhh` | Switch bits `sbff rrrr uuzz yyxx`: `s` stop input, `b` machine ready, `rrrr` reference switches, then one pair per axis (U Z Y X) with the **lower bit = PLUS limit**, higher = MINUS. Spec example `@Y4001` = ready, X+ limit active [SPEC1 p.13]. Limit errors map as `*033`→X+ bit 0, `*032`→X− bit 1, `*035`→Y+ bit 2, … |
-| `@E` | `@E<n>` | Current error code, same numbering as `*NNN` [SPEC p.13]. |
-| `@P<a>` | `@PX-23450` | Axis position in µm [SPEC p.13]. |
-| `@L<a>` | `@LX44149` | Axis position **in steps** [SPEC p.13; CAP g_motions]. |
-| `@B` | `\r` (then `0x01` when stopped) | **Brake**: stop all axes with a ramp. Positions are kept [SPEC p.13; CAP g_motions]. |
-| `@S` | `\r` | **Emergency stop** with no ramp. Positions are lost, so the machine must be homed again [SPEC p.13]. |
-| `@N[n]` | `@N<n>` / `\r` | Set / query the mode-2 command number: the buffered command **currently being processed**. Set it to 0 before a job and poll it to drive a progress or graphics display [SPEC p.14; SPEC1 p.14–15]. |
-| `@R` | — | Restart the controller [SPEC p.14]. |
-| `@D01` | `\r` | Force the "home position known" flag [SPEC p.14–15]. |
-| `@H` | `@H86` | Buffer fill level in % [SPEC p.15]. |
-| `@I<n>` | `@I<n>,b` | Read logical input `n` (0..255) [SPEC p.15]. |
-| `@Q<n>[,b]` | `@Q<n>,b` / `\r` | Read / set logical output [SPEC p.15]. `Q242`–`Q249` are auxiliary signals 1–8, i.e. the `$A`/`A` bits 0–7, so `@Q` reads back what a streamed `A` did [SPEC1 p.11–12]. GMC uses `@Q241,1/0` for the vacuum valve [GMC]. |
-| `@O[pct]` | `@O<pct>` / `\r` | Speed override 10–200 %, takes effect immediately on all motion in all modes [SPEC1 p.16]; in mode 2 a stream can exempt rapid moves with `C16` and re-enable it with `C8` (§2.4) [SPEC1 p.35]. The driver rejects values outside 10–200 before sending. |
-| `@@` | `\r` | *(Not in spec.)* Sent at init and on mode-2 errors; probably clears the error/reset state [GMC]. |
+| `@V` | `@V2.00/55W 19.10.10 2807001` | Version/revision, date, serial number [SPEC1 p.15; CAP g_init]. `@V1`–`@V3` return the parts, `@V4` the controller number. The 601 omits the space after `@V` that the spec's example shows. GMC also sends `@V7` and `@V8` (not in the spec). |
+| `@M<n>` / `@M` | CR / `@M0n` | Set / query the mode [SPEC1 p.12–13]. |
+| `@X` | `@X<r><f>` | **Status** [SPEC1 p.13]. `r` = 0 stopped, 1 moving. `f` = hex flags: **1** waiting for an input or a dwell (mode 2), **2** error, **4** home position known (see note), **8** homing. Seen: `18` homing, `04` idle, `15` moving and waiting (the dead time), `14` moving. Flag 2 has never been seen. In mode 2 the run flag is set from the first path data, even while the controller waits; use flag 1 to see the wait [SPEC1 p.13]. |
+| `@Y` | `@Yhhhh` | Switch states, bits `sbff rrrr uuzz yyxx`: `s` stop input, `b` machine ready, `ff` undefined, `rrrr` home switches (X lowest), then a pair per axis (U Z Y X) with the **lower bit = plus limit**. `@Y4001` = machine ready, X+ limit hit [SPEC1 p.13]. |
+| `@E` | `@E<n>` | Current error, the same numbers as `*NNN`; 0 = none [SPEC1 p.14]. |
+| `@P<a>` / `@L<a>` | `@PX-23450` / `@LX44149` | Axis position in µm / in steps [SPEC1 p.14; CAP g_motions]. Open-loop steppers, so this is the commanded position. |
+| `@B` | CR, then `0x01` | **Brake**: all axes stop with a ramp; positions are kept. To read the position, first wait for standstill (`@X` or `0x01`) [SPEC1 p.14; CAP g_motions]. Whether a brake in mode 2 discards the rest of the buffered path or only pauses it, the spec does not say (stages 4 and 6). |
+| `@S` | CR | **Emergency stop** without a ramp. Positions are lost; home again. "Only in emergencies" [SPEC1 p.14]. |
+| `@N<n>` / `@N` | CR / `@N<n>` | Set / read the mode-2 **command number**: "the command currently being processed", for progress displays [SPEC1 p.14–15]. The overview calls it the interface's "handshake with consecutive command numbers" [SPEC1 p.6]. What counts, and its width, are open (stage 5). |
+| `@H` | `@H86` | Interface buffer fill in % [SPEC1 p.16]: "in mode 2, decide with it whether to send more vectors or wait". |
+| `@I<n>` | `@I<n>,b` | Read logical input 0..255; with no number, all 256 [SPEC1 p.16]. |
+| `@Q<n>` / `@Q<n>,b` | `@Q<n>,b` / CR | Read / set a logical output [SPEC1 p.16]. Q242–Q249 are aux signals 1–8, the `$A`/`A` bits 0–7, so `@Q` reads back what a streamed `A` did [SPEC1 p.11]. GMC switches the vacuum with `@Q241,1/0` [GMC] (Q241 is nominally spindle-speed output 8); not in the captures. |
+| `@O<pct>` / `@O` | CR / `@O<pct>` | Speed override 10–200 %, effective at once on all motion in all modes [SPEC1 p.16]. In mode 2 a stream can exempt rapids with `C16` and include moves again with `C8` [SPEC1 p.35]. The driver's `OverridePct` cannot hold a value outside 10–200. |
+| `@D<hh>` | CR | Set internal flags; `@D01` marks the machine homed without homing [SPEC1 p.15]. Never sent: the machine must really home. |
+| `@R` | none | Restart the control program; rereads the parameters [SPEC1 p.15]. Never sent. |
+| `@@` | CR | *Not in the spec.* GMC sends it before homing and after mode-2 errors [GMC; CAP g_init]; it probably clears the error state. The driver's `clear_error` sends it. |
+| `@+`, `@$`, `@=` | | Diagnostics: internal states, the step buffer's pointers, the last step timings [SPEC1 p.17]. Not used. |
 
-> **Note on `@X` flag 4.** The spec contradicts itself. Its flag table says 4 = "homing needed",
-> but its own example says `@X04` = "stopped, home position known" [SPEC p.12]. The captures
-> settle it: flag 4 is **absent** while homing (`@X18`) and **present** in every state after
-> homing (`04`, `14`, `15`) [CAP all]. So **4 = home position known**.
+> **`@X` flag 4.** The spec contradicts itself: its flag table says the bit is 0 when the home
+> position is known and 1 when homing is needed, but its example reads `@X04` as "stopped, home
+> position known" [SPEC1 p.13]. The captures settle it: flag 4 is **absent** while homing
+> (`@X18`) and **present** in every state after (`04`, `14`, `15`) [CAP all]. **4 = home
+> position known.**
 
 ### 2.2 `$`: mode 1 (jog, homing, outputs)
 
+Every mode-1 move ramps up and down on its own; nothing is optimised across moves [SPEC1 p.30].
+
 | Command | Meaning |
 |---------|---------|
-| `$H<axes>` | **Home** the listed axes in that order, e.g. `$Hz`, `$Hxy` [SPEC p.29]. Replies `\r` at once; completion is the `0x04` byte (if `#C6,1`) or `@X` returning to `0x` [SPEC p.22, p.29; CAP g_init]. |
-| `$L<g>,<a><steps>[,…]` | Jog in **steps** using speed-table entry `g` [SPEC p.30]. Uppercase axis = absolute, lowercase = relative. GMC jogs with `$L20,x±999999` (run until stopped) and then `@B` [CAP g_motions]. `$L10,X3` = absolute move to X = 3 steps [CAP g_init]. |
-| `$E<g>,<a><µm>[,…]` | Same as `$L` but in µm [SPEC p.29–30]. |
-| `$C<a>` / `$C` | **Zero the step and position counter** for one axis / all axes [SPEC p.30]. |
-| `$B` / `$S` | Stop the jog with a ramp / immediately [SPEC p.30]. |
-| `$A<hex>` | Set the 8 auxiliary outputs as a hex bitmask (§2.5) [SPEC p.31; GMC]. |
-| `$D<n>` / `$W<ms>` | Spindle speed / wait [SPEC p.31]. |
+| `$H<axes>` | **Home** the axes in the given order, e.g. `$Hz`, `$Hxy`. Homing searches the switch, backs off it, moves the optional offset (`#O`), then zeroes the counters [SPEC1 p.30]. With `#C6,1` the CR comes at once and `0x04` at the end; with `#C6` off the CR is held until homing finishes [SPEC1 p.23]. The 601 answers at once and sends `0x04` [CAP g_init]. Otherwise poll `@X` until it reads `0x` with flag 4. |
+| `$L<g>,<a><steps>[,…]` | Move in **steps** at speed entry `g` [SPEC1 p.31]. For an endless jog, give a target beyond the machine; `@B`/`$B` then stops it without losing steps. `0x01` at the end if `#C5,1`. GMC jogs `$L20,x±999999` and then sends `@B` [CAP g_motions]; `$L10,X3` is an absolute move to X = 3 steps [CAP g_init]. |
+| `$E<g>,<a><µm>[,…]` | The same in µm [SPEC1 p.31]. |
+| `$C<a>` / `$C` | **Zero the step and position counters** of one axis / all axes [SPEC1 p.31]. |
+| `$B` / `$S` | Stop the move with a ramp / at once (positions lost) [SPEC1 p.31–32]. |
+| `$A<hex>` | Set the 8 aux outputs as a hex bitmask (§2.5) [SPEC1 p.32; GMC]. The spec says a mode switch clears them; on the 601 they persist (§13.1). |
+| `$D<n>` / `$W<ms>` | Spindle speed 0–255 / wait. `$W` "is not needed with a host", since every mode-1 command is acknowledged before the next [SPEC1 p.32]. |
 
 ### 2.3 `#` / `&`: mode 0 parameters (set / query)
 
-The query form is the same letter with `&` and no value, and the reply repeats the set format:
-`&C13` → `&C13,1` [SPEC p.28].
+Parameters can only be set and read in mode 0 [SPEC1 p.17]. A query is the same letter with `&`
+and no value, and the reply repeats the set format: `&C13` → `&C13,1` [SPEC1 p.29]. Values last
+until the controller restarts unless saved with `#W` [SPEC1 p.17, p.28]. Neither GMC nor this
+driver ever saves.
 
-| Command | Meaning | Seen |
-|---------|---------|------|
-| `#G<g>,<v>` | **Speed for table entry `g`** (1..100). Units depend on `#C11` (µm/s or Hz) [SPEC p.18]. | `#G20,<feed>` per segment, `#G10,1750/3000` at homing |
-| `#B<g>,<deg>` | Braking angle for table entry `g` (0..90°): direction changes larger than this force a full stop [SPEC p.18]. | `#B20,90` (`#B20,20` for fast-pen tools) [GMC] |
-| `#M<v>` | Maximum speed [SPEC p.18]. | `#M36000` [CAP g_init] = `AbsMaxSpeed` [GCF] |
-| `#R<ms>` | **Maximum ramp (acceleration) time in ms** (spec range 10..400 [SPEC p.18; SPEC1 p.19]; firmware 2.00 accepts `#R470` and `#R700` with `\r` [CAP g_multi_C11, g_multi_C12]). GMC computes it from an acceleration value (§3.1) [GMC]. | `#R225`, `#R250`, `#R112`, `#R700`, `#R470` |
-| `#S<v>` | Start/stop speed: the speed below which no ramp is needed, also used on tight radii [SPEC p.18]. GMC sends the tool's `StartStop` [GMC]. | `#S4000`, `#S1000` |
-| `#Z<a>,<n>` / `#N<a>,<n>` | Axis resolution: steps per revolution / µm per revolution [SPEC p.19]. | `#ZZ,3000`, `#NZ,10000` [GMC] |
-| `#O<a>,<v>` | Offset moved after homing, before the counters are zeroed [SPEC p.19]. | `#OX,300`, `#OY,300`, `#OZ,0` |
-| `#D<a>,dir,g1,g2,g3` | Homing direction and the speed-table entries to use [SPEC p.19]. | — |
-| `#I<n>,port,bit,inv` / `#Q…` | Map a logical input/output to a hardware port, bit and inversion [SPEC p.19–20]. | `&I…` queries only |
-| `#H<n>,<v>` / `&H<n>` | Usage counters (MF1, MF2, hours) [SPEC p.20]. | [GMC] |
-| `#P<a>,<µm>` / `#L<a>,<steps>` | Set the current position [SPEC p.27]. | — |
-| `#W` / `#X` | Save parameters to disk / reload them [SPEC p.27]. | — |
-| `#C<n>,<v>` | Configuration registers, see below. | |
+| Command | Meaning [SPEC1 page] | GMC sends |
+|---------|----------------------|-----------|
+| `#G<g>,<v>` | **Speed of table entry `g`** (1..100): steps/s or µm/s by `#C11` [p.19] | `#G20,<feed>` before every move; `#G10,1750`, `#G10,3000` and `#G11,750` for homing |
+| `#B<g>,<deg>` | **Braking angle** of entry `g`, 0..90°: a direction change larger than this brakes to a stop [p.19] | `#B20,90` per job (`#B20,20` for fast pens [GMC]) |
+| `#E<g>,<v>,<deg>` | Speed and braking angle together [p.19] | — |
+| `#M<v>` | Maximum speed [p.19] | `#M36000` at connect (`AbsMaxSpeed` [GCF]) |
+| `#R<ms>` | **Ramp time**: the shortest time to reach `#M` from rest [p.8, p.19]. Spec range 10..400; the 601 accepts 470 and 700 (§13.1). GMC derives it from the tool's acceleration (§3.1) [GMC] | `#R112`, `#R225`, `#R250`, `#R300`, `#R470`, `#R700` |
+| `#S<v>` | **Start/stop speed**: below it no ramp is needed; also the speed for tight radii and large direction changes [p.8, p.19] | the tool's `StartStop`, 400–4000 [GMC] |
+| `#Z<a>,<n>` / `#N<a>,<n>` | Resolution: steps per revolution / µm per revolution [p.20] | `#ZZ,3000`, `#NZ,10000` at connect [GMC] |
+| `#U<a>,<steps>` | Backlash compensation [p.20] | — |
+| `#Y<a>,<0 or 1>` | Invert the axis's direction signal [p.20] | — |
+| `#O<a>,<v>` | Offset moved after homing, before the counters are zeroed [p.20] | `#OX,300`, `#OY,300`, `#OZ,0` before homing |
+| `#D<a>,<dir>,<g1>,<g2>,<g3>` | Homing direction (0 negative, 1 positive) and the speed entries for the search, the back-off and the offset [p.20] | — (the probe and the checks read `&D`) |
+| `#I<n>,<port>,<bit>,<inv>` / `#Q…` | Map a logical input / output to hardware: port 0 = unmapped, 1–4 = LPT1–4, anything else a port address; bit 0..7; invert flag [p.21] | only on other firmware versions [GMC]; on the 601 only `&I240` |
+| `#H<n>,<v>` | Usage counters (pages 10 and 21 number them differently) [p.10, p.21] | `#H1,` / `&H1` [GMC] |
+| `#P<a>,<µm>` / `#L<a>,<steps>` | Declare the current position [p.28] | — |
+| `#W` / `#X` | Save the parameters to disk (CR once written) / reread them (no reply) [p.28] | never |
+| `#C<n>,<v>` | Configuration registers, below | |
 
-**`#C` registers:**
+**`#C` registers** [SPEC1 p.18 overview, p.22–28 detail]. "When" says when GMC writes the
+register: once at **connect** [CAP g_init], before each **use** (a move, a cut, homing), or
+**never**. For the "never" ones the 601 runs on its own boot values, which `gunnar probe` reads.
 
-| Reg | Meaning [SPEC p.17, p.20–27] | Value seen | Code |
-|-----|------------------------------|------------|------|
-| C1 | **Mode-2 dead time (ms)**: after the first vector the controller waits this long so the look-ahead can fill before moving | `100` before straight segments, `200` before curves, `0` for positioning | [GMC] |
-| C2 | Braking criteria bitmask (1 XY/Z angle, 2 speed change, 4 Z move, 8 U move) | `0` | [GMC] |
-| C5 | Send `0x01` when a move finishes | `1` | |
-| C6 | Send `0x04` when homing finishes | — | |
-| C7 | Enable `0x02`/`0x03` flow control | — | |
-| C8 | Keep-alive interval (ms) | — | |
-| C11 | Parameters in steps/Hz vs µm/µm·s⁻¹ | `0` | [GMC] |
-| C12 | Ramp during homing | `1` | |
-| C13 | Z is a rotary axis (always turns the shorter way) | `1` | |
-| C14 | Dynamic speed control bitmask (1 diagonal, 2 radius, 4 tangential, 8 buffer) | `13` = diagonal + tangential + buffer | [GMC] |
-| C16 | Usage-counter enable bits | `4` | |
-| C18 | Baud rate code | — | |
-| C19 | Host watchdog: abort if nothing is received from the host for this many ms | — | |
-| C20 / C21 | Radius slowdown: min / max radius | `400` / `12000` | [GMC] |
-| C24 / C25 | Radius slowdown: lower / upper % threshold | `30` / `100` | [GMC] |
-| C26 / C27 | Radius slowdown: rising / falling threshold counts | `5` / `5` | [GMC] |
-| C28 | Radius slowdown steepness factor | `1` | [GMC] |
-| C29 | Auto-home at controller startup | — | |
-| C31–C34 | CMOS addresses for the usage counters | — | |
-| C35, C37 | *(not in spec)* | `1`, `1` | |
-| C52 | *(not in spec)*: **rejected with `*021`** ("invalid parameter id") by this firmware | `800` | [CAP g_init] |
-| C97 | *(not in spec)*: **controller real-time clock** `day,month,year,hour,min,sec`. `&C97` reads it, `#C97,…` sets it | reply `&C97,165,165,2065,165,22,39` (date fields look unset, 0xA5) | [GMC] |
+| Reg | Meaning | Page | GMC | When |
+|-----|---------|------|-----|------|
+| C1 | **Mode-2 dead time (ms)**: after the first vector the controller waits this long before moving, so the look-ahead has several vectors. `C1` in the stream skips it for one vector | 22, 35 | `0` travel, `100` straight edge, `200` curve, `50` at connect [GMC] | use |
+| C2 | Extra braking criteria, bits: 1 XY-to-Z direction change beyond the braking angle; 2 change of speed entry; 4 start and end of a Z move; 8 U moves. An XY direction change beyond the braking angle always brakes | 22 | `0` [GMC] | connect |
+| C3 | LPT port for the step/direction output | 22 | — | never |
+| C4 | Controller screen output: 0 everything, 2 nothing ("recommended" with no monitor), 3 states only. Display costs controller time | 22–23 | — | never |
+| C5 | Send `0x01` when a move ends | 23 | `1` | connect |
+| C6 | Send `0x04` after homing (and the CR at once) | 23 | — | never; on at boot |
+| C7 | `0x02`/`0x03` flow control | 23 | — | never |
+| C8 | `0x05` keep-alive interval (ms) | 23 | — | never |
+| C9 | Ramp profile: 0 linear computed, 1 linear table, 2 sinusoidal, 3 exponential, 4 user table `RAMPE.DAT` | 23–24 | — | never |
+| C11 | Units: 0 steps and steps/s, 1 µm and µm/s | 24 | `0` | connect |
+| C12 | Ramp when homing reaches the switch | 24 | `1` | connect |
+| C13 | Z is a rotary axis: it always turns the shorter way (212° becomes −148°) | 24 | `1` | connect |
+| C14 | Dynamic path speed, bits: 1 diagonal, 2 radius, 4 tangential, 8 buffer fill (§2.4.1) | 24–25 | `13` = 1 + 4 + 8 [GMC] | connect |
+| C15 | Hardware watchdog: 0 none, 1 Rocky418 board | 25 | — | never |
+| C16 | Usage counters, bits: 1 operating seconds, 2 aux signal 1 count, 4 aux signal 2 count | 25 | `4` | connect |
+| C18 | Baud code (§1); effective after a restart | 26 | — | never |
+| C19 | Host watchdog (ms) (§1) | 26 | — | never |
+| C20 / C21 | Radius slowdown: smallest / largest radius (§2.4.1). Spec minimums 1000 / 100000 | 26 | `400` / `12000` or `5000` (`CurveMin/MaxRadius × ScaleY` [GMC]) | use |
+| C23 | Step pulse stretch; "as low as possible" | 26 | — | never |
+| C24 / C25 | Radius slowdown: lower / upper threshold, % | 26–27 | `30` / `100` [GMC] | use |
+| C26 / C27 | Radius slowdown: how often a change up / down must recur | 27 | `5` / `5` [GMC] | use |
+| C28 | Steepness of the slowdown below the smallest radius | 27 | `1` [GMC] | use |
+| C29 | Auto-home at controller start-up: axis digits in order (`21` = Y then X; 0 = off) | 27 | — | never |
+| C30 | Spindle speed port | 27 | — | never |
+| C31–C34 | CMOS addresses of the usage counters (Rocky418: 105, 109, 113, 123) | 27–28 | `105`, `109`, `113`, `123` | connect |
+| C35 | Signal-input bytes: 1 = I221 as `0x06`/`0x07`, 2 = I222 as `0x08`/`0x09`, 3 = both | 28 | `1`, for the 601, 3001, 4001 and 801 [GMC] | connect |
+| C37 | *Not in the spec.* Accepted with CR | — | `1`, for the 601, 3001, F1 and 801 [GMC] | connect |
+| C52 | *Not in the spec.* **Rejected with `*021`** (parameter id invalid) by the 601 [CAP g_init] | — | `800`, sent to every model [GMC] | connect |
+| C97 | *Not in the spec.* The controller's clock, `day,month,year,hour,min,sec`: `&C97` → `&C97,165,165,2065,165,22,39` (unset fields read 0xA5) | — | read at connect [GMC] | connect |
 
 ### 2.4 Mode 2: path commands (no reply)
 
-| Command | Meaning |
-|---------|---------|
-| `L<g>,X<steps>,Y<steps>,Z<steps>` | **Linear vector in steps**, using speed-table entry `g` [SPEC p.31–32]. GMC always uses `g = 20`, so **`L20` means "vector at speed entry 20"**, and the speed itself is set by `#G20,<v>` [GMC]. Uppercase = absolute. |
-| `X…,Y…,Z…` | Follow-on vector reusing the previous `g` [SPEC p.32]. GMC repeats the full `L20,` every time [CAP g_oval_mount]. |
-| `V<g>,…` | Same as `L` but in µm [SPEC p.32]. |
-| `G<g>,<v>` | Change a table speed while in mode 2 [SPEC p.32]. |
-| `A<hex>` | Set the auxiliary outputs (same bitmask as `$A`) [SPEC p.33]. |
-| `W<ms>` | Dwell [SPEC p.33]. |
-| `I<±n>` | Wait until input `n` is high (+) or low (−) [SPEC p.33]. |
-| `C<bits>` | Special functions [SPEC1 p.35]: **1** = run the next vector without the `#C1` dead time (one-shot; "for single moves with no path after them"); **8** = from here the speed override applies (tool in the material); **16** = from here no override (tool not engaged, rapid). **2** (diagonal-first) and **4** (one axis at a time) are listed but "noch nicht realisiert" (not yet realised). `C0` cancels a pending one-shot before the move. An invalid value is `*067`. The driver encodes only 1, 8 and 16 (or 0). |
+"In mode 2 the controller uses look-ahead speed optimisation and holds the requested path speed
+exactly. The first command must give the kind of data and the speed; following commands may
+leave them out." All braking and dynamic settings act **only in mode 2** [SPEC1 p.32].
 
-Because `A`, `W` and `I` sit **in the buffer**, a whole job (outputs, dwells, waits for the operator, vectors)
-can be streamed once and runs in order without host round-trips; `@N` reports progress. Each executed item
-(vector, `A`, `W`, `I`) advances `@N`; `C` is a modifier and does not *(sim assumption, verify on hardware)*.
-While an `I` wait or a `W` dwell holds the stream, `@X` reads `15` (running, waiting), the same as during the dead time.
+| Command | Meaning | GMC |
+|---------|---------|-----|
+| `L<g>,<a><steps>[,…]` | **Vector in steps** at speed entry `g`. Axes not given stay put; each coordinate's case picks absolute or relative [SPEC1 p.33] | `L20,X…,Y…,Z…`, absolute, for every vector [GMC]; `L20,x…,y…,z…` for its relative moves [GMC] |
+| `V<g>,<a><µm>[,…]` | The same in µm [SPEC1 p.33] | — |
+| `<a><v>[,…]` | **Follow-on vector**: no letter, no entry. Reuses the kind and the entry of the previous vector: `X2300,Z0` [SPEC1 p.33] | only on its USB path, after a first `L20` [GMC] |
+| `G<g>,<v>` | New speed for entry `g`, "used by all following moves with this entry" [SPEC1 p.34] | — |
+| `A<hex>` | Aux outputs, the same bitmask as `$A` [SPEC1 p.34] | — |
+| `D<n>` | Spindle speed 0–255 [SPEC1 p.34] | — |
+| `W<ms>` | Dwell [SPEC1 p.34] | — |
+| `I<±n>` | Wait until input `n` is high (`+`) or low (`−`). An unmapped input does not wait; an invalid number is `*066` [SPEC1 p.35, p.40] | — |
+| `C<bits>` | Special functions for the next move (below) [SPEC1 p.35] | — |
+| `S…` / `K…` | Bézier curve / arc: "not yet realised" [SPEC1 p.33–34] | — |
+
+**`C` bits** [SPEC1 p.35]: **1** = run the next vector without the `#C1` dead time ("for single
+moves with no path after them"); **8** = from here on the speed override applies (tool in the
+material); **16** = from here on no override (tool clear, rapid). **2** (diagonal first) and
+**4** (one axis at a time) are "not yet realised". `C0` cancels a pending function before the
+move; an invalid value is `*067`. The spec says "values 0..7" yet defines 8 and 16. The driver
+encodes only 1, 8 and 16, or 0 (`StreamFlags`).
+
+**Compact paths.** The follow-on form drops `L20,`, and relative coordinates are short, so after
+one absolute vector a path can be sent as relative steps with unchanged axes left out:
+
+```
+L20,X15696,Y10776,Z774     GMC: every vector absolute and in full (23 bytes)
+L20,X15696,Y10776,Z774     compact: the first vector absolute,
+x-21,y14,z3                then relative steps (12 bytes)
+y30                        an axis that does not move is left out
+```
+
+`Command::path` emits this form and skips repeated points. The spec defines the follow-on
+vector; whether firmware 2.00 accepts it, and whether it still follows a `G`, `A` or `W`, is
+open (stage 5).
+
+**A whole cut can be one stream.** `A`, `W` and `I` sit in the buffer and run in order with the
+vectors, so a cut (head down, settle, path, head up) needs no mode switch and no round trip, and
+`@N` reports progress through it. While a `W` or an `I` holds the stream, `@X` reads `15`
+(running and waiting), as during the dead time [SPEC1 p.13]. Each executed vector, `A`, `W`
+and `I` advances `@N`; `C` is a modifier and does not *(sim assumption)*. An in-stream `G`
+takes effect when received, not when reached *(sim assumption)*; stage 5 checks both.
+
+### 2.4.1 Path speed control (what the controller does with the buffer)
+
+The controller plans the speed along the buffered path itself [SPEC1 p.8–9, p.22, p.24–27].
+
+It **brakes to a stop** when [SPEC1 p.8]:
+1. the path ends and no more data is buffered. This also happens mid-path when the host falls
+   behind: "with mostly small vectors and too high a speed, the step buffer runs empty now and
+   then and the controller must brake to avoid losing steps";
+2. a wait command (`W`, `I`) comes;
+3. the direction changes by more than the entry's braking angle (`#B`);
+4. the speed entry changes (only with `#C2` bit 2);
+5. the Z axis moves (only with `#C2` bit 4).
+
+GMC sets `#C2,0` and `#B20,90`. So within one speed entry only a turn of more than 90° and the
+end of the data stop the carriage; turning the blade alone does not.
+
+It **slows down without stopping** according to `#C14` [SPEC1 p.24–25]:
+- **1, diagonal:** the XY speed is scaled by the direction of travel (71 % = 1/√2 at 45°), so
+  the path speed, not each axis's speed, matches the set speed.
+- **2, radius:** the radius is estimated from the vector length and the angle between vectors,
+  averaged over the last three short vectors. XY only.
+- **4, tangential:** as 2, but the radius comes from the rotation of axis 3 (Z, the blade).
+  "Generally more accurate than 2."
+- **8, buffer fill:** if the interface buffer stays under 10 %, the controller slows down so the
+  buffer can refill.
+
+GMC sets 13 = diagonal + tangential + buffer fill. With bit 4 the controller reads curvature
+from Z, so a curve must carry the blade's tangent in Z for the controller to slow down on it
+*(inference from the spec)*.
+
+**Radius slowdown parameters** [SPEC1 p.9, p.26–27]. Only vectors shorter than RADMAX are
+considered. At a radius ≥ RADMAX (`C21`) the carriage runs at full speed; at RADMIN (`C20`) at
+the start/stop speed (`#S`); in between, linearly. Below RADMIN the speed keeps falling linearly
+below `#S`, scaled down further by `C28`. A new speed that differs from the current one by more
+than `C25` % applies at once; by less than `C24` %, it is ignored; in between it must recur
+`C26` times (faster) or `C27` times (slower) first. GMC's values in steps (`#C11,0`): `C20` 400
+(10 mm), `C21` 12000 (300 mm) or 5000 (125 mm), `C24` 30, `C25` 100, `C26`/`C27` 5, `C28` 1.
+
+The 2003 flowchart [RADIUS] describes a later variant: vectors longer than RADMAX/2 always run
+at full speed; fixed bands at 25 % and 50 % with counters take the place of `C24`–`C27`; a
+change must hold for two vectors in a row before it applies. Which variant firmware 2.00 runs is
+unknown. Nothing in the driver depends on it.
 
 ### 2.5 `$A` / `A` output bitmask
 
-Bit `i` of the hex value is output `i`. The bit roles come from the machine parameters
-[GCF `i_*`; GMC]:
+Bit `i` of the hex value is aux signal `i + 1`, logical output `Q242 + i` [SPEC1 p.11, p.32]. The
+roles come from the machine parameters [GCF `i_*`; GMC]:
 
 | Bit | Hex | `.gcf` name | Role |
 |-----|-----|-------------|------|
 | 0 | 01 | `i_t` | bevel tool *(name only)* |
-| 1 | 02 | `i_bh` | head-up / hold (set at init and on head-up) [GMC] |
+| 1 | 02 | `i_bh` | head-up / hold; set at init and on head-up [GMC] |
 | 2 | 04 | `i_b` | blade / bevel down [GMC] |
 | 3 | 08 | `i_sh` | straight head |
-| 4 | 10 | `i_dd` | head switch pulse, 250 ms [GMC] |
+| 4 | 10 | `i_dd` | head-switch pulse, 250 ms [GMC] |
 | 5 | 20 | `i_pl` | clamp ("p… left") |
 | 6 | 40 | `i_pr` | clamp ("p… right") |
 | 7 | 80 | `i_free` | spare |
 
-Observed codes [CAP g_motions, mounts]: `02` neutral (only `i_bh`) · `05` bevel head down (`i_t` + `i_b`)
-· `0A` straight head down (`i_bh` + `i_sh`) · `22` (`i_bh` + `i_pl`) · `42` (`i_bh` + `i_pr`) ·
-`45` = `40` + `05` · `4A` = `40` + `0A` · `62` = both clamps.
+What GMC writes [CAP g_init, g_motions, g_regular_mount]:
+- `02` neutral (`i_bh` only), at the end of every job.
+- `62` both clamps, at connect.
+- Bevel edge: `45` head down (`40` + `05`: `i_t` + `i_b`), then `40` head up (clamp only).
+- Straight edge: `4A` head down (`40` + `0A`: `i_bh` + `i_sh`), then `42` head up.
+- Between jobs and tools: `42` (`i_bh` + `i_pr`); `22` (`i_bh` + `i_pl`) in the jog capture.
 
-> ⚠️ **Clamp side naming conflict.** The capture notes label `42` as the *left* clamp and `22`
-> as the *right*, but the `.gcf` names put bit 6 (`40`) on `i_pr` (right) and bit 5 (`20`) on
-> `i_pl` (left). Either the `p` in the names doesn't mean the side, or the wiring is mirrored.
-> **Confirm physically before relying on it.**
+GMC sleeps `HeadUpDown` ms (200–500 by profile, §8) after switching a head [GMC]. Separately, it switches the vacuum through `@Q241` (§2.1).
 
-### 2.6 Inputs and errors
+> ⚠️ **Clamp sides.** The capture notes label `42` the *left* clamp and `22` the *right*, but the
+> `.gcf` names put bit 6 (`40`) on `i_pr` (right) and bit 5 (`20`) on `i_pl` (left). Either the
+> `p` in the names does not mean the side or the wiring is mirrored. Stage 3 asks the operator
+> which clamp each bit closes.
 
-Logical inputs [SPEC p.10]: `I235`/`I236`/`I237` = **home (reference) switches for axes 1/2/3 (X/Y/Z)**;
-I239–I246 = limit switches; I247 = machine ready; I254/I255 = stop/start.
-[SYS] maps them on the 601: `I235=001h,6,1`, `I236=001h,7,0`, `I237=001h,4,0`, start button `I221=279h,7,1`.
-GMC polls `@I221` for the **start button** (`,1` then `,0`) [GMC]. With `#C35,1` the
-controller instead *pushes* `0x06`/`0x07` on each edge [SPEC1 p.7, p.28], so no polling is needed.
-`&I240` is an **input-definition query**. Its reply `&I240,000h,0,0` means input 240 (axis-2 limit) is not mapped [SPEC p.28].
+### 2.6 Inputs, outputs and errors
 
-Errors are `*NNN\r` [SPEC p.37–38]. The ones that matter most:
-`*001` command not valid in this mode · `*003` bad format · `*021` invalid parameter id · `*028` mode change only while stopped ·
-`*030` already moving · `*032–039` limit switch hit · `*040` stop input · `*041` not homed · `*056` machine not ready ·
-`*062` sitting on a limit switch · `*063` can't home, sitting on the switch · `*066` bad input number in a mode-2 `I` · `*067` invalid value for a mode-2 `C` ·
-`*068` host watchdog timeout · `*007`/`*008` service code needed / invalid: once the start counter reaches 0, mode switches are refused [SPEC1 p.10, p.38].
-The driver prints the SPEC1 text for every code it knows (`protocol::errors::describe`).
-`*069` is not in the spec; GMC treats it as a controller error [GMC].
+**Logical inputs** [SPEC1 p.11]. Inputs are debounced for 2 ms and read every program cycle
+(0.5–1 ms) [SPEC1 p.10].
+
+| Input | Name | Meaning |
+|-------|------|---------|
+| I221 / I222 | ISIGNAL1 / 2 | signal inputs behind the `0x06`–`0x09` bytes. **I221 is the green start button** on the 601 [SYS `I221=279h,7,1`] |
+| I223–I226 | ILST1–4 | power stage 1–4 ready |
+| I227 / I228 | IFEST / ISPINDEL | clamping closed / spindle turning |
+| I229–I232 | IEND1–4 | both limit switches of an axis on one line |
+| I233 / I234 | IZUNTEN / INOBATCH | Z down / block batch mode |
+| **I235–I238** | IREF1–4 | **home switches** of X, Y, Z, U. [SYS]: `I235=001h,6,1`, `I236=001h,7,0`, `I237=001h,4,0` (LPT1) |
+| **I239–I242** | IENDM1–4 | **minus limit switches** of X, Y, Z, U |
+| **I243–I246** | IENDP1–4 | **plus limit switches** of X, Y, Z, U |
+| I247 | IBEREIT | machine ready |
+| I254 / I255 | ISTOP / ISTART | stop / start |
+
+`&I240` is an input-definition query. The 601's reply `&I240,000h,0,0` means the Y− limit is not
+mapped [CAP g_init]; stage 7 drives into a limit only if `&I243` or `&I239` is mapped.
+
+**Logical outputs** [SPEC1 p.11–12]: Q255 ready (no error), Q251 motors running, Q250 motors in a
+ramp, **Q242–Q249 aux signals 1–8** (the `$A` bits), Q234–Q241 spindle-speed outputs 1–8, Q233
+batch running.
+
+GMC polls `@I221` for the start button while idle [GMC]. With
+`#C35,1` the controller pushes `0x06`/`0x07` on each edge instead [SPEC1 p.28]. Before homing,
+GMC checks that X and Y are not sitting on their home switches (`@I235`, `@I236`, then `@I240`
+if mapped) and retries twice, 2 s apart [GMC; CAP g_init].
+
+**Errors** are `*NNN⏎` [SPEC1 p.38–40]. The driver prints the SPEC1 text for every code it knows
+(`ErrorCode`'s `Display`: `*033 (limit switch X+ …)`, from `protocol::errors::describe`).
+
+| Kind | Codes |
+|------|-------|
+| **Rejections** (the answer to a command) | `*001` not valid in this mode · `*002` speed entry invalid · `*003` format invalid · `*004` speed invalid · `*006` ramp invalid · `*010` braking angle invalid · `*012` axis invalid · `*013`/`*015` resolution invalid · `*017` backlash invalid · `*019` home offset invalid · `*021` parameter id invalid · `*024` parameter exceeds limits · `*027` invalid mode · `*028` mode change only at standstill · `*029` unknown master command · `*030` machine already moving · `*031` command invalid · `*041` not homed · `*042`/`*043` spindle entry / speed invalid · `*044` baud invalid · `*045` wait time invalid · `*046` signal states invalid · `*055` parameter value invalid · `*060`/`*061` value too small / too large · `*066` bad input number in a mode-2 `I` · `*067` bad value in a mode-2 `C` |
+| **Machine events** (arrive whenever they happen) | `*032`–`*039` **limit switch hit**: even = minus, odd = plus; `*032`/`*033` X, `*034`/`*035` Y, `*036`/`*037` Z, `*038`/`*039` U · `*040` stop input · `*068` host watchdog expired (§1) |
+| **Either** | `*022` memory too small (the simulator raises it on a buffer overrun *(sim assumption)*) · `*056` machine not ready · `*062` standing on a limit switch · `*063` cannot home, standing on the switch · `*007`/`*008` service code required / invalid: once the start counter reaches 0, mode switches are refused [SPEC1 p.10] |
+| Files, batch, mode 9 | `*023`, `*025`, `*026`, `*047`–`*054`, `*057`–`*059`, `*064`, `*065` |
+| Not in the spec | `*069`: GMC treats it as a controller error [GMC] |
+
+The spec's prose uses `*023` as its limit-switch example [SPEC1 p.6], but its table makes 023 a
+file error and the limits 032–039. `@E` calls every code but 0 "still to be defined" [SPEC1
+p.14]; the table came later.
+
+**Answer or event?** The driver (`controller::core`, `error_may_answer`) takes a `*NNN` as the
+answer to the outstanding command only if that command can be rejected: a query never is, and
+in mode 2 only `@M` is. Any other `*NNN` is an event: it is published as
+`Event::Unsolicited`, and the next operation fails with `ControllerError::AsyncError`. Open: in
+modes 0 and 1 a limit fault that arrives while a command is outstanding is taken as that
+command's rejection. Treating `*032`–`*039`, `*040` and `*068` as events always would fix that;
+`*056` and `*062` could be either (§10).
 
 ### 2.7 Licence (mode 9, do not reproduce)
 
-`@M9` → `:ULICENSE.LIC` → hex blocks, each followed by a `0x06` ACK → `@M0` [CAP g_init]. This is mode-9 file transfer:
-GMC reads the licence file stored on the controller [GMC].
-It is **not needed for motion**. A clean-room driver should not send `@M9` at all, and must also never trigger the GMC
-firmware-update path (an `.rtb` upload when the `@V` version doesn't match) [GMC].
+`@M9` → `:ULICENSE.LIC` → hex blocks, each followed by a `0x06` ACK → `@M0` [CAP g_init]. This is
+mode-9 file transfer: GMC reads the licence file stored on the controller [GMC]. It is **not needed for motion**. A clean-room driver must
+not send `@M9`, and must never trigger GMC's firmware-update path (an `.rtb` upload when the `@V`
+version does not match) [GMC]. Mode 9 is "used only by
+external programs" [SPEC1 p.38]. Whether the 601 accepts mode switches without the licence
+exchange is the probe's first question.
 
 ---
 
@@ -243,198 +429,266 @@ firmware-update path (an `.rtb` upload when the `@V` version doesn't match) [GMC
 
 | Constant | Value | Source |
 |----------|-------|--------|
-| **XY scale** | **40 steps/mm** (0.025 mm/step) | [GCF] `MachineScale.ScaleX/Y = 400 /cm`; GMC converts with it [GMC]. Matches captures. |
-| **Z (blade angle) scale** | **≈ 8.333 steps/deg** (750/90) | [GCF] `ScaleZ = 8.3333`. Z is a rotary axis (`#C13,1`). |
-| **Feed-rate law** | **`#G20 = AbsMaxSpeed × Speed% / 100` = `360 × Speed%`** | [GMC] with `AbsMaxSpeed = 36000` [GCF]. Exact match to the speed sweep [CAP g_multi_Cx_*]. GMC's speed reduction factor is 1 here. |
-| **Rapid / positioning feed** | `#G20,36000` (`PosSpeed = 100 %`) | [GCF] `PosSpeed`; [GMC] |
-| **Ramp law** | see §3.1 | |
+| **XY scale** | **40 steps/mm** (0.025 mm/step) | [GCF] `MachineScale.ScaleX/Y = 400 /cm`; GMC converts with it [GMC]. Matches the captures. |
+| **Z (blade angle) scale** | **3000 steps per revolution**, 8.333 steps/° | `#ZZ,3000` = `ScaleZ × 360` [GCF `ScaleZ = 8.3333`; GMC]. Z is rotary (`#C13,1`). |
+| **Z wrap** | GMC keeps Z in 0..2999: a window's edges go 774 → 1524 → 2274 → **24** | [CAP g_regular_mount]. The controller turns the shorter way. |
+| **Step rate limit** | 40 kHz per axis (1000 mm/s on XY); higher speeds are clamped | [SPEC1 p.17] |
+| **Feed law** | **`#G20 = 360 × Speed%`** steps/s = **9 × Speed% mm/s**; 100 % = 900 mm/s | [GMC]: `AbsMaxSpeed × Speed% / 100` with `AbsMaxSpeed = 36000` [GCF], `#C11,0`. Matches the speed sweep exactly [CAP g_multi_Cx_*]. GMC's speed reduction factor is 1 on the 601. |
+| **Rapid (travel)** | `#G20,36000` = 900 mm/s (`PosSpeed = 100 %`) | [GCF] `PosSpeed`; [GMC] |
+| **Ramp law** | §3.1 | |
 | **Bevel blade inclination** | **42°** | [GCF] `Heads[Bevelled].Inclination` |
-| **Curve chord tolerance** | ≈ 0.5 mm (≈ 24 steps per segment) | [CAP g_oval_mount] segment spacing |
-| **BreakAngle** | 15° | [GCF] |
+| **Curve segment length** | One spacing per curve, picked by the curve's smallest radius from the `Distances` table: radius < 5 cm → 20/cm (0.5 mm); < 10 cm → 10/cm (1 mm); < 40 cm → 5/cm (2 mm); < 200 cm → 1/cm (10 mm). This is a chord **length**, not a deviation tolerance. On a constant radius the chords stray 0.001–0.006 mm in most bands (up to 0.03 mm for 10 mm chords just over 40 cm radius), and use 1–6× the points a 0.02 mm tolerance needs; more where the radius varies. The oval: 1,107 vectors over 928 mm, 0.28–1.27 mm apart (median 0.77); within 0.02 mm the same shape needs 316 (§5). See the note below. | [GCF] `Distances`; [GMC]; [CAP g_oval_mount] |
+| **BreakAngle** | 15°. Over USB, GMC ends a smooth run of curve points at any joint sharper than this. It is not the controller's braking angle, which GMC sets to 90° (`#B20,90`) | [GCF]; [GMC] |
+
+**How GMC flattens curves.** For each curve, GMC samples about three points per cm,
+estimates the radius at each sample, and keeps the smallest [GMC].
+That radius picks a divisions-per-cm value from `Distances`, and the whole curve uses it, so its
+tightest point sets the spacing everywhere. Only a curve gentler than every band (radius
+≥ 200 cm) falls back to a radius from crossing the normals at the two ends, or to 10/cm.
+The number of points is the arc length (cm) × divisions, doubled once if the end tangents
+differ by more than 5° per point (not on Novex) [GMC]. Over USB, GMC groups curves into smooth
+runs that end at any joint sharper than the break angle,
+and lowers the divisions until each run fits in `PolyBufferCount` (3000 [GCF]) points. Nothing
+in GMC limits the byte rate, which is why it hesitates mid-curve (§5). The driver's compiler
+flattens to a chord tolerance instead (PROGRAM_FORMAT §4.2).
 
 ### 3.1 Ramp law (`#R`), confirmed
 
+`#R` is the time to reach `#M` (36000 steps/s = 900 mm/s) from rest [SPEC1 p.8, p.19], so GMC
+divides that speed by the tool's acceleration in mm/s²:
+
 ```
-v_ref   = (AbsMaxSpeed / ScaleY) × 10        = (36000 / 400) × 10 = 900
+v_ref   = (AbsMaxSpeed / ScaleY) × 10        = (36000 / 400) × 10 = 900   mm/s
 #R (ms) = min(700, v_ref / (accel / 1000))   = min(700, 900000 / accel)
 ```
 [GMC]
 
-| `.gcf` acceleration | Value | `#R` | Used for |
-|---------------------|-------|------|----------|
-| `_PosRampe` | 4000 | **225** | positioning moves |
+| `.gcf` acceleration | Value (mm/s²) | `#R` | Used for |
+|---------------------|---------------|------|----------|
+| `_PosRampe` | 4000 | **225** | travel |
 | `_RampeCut` | 3600 | **250** | cutting (most tools) |
-| `_FastZRampe` | 8000 | **112** | short moves with a large blade rotation [GMC] |
+| `_FastZRampe` | 8000 | **112** | short travel with a large blade rotation [GMC] |
 | `_RampeCut` | 420 | **700** (clamped) | tools with a slow ramp |
-| (dynamic) | — | 470 | thickness-dependent ramp between `DynamicMatSetting.MatLow/High` [GMC] |
+| (dynamic) | — | 470 | thickness-dependent, between `DynamicMatSetting.MatLow/High` [GMC] |
 
-These values account for every `#R` value in the captures. **`#R` is not a blade angle**; the blade
-angle travels in the Z field of each `L20` vector.
+These account for every `#R` in the captures except `#R300` at connect and `#R,100` before
+homing [CAP g_init]. **`#R` is not a blade angle**; the blade angle travels in each vector's Z.
 
 ---
 
 ## 4. Cut-sequence state machine
 
-The order is **identical across all profiles** [CAP g_multi_*]. Annotations follow [GMC].
+The order is **the same for every profile** [CAP g_multi_*]. Annotations follow [GMC]. Each window edge is a cut of its own:
+the head goes up at every corner, the blade turns, the head goes down again. GMC sends every
+`@M` twice (§5).
 
 ```
-1. INIT
-   @V → (licence, mode 9: skip) → @M0 → config push (#C…, #I/&I…) → homing (§4.1)
-2. JOB SETUP (mode 0)
-   $A42                    clamp (mode 1)
-   #C20 #C21 #C24–#C28     radius-slowdown parameters for the active tool
-   #S<StartStop>           start/stop speed
-   #B20,90                 braking angle for speed entry 20
-3. FOR EACH FEATURE (interiors first, boundary last):
-     -- positioning (blade up) --
-     @M0, #C1,0            no dead time
-     #R225                 positioning ramp (_PosRampe)
-     #G20,36000            positioning speed (100 %)
-     @M2, L20,X,Y,Z        move to the start point; Z = blade angle
-     poll @X until 0x      (§5)
+1. CONNECT and HOME (§4.1)
+2. JOB SETUP
+   @M1  $A42                    clamp
+   @M0  #C20 #C21 #C24…#C28     radius slowdown for the tool
+        #S<StartStop>  #B20,90
+3. FOR EACH CUT (interiors first, boundary last):
+     -- travel, head up --
+     @M0  #C1,0                 no dead time
+          #R225 or #R112        #R112 when the blade turns a long way
+          #G20,36000            travel at 100 %
+     @M2  L20,X,Y,Z             absolute; Z = blade angle for the coming cut
+     poll @X until "@X0"        (§5)
      -- head down --
-     $A45 / $A4A           bevel / straight head down (+ clamp bit)
+     @M0  #R250                 cutting ramp
+     @M1  $A45 (bevel) or $A4A (straight)
      -- cut --
-     @M0, #C1,100|200      dead time: 100 ms for a straight edge, 200 ms for a curve
-     #R<cut ramp>          e.g. 250
-     #G20,<360×Speed%>     cutting speed
-     @M2, L20,… [, L20,…]  one vector (edge) or the whole curve streamed in one go (§5)
-     poll @X until 0x
+     @M0  #C1,100 or #C1,200    dead time: 100 ms straight edge, 200 ms curve
+          #G20,<360 × Speed%>
+     @M2  L20,…                 one vector per straight edge; a curve as all its vectors in one write
+     poll @X until "@X0"
      -- head up --
-     $A42
-4. TEARDOWN
-   $A42                    head up, clamp held
-   #C1,0, #R225, #G20,36000
-   L20,X58860,Y7923,Z0     park; blade angle back to 0
-   $A02                    release everything (neutral)
-   @I221 …                 idle: poll the start button
+     @M1  $A40 (bevel) or $A42 (straight)
+4. END OF JOB
+   $A42                         head up, clamps held
+   @M0 #C1,0 #R225 #G20,36000  @M2 L20,X58860,Y7923,Z0     park; blade back to 0
+   @M1  $A02                    release
+   idle: poll @I221 (start button)
 ```
 
-**Safe state / abort:** `@B` (brake, positions kept) → `$A02`/head up → park. Use `@S` only in an
-emergency, because it loses the position and the machine must be homed again [SPEC p.13].
+**Abort:** `@B` (brake, positions kept) → head up (`$A02`) → park. `@S` only in an emergency: it
+loses the position and the machine must home again [SPEC1 p.14].
 
-**Feature-ordering rule (verified from captures):** all interior windows are cut, each as a
-complete closed loop, **before** the outer boundary. The boundary is what releases the piece, so it
-must be last [CAP g_multi_*].
+**Feature order (from the captures):** every interior window is cut, each as a complete closed
+loop, **before** the outer boundary. The boundary frees the piece, so it must come last
+[CAP g_multi_*].
 
-### 4.1 Homing sequence (from the `g_init` timeline, 66 s total)
+### 4.1 Connect and homing (the `g_init` timeline, 66 s)
 
 | Time | Phase |
 |------|-------|
-| t+0–7 s | `@V`, licence (mode 9), `&C97` clock read, `@V7`/`@V8` |
-| t+8–9 s | Mode-0 config: `$CX/$CY/$CZ` (**zero the counters**), `#C…`, `#ZZ,3000`/`#NZ,10000` (Z resolution), `#M36000`, `#S4000` |
-| t+~9 s | **Z home:** `#G10,1750` (`ZInitSpeed` [GCF]), `#OZ,0`, `@M1`, `$Hz` → `\r`, `@X18`, then bytes `0x01 0x01 0x04` (homing finished) [CAP g_init; GMC] |
-| t+10 s | **XY home:** `#G10,3000`, `@@`, `#R,100`, `#OX,300`, `#OY,300` (offsets moved after homing), `@M1`, **`$Hxy`** |
-| t+10–49 s | Physical homing. `@X` returns `@X18` (moving + homing in progress, home not yet known) for about 38 s |
+| t+0–8 s | `@V`, licence read (mode 9, twice), `&C97` clock, `@V7`, `@V8` |
+| t+8 s | `#C35,1`, `#C37,1`, `#C52,800` (→ `*021`); home-switch check (`@I235`, `@I236`, `&I240`); **zero the counters** `$CX $CY $CZ`; `$L10,X3`, `$L10,Y2` (each answered by `0x01`); `$A02`, `$A62` (clamps) |
+| t+9 s | Mode-0 configuration: `#C12,1 #C13,1 #C20,400 #C21,5000 #C31…34 #C16,4 #C11,0 #ZZ,3000 #NZ,10000 #G20,36000 #R300 #M36000 #C5,1 #C14,13 #C1,50 #C2,0`, then the radius parameters and `#S4000` |
+| t+9 s | **Z home:** `@@`, `#G10,1750` (`ZInitSpeed` [GCF]), `#OZ,0`, `@M1`, `$Hz` → CR, `@X18`, then `0x01 0x01 0x04`; `@X04` a second later [GMC] |
+| t+10 s | **XY home:** `#G10,3000`, `@@`, `#G10,1750`, `#G11,750`, `#R,100`, `#OX,300`, `#OY,300` (offsets moved after homing), `@M1`, **`$Hxy`** |
+| t+10–49 s | Homing. `@X18` (moving, homing, home not yet known) about 4 times a second for 39 s; `0x01` at t+44 and t+49, `0x04` at t+49 |
 | t+49 s | `@X04`: stopped and homed |
-| t+49–54 s | Post-home positioning (`$L10,X3`, `L20` + `#R`) |
-| t+57 s → | Idle (`@I221` polling) |
+| t+50–54 s | `@LX @LY @LZ`; travel in mode 2 (`L20,X0,Y40600,Z749` and back); park `L20,X58860,Y7923,Z0`; `$A02` |
+| t+57 s → | Idle: `@I221` polling |
 
-**Driver:** `$H<axes>` → wait for the `0x04` byte **or** poll `@X` until the first digit is `0` and flag 4 is set → read `@LX`/`@LY` to confirm.
-Homing uses the reference switches I235–I237 [SPEC p.10; SYS], which are real inputs even though no switch has been spotted on the machine yet.
+**Driver:** `$H<axes>` → wait for `0x04` **or** poll `@X` until the first digit is `0` with flag
+4 set → read `@LX`/`@LY`. Homing uses the home switches I235–I237 [SPEC1 p.11; SYS], which are
+real inputs even though no switch has been spotted on the machine yet.
 
----
+### 4.2 Head selection and the side-by-side X offset
 
-## 4.2 Head selection and the side-by-side X offset
+The two heads (bevel and straight) sit side by side on the carriage and are selected with the
+output bitmask (§2.5): `45` bevel down, `4A` straight down.
 
-Two heads (bevel + straight) sit side by side on the carriage and are selected with the output
-bitmask (§2.5): `05`/`45` bevel down, `0A`/`4A` straight down.
-
-**Fixed X offset between heads:** [GCF] `Heads[*].ToolHeadCorrection.StartPX/StartPY` (cm):
+**Fixed X offset between the heads:** [GCF] `Heads[*].ToolHeadCorrection.StartPX/StartPY` (cm):
 
 | Head | `StartPX` | `StartPY` |
 |------|-----------|-----------|
 | Bevelled | **−7.15 cm** | 0.19 cm |
 | Straight | **+0.62 cm** | 0.17 cm |
 
-→ **X head spacing = 7.77 cm ≈ 77.7 mm**, with Y ≈ shared. GMC subtracts `StartPX/StartPY/StartPZ`
-from every target before converting to steps [GMC].
-Cross-check: bevel window X-centre 7699 − straight border X-centre 4642 = 3057 steps = **76.4 mm** [CAP g_regular_mount]. Confirmed within overcut noise.
+→ **X head spacing = 7.77 cm ≈ 77.7 mm**, Y about the same for both. GMC subtracts
+`StartPX/StartPY/StartPZ` from every target before converting to steps [GMC]. Cross-check: bevel window X-centre 7699 − straight border X-centre 4642 = 3057 steps =
+**76.4 mm** [CAP g_regular_mount], which agrees within the overcut.
 
 ---
 
 ## 5. Pacing: the `@X` loop and buffering
 
 The controller is **not** a one-segment executor. Mode 2 has an input buffer with look-ahead
-speed control [SPEC p.6, p.8, p.31]. GMC (serial path) uses it in two ways
-[GMC]:
+speed control [SPEC1 p.6–8, p.32]. GMC's serial path uses it in two ways [GMC]:
 
-| Path | What GMC sends | Captured |
+| Move | What GMC sends | Captured |
 |------|----------------|----------|
-| straight edge / positioning | one `L20,…`, then polls `@X` | [CAP g_regular_mount] |
-| curve (oval) | **all vectors back-to-back, then one `@X` poll loop**. The oval was 1,107 `L20` lines in a single write with no polls in between | [CAP g_oval_mount] |
+| straight edge, travel | one `L20,…`, then polls `@X` | [CAP g_regular_mount] |
+| curve (the oval) | **all its vectors in one write**, then one poll loop: 1,107 `L20` lines, 24,253 bytes, no polls in between | [CAP g_oval_mount] |
 
-**`@X` sequence after a vector** [CAP g_regular_mount]:
-`@X15` (moving, homed, **waiting out the `#C1` dead time**) → `@X14` (moving) → `@X04` (stopped).
+**`@X` after a vector** [CAP g_regular_mount]: `@X15` (moving, homed, **waiting out the `#C1`
+dead time**) → `@X14` (moving) → `@X04` (stopped).
 
 ```
-send L20,…            (one, or a whole contour)
+send L20,…            (one vector, or a whole contour)
+sleep 50 ms
 loop:
-    send "@X\r"; read reply
-    if reply[2] == '0': break          # stopped → next step (GMC tests "@X0")
-    if flag & 2: error → read @E, handle
-    # 15/14/18 = still running
+    send "@X⏎"; sleep 10 ms (50 ms after a multi-vector write); read
+    if the reply contains "@X0": done            # stopped (GMC tests "@X0")
+    if it contains 0x07: the start button was released: stop the job
 ```
-[GMC]
+[GMC]. GMC gives up after 30,000 polls and
+declares the link lost after 100 empty reads. Measured: up to **62 `@X` per second**
+[CAP g_regular_mount].
 
-**Flow control:** GMC never enables `#C7` and relies on contours fitting in the buffer. A new
-driver streaming long contours should **send `#C7,1` and honour `0x03`/`0x02`**, or check `@H` (fill %)
-before sending more [SPEC p.5, p.7, p.15, p.22]. The buffer size is unknown *(unverified)*.
-At 115200 baud a 1,107-vector oval (~24 KB) takes about 2 s to transmit [CAP g_oval_mount].
+**GMC's command round trip.** For every mode-0 or mode-1 command GMC sends, sleeps 5 ms, then
+reads in a loop with 10 ms sleeps until a CR arrives (giving up after 200 empty reads)
+[GMC]. Each command therefore costs at least
+about 15 ms, however fast the controller answers. On the serial path GMC sends every `@M`
+twice [GMC]. That is why every `@M` in the captures is doubled.
 
-**Host watchdog:** `#C19,<ms>` makes the controller stop if the host goes quiet. That gives
-"connection lost → machine stops" safety for free [SPEC p.25].
+**Where GMC's pauses come from.** Two causes, both visible in the captures.
 
----
+1. **Between cuts, choreography.** Besides the polls, each window edge costs **24 commands**,
+   14 of them `@M` (7 mode changes, each sent twice), and two poll loops
+   [CAP g_regular_mount]. All of it happens with the carriage stopped: GMC waits for `@X0`
+   before it sends anything. At 15 ms or more per command, that is 0.3–0.5 s of standing still
+   per cut, on top of the dead time and the head's settle time.
+2. **On curves, the line cannot keep up.** At 855 mm/s (95 %) the controller consumes path data
+   faster than 115200 baud delivers it [CAP g_oval_mount: 928 mm of path]:
 
-## 5.1 What the spec recommends, and what the driver does
+   | Encoding of the oval | Vectors | Bytes | Bytes/s needed | Share of the line |
+   |----------------------|---------|-------|----------------|-------------------|
+   | GMC: `L20,X,Y,Z` for every vector | 1,107 | 24,250 | 22,341 | **194 %**: it starves |
+   | Same points, compact relative (§2.4) | 1,107 | 12,647 | 11,651 | 101 %: borderline |
+   | Within 0.02 mm of GMC's points, compact | 316 | 4,175 | 3,846 | **33 %** |
+   | Within 0.05 mm of GMC's points, compact | 174 | 2,457 | 2,264 | 20 % |
+
+   When the buffer stays under 10 %, `#C14` bit 8 slows the carriage, and when it runs empty the
+   controller brakes to a stop (§2.4.1). That is GMC's hesitation on contours. It is also why
+   GMC never overflowed the buffer without flow control: on its curves the controller drains the
+   buffer faster than the line fills it. At a low feed the reverse holds, and a long curve could
+   overflow a buffer of unknown size.
+
+**What the driver does instead** (the machine layer's design: `crates/machine/src/lib.rs`):
+- A cut is **one mode-2 stream**: travel with `C1` (no dead time), `A` head down, `W` settle,
+  the path, `A` head up. No mode switches, no polls in between.
+- Curves are flattened to a **chord tolerance**, not a fixed spacing (PROGRAM_FORMAT §4.2), and
+  sent in the **compact** form, so the bytes per second stay well inside the line (the table
+  above).
+- Travel and cutting use **two speed entries** set once per job (20 and 21), so a stream needs
+  no `G`.
+- The next cut is streamed **just in time**, when `@N` shows the current one under way, so the
+  machine stops only where it physically must.
+- A faulted cut is never retried; `*022` fails the cut.
+
+**Flow control.** GMC never enables `#C7` and relies on its contours fitting. The driver sends
+`#C7,1` and honours `0x03`/`0x02`: while held, it stops sending path data but still sends master
+commands. `@H` pacing is a fallback (`Config::stream_window_bytes`, off by default until stage 6
+measures the buffer). The buffer's size is unknown *(unverified)*. A USB-serial adapter holds
+some bytes of its own, which still go out after `0x03`; stage 6 checks that nothing overruns at
+full speed.
+
+**Host watchdog.** `#C19,<ms>` makes the controller stop if the host goes quiet while axes move
+[SPEC1 p.26]: "connection lost → machine stops" for free. The driver keeps it fed with `@H`
+while a stream is held.
+
+**The simulator runs at the line's speed.** `sim::spawn` uses a link paced at 11,520 bytes/s
+(`LINE_BYTES_PER_SEC`), so starvation and flow control behave as on the machine. The test
+`on_a_real_line_0x03_alone_keeps_the_buffer_from_overflowing` shows `0x03` suffices when the link
+adds no buffering of its own.
+
+### 5.1 What the spec recommends, and what the driver does
 
 Every piece of advice in SPEC1 ("sollte", "muß", "Empfehlung", …) and where the driver stands.
-"Machine layer" means policy that belongs above the controller (not written yet).
+"Machine layer" means policy above the controller crate: designed in `crates/machine`, not yet
+written.
 
 | SPEC1 says | Page | Driver |
 |------------|------|--------|
-| Use a FIFO UART on the PC for high baud rates | 5 | USB-serial adapters buffer; nothing to do |
-| Text protocol uses the `0x02`/`0x03` handshake, not RTS/CTS (that is for a future binary protocol) | 5 | Follows: no hardware flow control; `0x03`/`0x02` honoured when `#C7,1` |
-| Master commands are always processed, even when the stream is held | 5, 12 | Relied on: `@H`, `@X`, `@B` sent during a hold |
-| Mode 0/1: one command, wait for its `\r` before the next | 6, 32 | Follows: one outstanding command, every wait has a deadline |
-| Mode 2: always send several commands ahead, or the look-ahead cannot work | 6–7, 22 | Controller streams without waiting; machine layer must stream whole contours, not vector-then-poll as GMC does |
-| `#C1` dead time exists so several vectors arrive before motion starts; `C1` skips it "for single moves with no path after them" | 22, 35 | Controller offers `flags(no_dead_time)`; machine layer should use `C1` for positioning moves instead of GMC's `@M0 #C1,0 @M2` round trip |
-| Buffer under 10 % for long → jerky motion; `#C14` bit 8 slows down to compensate (on in the 601's config, `#C14=13`) | 8, 25 | Keep the buffer fed: stream ahead; `@H` pacing bounds it from above |
-| Use `@H` to decide whether to send more vectors or wait | 16 | Supported (`Config::stream_window_bytes`), **off by default** until checked on hardware |
-| `#C19`: the host must send a character within the time while axes move | 26 | **Fixed:** the session sends `@H` while the stream is held (test `flow_pause_keeps_the_host_watchdog_fed`). Choose `#C19` ≥ 4 × `poll_interval` |
-| `#C8` `0x05` can be used as a liveness signal; it only comes in send pauses | 23 | Decoded and published as an event; no host-side "controller silent" alarm yet (machine layer) |
-| `@B`: wait for the end of motion (status or `0x01`) before reading the position | 14 | Caller must `wait_idle` after `brake()`; machine layer should do this always |
-| `@S` / `$S` / `!S` only in an emergency (positions are lost, re-home) | 14, 32, 38 | `StopHandle::emergency_stop` exists for the e-stop path only; normal stop = `@B` |
-| In mode 2 the run flag is set from the first path data, even while waiting; use the wait flag | 13 | Follows: `@X15` read as running + waiting; `wait_idle` uses the run digit |
-| `#C4,2` (no screen output) if no monitor is attached: display costs controller time | 22–23 | Not sent. The 601's box has no monitor. Candidate for the session setup (machine layer); check the current value with `&C4` first |
-| `#C23` pulse stretch as low as possible | 26 | Controller config, not touched (never send `#W`) |
-| Baud change needs a reset (`@R`) | 15, 26 | Never done (`#C18`, `@R` not sent) |
+| Use a FIFO UART on the PC for high baud rates | 5 | USB-serial adapters buffer. That delays `0x03`'s effect; stage 6 checks for overruns at full speed |
+| The text protocol uses the `0x02`/`0x03` handshake, not RTS/CTS (that is for a future binary protocol) | 5 | Follows: no hardware flow control; `0x03`/`0x02` honoured with `#C7,1` |
+| Master commands are always processed, even when the stream is held | 5, 12 | Relied on: `@H`, `@X`, `@B` are sent during a hold |
+| Modes 0 and 1: one command, wait for its CR before the next | 6, 32 | Follows: one outstanding command; every wait has a deadline. After a timeout the session resyncs with a unique `@I100`–`@I119` probe before the next command |
+| Mode 2: always send several commands ahead, or the look-ahead cannot work | 6–7 | `stream()` writes without waiting. The machine layer streams a whole cut, not vector-then-poll as GMC does |
+| `#C1` dead time lets several vectors arrive before motion starts; `C1` skips it "for single moves with no path after them" | 22, 35 | `StreamFlags { no_dead_time }`. The machine layer uses it for travel instead of GMC's `@M0 #C1,0 @M2` |
+| Buffer under 10 % for long → jerky motion; `#C14` bit 8 slows down to compensate (on in the 601's config) | 8, 25 | `Command::path` sends compact vectors; the machine layer flattens to a chord tolerance. GMC's fastest curve then needs about a third of the line (§5) |
+| Use `@H` to decide whether to send more vectors or wait | 16 | `Config::stream_window_bytes`, **off by default** until stage 6 measures the buffer |
+| `#C19`: the host must send a character within the time while axes move | 26 | The session sends `@H` while a stream is held (test `flow_pause_keeps_the_host_watchdog_fed`). Choose `#C19` ≥ 4 × `poll_interval` |
+| `#C8`: `0x05` can serve as a sign of life; it only comes in send pauses | 23 | Decoded and published as `Event::Signal`. No "controller silent" alarm yet (machine layer) |
+| `@B`: wait for the end of motion (status or `0x01`) before reading the position | 14 | `brake()` then `wait_idle()`. A stop through `StopHandle` latches until `clear_stop()` |
+| `@S`, `$S`, `!S` only in an emergency (positions lost, re-home) | 14, 32, 38 | `StopHandle::emergency_stop` is for the e-stop path only; the normal stop is `@B` |
+| In mode 2 the run flag is set from the first path data, even while waiting; use the wait flag | 13 | Follows: `@X15` is read as running and waiting; `wait_idle` uses the run digit |
+| `#C4,2` (no screen output) when no monitor is attached: the display costs controller time | 22–23 | Not sent; the probe reads `&C4`. If the 601 boots with output on, the session setup should send `#C4,2` |
+| `#C23` pulse stretch as low as possible | 26 | Not touched (and never saved: no `#W`) |
+| A baud change needs a restart (`@R`) | 15, 26 | Never done: `#C18` and `@R` are never sent |
 | Mode 9 is for external programs only | 38 | Never entered |
+
+---
 
 ## 6. Feed rate (solved)
 
 **`#G20,<v>` sets the speed of table entry 20**, which every `L20` vector uses. GMC computes it as
-`AbsMaxSpeed × Speed% / 100` [GMC] = **`360 × Speed%`**:
+`AbsMaxSpeed × Speed% / 100` [GMC] = **`360 × Speed%`** steps/s
+= 9 × Speed% mm/s:
 
-| Speed % | `#G20` | verified |
-|---------|--------|----------|
-| 20 / 40 / 60 / 80 / 100 | 7200 / 14400 / 21600 / 28800 / 36000 | ✓ sweep |
-| 95 (C10) / 35 (C11) / 10 (C12) | 34200 / 12600 / 3600 | ✓ profile captures |
+| Speed % | `#G20` | mm/s | Verified |
+|---------|--------|------|----------|
+| 20 / 40 / 60 / 80 / 100 | 7200 / 14400 / 21600 / 28800 / 36000 | 180 / 360 / 540 / 720 / 900 | ✓ sweep |
+| 95 (C10) / 35 (C11) / 10 (C12) | 34200 / 12600 / 3600 | 855 / 315 / 90 | ✓ profile captures |
 
-`Speed%` comes straight from the `.gcf` profile. `#S` is the **start/stop speed**, not the feed [SPEC p.18].
-`#G10` is a different table entry, used for homing speed. There is **no depth axis**: blade
-protrusion is set by hand on the holder.
+`Speed%` comes straight from the `.gcf` profile. `#S` is the **start/stop speed**, not the feed
+[SPEC1 p.19]. `#G10` and `#G11` are other table entries, used for homing. There is **no depth
+axis**: the blade's protrusion is set by hand on the holder.
 
 ---
 
 ## 7. Overcut / thickness compensation (in the toolpath)
 
-*(Capture- and `.gcf`-derived, unchanged.)*
+*(From the captures and the `.gcf`.)*
 
-Thickness compensation shows up as **toolpath extension (overcut)** in X/Y, not as any `#` parameter.
-A bevel blade at 42° has its bottom edge lagging its top edge, so thicker board needs the cut to run
-further past each corner.
+Thickness compensation shows up as **toolpath extension (overcut)** in X/Y, not as any `#`
+parameter. A bevel blade at 42° has its bottom edge lagging its top edge, so thicker board needs
+the cut to run further past each corner.
 
 | Profile | Thickness | Y start → end | Cut length (steps) |
 |---------|-----------|---------------|--------------------|
@@ -442,23 +696,25 @@ further past each corner.
 | C11 | 2.7 mm | 10824 → 2568 | 8256 |
 | C12 | 4.1 mm | 10900 → 2492 | 8408 |
 
-The cut grows symmetrically at both ends. The blade angle Z also shifts slightly (774 → 783). This
-matches `Heads[Bevelled].MatThicknessDependent = true` [GCF].
+The cut grows by the same amount at both ends. The blade angle Z also shifts slightly
+(774 → 783). This matches `Heads[Bevelled].MatThicknessDependent = true` [GCF].
 
-**Model:** `overcut ≈ thickness × tan(42°)` (geometric baseline) **+** per-head sub-mm trims [GCF]:
+**Model:** `overcut ≈ thickness × tan(42°)` (geometric baseline) **+** per-head sub-millimetre
+trims [GCF]:
 
 | Head | FrontOvercut (Begin/End) mm | BackOvercut (Begin/End) mm | trash_overcut | NC |
 |------|------------------------------|-----------------------------|---------------|-----|
 | Bevelled | −0.18 / 0.082 | −0.12 / 0.22 | 0.2 | −0.02 |
 | Straight | −0.05 / 0.23 | 0 / 0 | 0 | −0.05 |
 
-⚠️ Open: exactly how Begin/End × Front/Back map onto each cut. Test cuts, one trim at a time, would settle it.
+⚠️ Open: how Begin/End × Front/Back map onto each cut. Test cuts, one trim at a time, would
+settle it.
 
 ---
 
 ## 8. Per-profile calibration table
 
-*(From [GCF], unchanged.)* Wire values are derived: feed §6, ramp §3.1, overcut §7.
+*(From [GCF].)* Wire values are derived: feed §6, ramp §3.1, overcut §7.
 
 | Profile | Label | Thickness* | Speed% | ZCorr_Str | ZCorr_Rnd | HeadUpDown | OCAddon |
 |---------|-------|-----------|--------|-----------|-----------|------------|---------|
@@ -479,84 +735,149 @@ matches `Heads[Bevelled].MatThicknessDependent = true` [GCF].
 | C15 | Crescent_Rag | 0.15 | 70 | 3 | 0 | 200 | 0 |
 | C16 | 4.6 | 0.50 | 8 | 4 | 0 | 500 | 0.05 |
 
-*Thickness in cm (0.15 → 1.5 mm). **Bold** = captured and verified. `HeadUpDown` = head settle delay in ms
-(GMC sleeps `HDSleep`/`HUSleep` after switching the head outputs [GMC]).
+*Thickness in cm (0.15 → 1.5 mm). **Bold** = captured and verified. `HeadUpDown` = head settle
+time in ms: GMC sleeps `HDSleep`/`HUSleep` after switching the head outputs [GMC].
 
-**Tool priority:** Straight=1, Bevel=2, V-Groove=3, Score/Deboss=4, Pens=5 [GCF `Heads[*].Priority`].
+**Tool priority:** Straight = 1, Bevel = 2, V-Groove = 3, Score/Deboss = 4, Pens = 5
+[GCF `Heads[*].Priority`].
 
 ---
 
 ## 9. Licensing
 
-See §2.7. Do not reproduce. It isn't needed to move the machine.
+See §2.7. Do not reproduce it; the machine moves without it.
 
 ---
 
 ## 10. Open items
 
-| Item | Status | How to close |
-|------|--------|--------------|
-| ~~Head-spacing X offset~~ | **Resolved: 77.7 mm** [GCF] | — |
-| ~~`@X` codes~~ | **Resolved:** `r` + flags (1 wait, 2 error, 4 homed, 8 homing) [SPEC p.12 + CAP] | Capture an error state to see flag 2 |
-| ~~`#R` meaning~~ | **Resolved: ramp ms** (§3.1) | — |
-| ~~`#C1` meaning~~ | **Resolved: mode-2 dead time** | — |
-| ~~`$CX/$CY/$CZ`, `#ZZ/#NZ`, `#OX/#OY`, `#C20–28`~~ | **Resolved** (§2.3) | — |
-| **Abort mid-cut** | Spec gives `@B` (ramped) / `@S` (immediate) [SPEC p.13]; GMC's own stop path not captured | Capture a GMC stop mid-cut |
-| **Fault responses** | `*NNN` table known [SPEC p.37–38]; not yet seen live | Provoke a safe fault (e.g. `$L` into a limit at low speed) |
-| Clamp side naming (`20` vs `40`) | Conflict between capture labels and `.gcf` names | Physical check |
-| ~~`#C35`~~ | **Resolved:** signal-input acks `0x06–0x09` [SPEC1 p.28] | — |
-| `@@`, `@V7/@V8`, `#C37/#C52`, `*069` | Not in either spec | Not needed to drive the machine |
-| Buffer size / flow control | `#C7` never enabled by GMC | Test `#C7,1` + `@H` on hardware |
-| **v1.00 features on 2.00 firmware** | Built to SPEC1 without fallbacks; modelled in the simulator only: in-stream `A`/`W`/`I`/`C`, `@N` progress, `@Q242–249` readback, `@Y` limit bits, `#C6`/`#C8`/`#C35`, `@O` with `C8`/`C16` | First hardware session: run each once (checklist), compare with the sim |
-| `@N`: does `C` count? | Sim assumes not | Stream `C1` + `L`, read `@N` |
-| Outputs on mode switch | SPEC says reset; captures show they persist | Sim follows captures; confirm with `@Q242` across `@M` |
-| `@LX`/`@LY`: commanded vs actual position | Open-loop steppers → commanded | — |
-| ~~Baud / parity / stop bits~~ | **Resolved: 115200 8-N-1** [SPEC p.6; GMC; CAP g_oval_mount timing] | Confirm on first connect: if `@V` gets no reply at 115200, try 9600 |
+**Settled:** head spacing (77.7 mm, §4.2) · `@X` codes (§2.1) · `#R` = ramp time (§3.1) · `#C1`
+= dead time · `$C`, `#Z`/`#N`, `#O`, `#C20`–`#C28` (§2.3) · `#C35` (§1) · baud 115200 8-N-1 (§1) ·
+GMC's curve flattening (§3) · GMC's pauses (§5).
+
+**Open**, with what answers each. The probe is read-only; check stages 3–7 move the machine (see
+`docs/hardware-testing.md`).
+
+| Question | Assumed until then | Answered by |
+|----------|--------------------|-------------|
+| Does the 601 accept mode switches without GMC's licence exchange (`@M1` → CR, or `*007`)? | yes | probe |
+| Does it answer the resync probes `@I100`–`@I119`? | yes, `@I1xx,0` | probe |
+| Does it boot with GMC's connect configuration, or must the driver write it (`C2`, `C5`, `C11`–`C14`, `C16`, `C35`, `#ZZ`, `#NZ`, `#M`)? | must write | probe ("box vs GMC at connect") |
+| Boot values of the registers GMC never writes: `C4`, `C6`, `C7`, `C8`, `C19`, `&D` homing directions | — | probe |
+| Do the v1.00 queries exist on firmware 2.00 (`@N`, `@O`, `@Y`, `@Q242`–`@Q249`)? | yes | probe |
+| Which clamp each of bits `20` and `40` closes | `.gcf` names | stage 3 (operator answers) |
+| Do outputs survive a mode switch? | yes (captures) | stage 3 (`@Q249` across `@M`) |
+| Does `@B` in mode 2 discard the rest of the path, or resume it? | discard | stages 4 and 6 |
+| Compact follow-on vectors on 2.00; after `G`, `A`, `W`? | accepted | stage 5 |
+| Does a second speed entry give its own feed? | yes | stage 5 |
+| In-stream `G`: in sequence or on receipt? | on receipt (sim) | stage 5 |
+| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` does not count | stage 5 |
+| Which of `0x02`/`0x03` means "full"? | `0x03` (byte table) | stage 6 |
+| Buffer size | unknown (simulator placeholder) | stage 6 (`@H` while streaming) |
+| Does `0x03` come in time through a USB adapter (no overrun at full speed)? | yes | stage 6 |
+| After `@B` on a held stream: is the queue gone, and does `0x02` follow? | yes | stage 6 |
+| What `*022` means | buffer overrun | stage 6 |
+| `#C19` with a held stream | fed by `@H` | stage 6 |
+| `@S` loses the position | yes (spec) | stage 7 |
+| Limit fault: async `*03x`, `@Y` bit, recovery | spec | stage 7 (only if a limit input is mapped) |
+| Fault attribution in modes 0 and 1 (§2.6): treat `*032`–`*039`, `*040`, `*068` always as events? What do `*056` and `*062` answer? | `*NNN` answers a non-query | stage 7 and real jobs |
+| No `0x01` after mode-2 paths? | none (captures) | any session log |
+| Overcut mapping (§7) | — | test cuts, one trim at a time |
+| Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
+| `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |
 
 ---
 
-## 11. Driver implementation notes
+## 11. Driver architecture
 
-- **Language:** compiled, tight timing (Go recommended; goroutine + channel fits the read loop / feed loop / API split).
-- **Architecture:** a standalone driver process with a local HTTP+WebSocket API, single-lease control, bound to localhost.
-- **Reader:** a single reader that splits incoming bytes into `\r`-terminated replies **plus** the out-of-band bytes `0x01–0x09`, which can arrive inside or between replies (e.g. `\r\x01`, `@X18\r\x01\x01\x04`) [CAP g_init, g_motions; SPEC1 p.7].
-- **Faults racing a poll:** a `*033` raised by motion can arrive while an `@X` (or other pure query) is outstanding, *before* its reply. Pure queries are never rejected, so a `*NNN` there is an async fault: record it and keep waiting for the real reply. Treating it as the reply puts every later reply out of step. Found by the simulator; handled in `controller::session` (`Command::is_query`).
-- **Core loop:** mode 0 setup → mode 2 → stream vectors (honour `0x03`/`0x02` or `@H`) → poll `@X` until `0x`. In mode 2, don't wait for a `\r` after each vector, because none is sent.
-- **Safety:** soft limits on every `L20`; `#C19` host watchdog; `@B` for stop; safe state = head up (`$A02`), motion stopped. Never send `@M9`.
-- **Simulator mode:** validate jobs, model timing, emit the intended bytes with no machine attached.
+A Rust workspace in `crates/`, layered so each layer can be tested without the ones above it.
+
+| Crate | Role |
+|-------|------|
+| `protocol` | Pure, no I/O: encodes commands, decodes replies and signal bytes, error texts, typed settings (`Setting`, `OverridePct`, `StreamFlags`, `Command::path`). |
+| `link` | Bytes to the controller: a serial port, an in-memory pair (optionally paced at a line rate), and a tap that logs every byte with a timestamp. Reader and writer are separate halves. |
+| `controller` | A session with the controller. `HostCore` is a pure state machine (bytes in, outputs and deadlines out) that decides what is a reply, tracks sync, mode, flow control and the stop latch. A driver runs it with a reader thread and two locks, writer before state. `Controller<M>` only offers the commands mode `M` accepts; `StopHandle` brakes from any thread. |
+| `sim` | `SimCore` speaks the whole protocol GMC uses; `spawn` runs it behind a link paced at the line rate, with fault injection. Every GMC capture and every session log in `testdata/sessions/` is replayed against it (`crates/sim/tests/fidelity.rs`). |
+| `machine` | The safe layer in mm and degrees: cuts as units, soft limits, head never down while travelling. Design notes written, code to come. |
+| `program`, `runner` | The program format (`PROGRAM_FORMAT.md`) and its execution. `runner` is to come. |
+| `gunnar` | The command line: `ports`, `capture`, `probe`, `check`. |
+
+What the session layer guarantees, and why:
+- **One reader** splits the incoming bytes into CR-terminated replies and the signal bytes
+  `0x01`–`0x09`, which can arrive inside a reply [CAP g_init, g_motions; SPEC1 p.7]. Over 4096
+  bytes without a CR is reported as `Event::Garbled` (a wrong baud rate, for example).
+- **One outstanding command**, matched with its own reply, with a deadline. A `*NNN` that cannot
+  be the answer is an event (§2.6).
+- **Resync.** After a timeout, the next operation first reads an input nothing else uses
+  (`@I100`–`@I119`, a new one each time) and discards everything before its answer. GMC has no
+  such step, so one late reply leaves every later reply paired with the wrong command.
+- **Mode 2 has no acknowledgements**: `stream()` writes without waiting. While flow control
+  holds path data, master commands still go.
+- **Stop lane.** `StopHandle` writes `@B` or `@S` past anything in progress. A stop latches:
+  every operation fails until `clear_stop()`.
+- **Never sent:** `@M9`, `#W`, `@R`, `@D`, `#C18`.
 
 ---
 
 ## 12. CAM pipeline summary
 
 ```
-SVG/DXF in  →  interpret layers (bevel/straight/score per cut-type convention)
-            →  offset for bevel + kerf; compute overcut per §7
+SVG/DXF in  →  layers → tools (bevel / straight / score, by the cut-type convention)
+            →  offset for bevel and kerf; overcut per §7
             →  nest (PackingSolver, rectangle guillotine — validated winner)
-            →  sequence (topo-sort: interiors before boundary; tool-batch by priority)
-            →  flatten curves to ~0.5mm chords; compute per-segment blade tangent (Z)
-            →  emit (#C1, #R, #G20, $A, L20 …) with #G20 = 360 × Speed%, #R per §3.1
-            →  driver streams per §5
+            →  sequence: interiors before the boundary; batch tools by priority
+            →  flatten curves by chord tolerance (0.02 mm, turn ≤ 15°; PROGRAM_FORMAT §4.2);
+               the blade tangent as Z on every vector
+            →  check the byte budget: bytes/s at the feed must stay well inside 11,520 (§5)
+            →  per cut, one mode-2 stream: C1 + travel at entry 21, A head down, W settle,
+               the path at entry 20 (#G20 = 360 × Speed%), A head up; #R per §3.1
+            →  the driver streams with #C7 flow control and sends the next cut when @N shows
+               this one under way
 ```
 
-The machine controls **XY position + blade rotation** only. Depth is set in hardware.
+The machine controls **XY position and blade rotation** only. Depth is set by hand.
 
 ---
 
-## 13. Changelog: corrections from spec/code (2026-11-05)
+## 13. Changelog
+
+### 2026-11-06: rewrite
+
+| Was | Now | Source |
+|-----|-----|--------|
+| Citations to the v0.99 draft's pages | SPEC1 pages throughout; v0.99 only where it differs | SPEC1 |
+| Error codes at "p.37–38"; limits as one block | p.38–40; 032–039 alternate minus/plus per axis; full list grouped into rejections, events and either | SPEC1 p.38–40 |
+| `#C` table without C3, C4, C9, C15, C23, C29, C30, and without when GMC writes each | complete, with "connect / use / never" | SPEC1 p.18–28; CAP g_init |
+| `#C35`/`#C37` "not in spec", sent to every model | `#C35` is in SPEC1 p.28; both are model-gated in GMC; `#C52` is sent to every model | GMC |
+| `0x01` after every move | after mode-1 moves, homing and `@B` only; never after a mode-2 path | CAP all |
+| `$H` replies CR at once | only with `#C6,1`; otherwise the CR comes at the end | SPEC1 p.23 |
+| `#R` = "maximum ramp time" | the time to reach `#M` from rest; GMC's accelerations are in mm/s² | SPEC1 p.8, p.19 |
+| Z scale as 8.333 steps/° only | 3000 steps per revolution; GMC keeps Z in 0..2999 | GMC; CAP g_regular_mount |
+| "Curve chord tolerance ≈ 0.5 mm (≈ 24 steps)" | a chord length chosen by radius band (`Distances`); the oval's vectors are 0.28–1.27 mm apart; the driver flattens to a chord tolerance instead | GCF; GMC; CAP g_oval_mount |
+| Head up = `$A42` | `$A40` after a bevel edge, `$A42` after a straight edge | CAP g_regular_mount |
+| `$L10,X3` after homing | before homing; after homing comes travel in mode 2 and the park | CAP g_init |
+| Doubled `@M` unexplained | GMC sends each `@M` twice on the serial path | GMC |
+| GMC's pauses unexplained | choreography between cuts; line starvation on curves | §5 |
+| Mode-2 follow-on vector noted, not used | compact paths are the driver's encoding; GMC's USB path uses the follow-on form | SPEC1 p.33; GMC |
+| Path speed control mentioned in passing | braking rules, `#C14` bits and the radius slowdown (§2.4.1) | SPEC1 p.8–9, p.22–27; RADIUS |
+| Modes 3, 4, 9 as one line each | what each does and why the driver does not use it | SPEC1 p.36–38 |
+| Driver notes: Go, HTTP + WebSocket | the Rust workspace as built (§11) | — |
+| Open items as a list | each mapped to the probe or a check stage (§10) | — |
+
+### 2026-11-05: corrections from spec and code
 
 | Was (capture inference) | Now | Source |
 |-------------------------|-----|--------|
-| `#R<angle>` rotates the blade | `#R<ms>` = max ramp time; GMC computes `min(700, 900000/accel)` | SPEC p.18; GMC |
-| `L20` = a cut-move command; `#` family holds cut moves | `L<g>` = mode-2 vector in steps at speed entry `g` (GMC uses 20); it has no prefix | SPEC p.31–32; GMC |
+| `#R<angle>` rotates the blade | `#R<ms>` = ramp time; GMC computes `min(700, 900000/accel)` | SPEC p.18; GMC |
+| `L20` = a cut-move command; `#` family holds cut moves | `L<g>` = mode-2 vector in steps at speed entry `g` (GMC uses 20); no prefix | SPEC p.31–32; GMC |
 | `#G20` = global feed rate | speed of table entry 20 (`#G<g>,v`) | SPEC p.18 |
-| `#C1,100/0` = blade engage/disengage | mode-2 dead time (ms) before the path starts; 100 for edges, 200 for curves, 0 for positioning | SPEC p.20; GMC |
+| `#C1,100/0` = blade engage/disengage | mode-2 dead time (ms) before the path starts; 100 for edges, 200 for curves, 0 for travel | SPEC p.20; GMC |
 | `@B` = "begin" | brake (stop with ramp); the controller then sends `0x01` | SPEC p.13; CAP g_motions |
 | `$CX/$CY/$CZ` = axis config | zero the counters | SPEC p.30 |
 | `$L10/$L20` = "modes" | mode-1 jog in steps at speed entry 10 / 20 | SPEC p.30 |
 | `#S` = global max/approach speed | start/stop speed | SPEC p.18; GMC |
 | `#B20,90` = bevel parameter | braking angle for speed entry 20 | SPEC p.18 |
-| `@X` codes `04` ready / `18` busy only | `r`+flags; `14`/`15` dominate during cuts (9,719 / 344 replies) | SPEC p.12; CAP |
+| `@X` codes `04` ready / `18` busy only | `r` + flags; `14`/`15` dominate during cuts (9,719 / 344 replies) | SPEC p.12; CAP |
 | Wait for exactly `@X04` | wait for a first digit of `0` (GMC tests `@X0`) | GMC |
 | Controller has no buffer; each oval segment is polled | Mode 2 is buffered with look-ahead; the oval was streamed as 1,107 vectors with one poll at the end | SPEC p.6, p.8; CAP g_oval_mount; GMC |
 | `@I235/236` = unknown | home switches X/Y | SPEC p.10; SYS |
@@ -572,7 +893,10 @@ The machine controls **XY position + blade rotation** only. Depth is set in hard
 
 ### 13.1 Where the captures override SPEC1
 
-| SPEC1 says | Captures show | Driver/sim follows |
-|------------|---------------|--------------------|
-| A mode switch resets the outputs [SPEC1 p.32, p.34] | `$A` outputs persist across `@M` changes [CAP g_motions, mounts] | captures (outputs persist) |
-| `#R` range 10..400 ms [SPEC1 p.19] | `#R470`, `#R700` acknowledged [CAP g_multi_C11, g_multi_C12] | captures (no 400 cap) |
+| SPEC1 says | Captures show | Driver and sim follow |
+|------------|---------------|-----------------------|
+| A mode switch clears the outputs [SPEC1 p.32, p.34, p.38] | `$A` outputs persist across `@M` changes [CAP g_motions, mounts] | the captures (outputs persist) |
+| `#R` range 10..400 ms [SPEC1 p.19] | `#R470`, `#R700` acknowledged [CAP g_multi_C11, g_multi_C12] | the captures (no 400 cap) |
+| `#C20` ≥ 1000, `#C21` ≥ 100000 [SPEC1 p.26] | `#C20,400`, `#C21,12000` and `#C21,5000` acknowledged [CAP g_init, g_regular_mount]. The spec's own query examples show `&C20,400` and `&C21,6000` [SPEC1 p.29] | the captures (no minimum) |
+| `0x01` whenever an axis comes to rest after a move [SPEC1 p.23] | none after mode-2 paths, with `#C5,1` set [CAP all cut captures] | the captures: after a stream the driver polls `@X` instead of waiting for `0x01` |
+| `@X` flag table: bit 4 set = homing needed [SPEC1 p.13] | set in every state after homing, absent while homing [CAP all]; the spec's own example agrees | the captures (4 = home position known) |
