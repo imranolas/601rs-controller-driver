@@ -202,7 +202,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | Phase | Runner behaviour |
 |-------|------------------|
 | Before | Check validation (§6) and soft limits against the profile's envelope. Require the machine to be homed (offer to home if not). Push controller configuration (`#C…`, I/O mapping). Require the operator to confirm that the board is loaded. |
-| During | Lower the program to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, blade angles by the rules in §4.2 and unwrapped (the rotary axis keeps counting past 360° along a cut, as in the captures), streaming and flow control, `@X` waits. Report progress per op `id`/`label`. |
+| During | Lower the program to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, a softer start on thick board (protocol reference §3.3), blade angles by the rules in §4.2 and unwrapped (the rotary axis keeps counting past 360° along a cut, as in the captures), streaming and flow control, `@X` waits. Report progress per op `id`/`label`. |
 | After (normal) | Raise the head, release the clamps (`$A02`), park, and report the run as complete. |
 | Abort / error | `@B` brake, head up, release the clamps, then report *which op failed and why* in plain language. A run is never resumed silently in the middle of an op. |
 

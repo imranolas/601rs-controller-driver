@@ -472,12 +472,13 @@ v_ref   = (AbsMaxSpeed / ScaleY) × 10        = (36000 / 400) × 10 = 900   mm/s
 | `_PosRampe` | 4000 | **225** | travel |
 | `_RampeCut` | 3600 | **250** | cutting (most tools) |
 | `_FastZRampe` | 8000 | **112** | short travel with a large blade rotation [GMC] |
-| `_RampeCut` | 420 | **700** (clamped) | tools with a slow ramp |
-| (dynamic) | — | 470 | thickness-dependent, between `DynamicMatSetting.MatLow/High` [GMC] |
+| `_RampeCut` | 420 | **700** (clamped) | deboss and pens (not in the captures) |
+| (thickness rule) | — | **470**, **700** | straight-head cuts on 2.7 and 4.1 mm board (§3.3) |
+| (diagonal rule) | — | **253** | a cut whose first segment is off the axis: the oval (§3.3) |
 
-These account for every `#R` in the captures except `#R300` at connect, `#R,100` before
-homing [CAP g_init] and `#R253` before the oval [CAP g_oval_mount]. **`#R` is not a blade
-angle**; the blade angle travels in each vector's Z (§3.2).
+These account for every `#R` in the captures except `#R300` at connect and `#R,100` before
+homing [CAP g_init]. **`#R` is not a blade angle**; the blade angle travels in each vector's Z
+(§3.2).
 
 ### 3.2 Blade angle (Z) along a path
 
@@ -494,6 +495,15 @@ heading = direction of travel, clockwise from +X (travel towards −Y = 90°)
   uses its own setting (`UseMatProfileSetting` false, `StraightCorrection` 0) [GMC; GCF].
 - Checks [CAP g_regular_mount]: a bevel edge travelling −Y gives trunc(8.3333 × 93) = **774**; a
   straight edge travelling +X gives trunc(8.3333 × −180) = **−1499**. Both are in the capture.
+  With C11 and C12 (trim 4°) the same bevel edge is trunc(8.3333 × 94) = **783** [CAP
+  g_multi_C11, g_multi_C12].
+
+**The trim is deliberate yaw.** Every profile carries a straight-edge trim of 0–7° and a curve
+trim, 0° except C3's 1° (§8). So on every straight edge GMC runs the bevel blade 1–7° off its
+direction of travel, on purpose. What it corrects is not documented. The values follow the
+material, not the thickness (Arqadia back 7°, the 4.1 mm board 4°), which suggests a hand-tuned
+correction for how hard each board pushes the angled blade off line. Calibrating it is open
+(§10).
 
 **Which heading.** Each vector carries the heading of **the chord it cuts**, the line from the
 previous point to its own [GMC]. Along a
@@ -515,6 +525,56 @@ its two chords, which is the curve's tangent; curves flattened to at most 2° of
 at a corner, stop and turn in place. The blade is then never more than 1° off its travel, on the
 true tangent at every point. Copying GMC's rule with tolerance-based chords would leave it 3–15°
 off at the start of each chord on tight curves.
+
+### 3.3 Starting a cut: GMC's soft start
+
+`#S` is the speed the motors **start** at, with no ramp; above it they accelerate at the `#R`
+rate [SPEC1 p.8, p.19]. Every head's `StartStop` is 4000 steps/s, 100 mm/s [GCF]. So a cut
+starts by jumping from standstill to 100 mm/s, or straight to the cutting speed if that is
+lower, with the blade already in the board. GMC softens that in three ways
+[GMC]:
+
+1. **Thickness soft start, straight head only.** From
+   `DynamicMatSetting.MatLow` (0.2 cm) up, GMC lengthens the ramp toward `_MaxRampe` (1285 mm/s²,
+   so 700 ms) and lowers `#S` toward `StartSpeed` (400 steps/s, 10 mm/s):
+
+   ```
+   f  = 1                          if thickness > MatHigh (0.35 cm)
+        thickness / (MatLow + MatHigh)   otherwise
+   #R = cut ramp + (700 − cut ramp) × f
+   #S = StartStop − (StartStop − 400) × f
+   ```
+
+   `f` jumps from 0.64 to 1 at 3.5 mm. After the cut, GMC restores `#R250` and `#S4000`.
+2. **Diagonal smoothing, every cut** (`DiagonalRampeSmoother` true, factor 1 [GCF]). The ramp
+   is multiplied by 1 + d, where d is how far the first segment is off the nearest axis, divided
+   by 45° (0 along an axis, 1 at 45°), capped at 1500 ms [GMC]. The oval's
+   first segment is 1 % off the axis: `#R253`.
+3. **Thin-board straight-head start.** Below `MatLow`, drawn shapes (not templates) take
+   `ImportParameters.CBStartStop` as `#S` (1000, 25 mm/s) [GMC].
+
+The captures [CAP g_multi_C10, g_multi_C11, g_multi_C12]:
+
+| Board | Straight-head edges | Bevel edges |
+|-------|---------------------|-------------|
+| 1.5 mm (C10) | `#R250 #S1000` | `#R250 #S4000` |
+| 2.7 mm (C11) | `#R470 #S2232` | `#R250 #S4000` |
+| 4.1 mm (C12) | `#R700 #S400` | `#R250 #S4000` |
+
+**Bevel edges get no soft start at any thickness.** Each one jumps to 100 mm/s (or to the
+cutting speed) with the blade in the board, then accelerates at 3,600 mm/s²:
+
+| Bevel edge | Starts at | Then accelerates over |
+|------------|-----------|-----------------------|
+| 1.5 mm at 95 % (855 mm/s) | 100 mm/s | ~100 mm (0.2 s) |
+| 2.7 mm at 35 % (315 mm/s) | 100 mm/s | ~12 mm |
+| 4.1 mm at 10 % (90 mm/s) | 90 mm/s | no ramp |
+
+Operators see a wobble at the start of cuts on thick board that changes with the cutting speed.
+The profile's speed % is the only start setting that varies with thickness for the bevel, so
+that fits. Whether the cause is the jump, the acceleration or the blade trim (§3.2) is open
+(§10). The machine layer's plan: a start speed scaled with thickness for both heads, and a slow
+lead-in if needed (`crates/machine/src/lib.rs`, "Starting a cut").
 
 ---
 
@@ -542,6 +602,7 @@ the head goes up at every corner, the blade turns, the head goes down again. GMC
      @M1  $A45 (bevel) or $A4A (straight)
      -- cut --
      @M0  #C1,100 or #C1,200    dead time: 100 ms straight edge, 200 ms curve
+          #R… #S…               straight head on thick board: softer start (§3.3)
           #G20,<360 × Speed%>
      @M2  L20,…                 one vector per straight edge; a curve as all its vectors in one write
      poll @X until "@X0"
@@ -743,8 +804,10 @@ the cut to run further past each corner.
 | C11 | 2.7 mm | 10824 → 2568 | 8256 |
 | C12 | 4.1 mm | 10900 → 2492 | 8408 |
 
-The cut grows by the same amount at both ends. The blade angle Z also shifts slightly
-(774 → 783). This matches `Heads[Bevelled].MatThicknessDependent = true` [GCF].
+The cut grows by the same amount at both ends, which matches
+`Heads[Bevelled].MatThicknessDependent = true` [GCF]. The blade angle Z changes too (774 → 783),
+but that is the profile's blade trim (3° on C10, 4° on C11 and C12, §3.2), not the thickness:
+C11 and C12 differ in thickness and both give 783.
 
 **Model:** `overcut ≈ thickness × tan(42°)` (geometric baseline) **+** per-head sub-millimetre
 trims [GCF]:
@@ -824,8 +887,10 @@ mark lands on the visible edge.
 | C15 | Crescent_Rag | 0.15 | 70 | 3 | 0 | 200 | 0 |
 | C16 | 4.6 | 0.50 | 8 | 4 | 0 | 500 | 0.05 |
 
-*Thickness in cm (0.15 → 1.5 mm). **Bold** = captured and verified. `HeadUpDown` = head settle
-time in ms: GMC sleeps `HDSleep`/`HUSleep` after switching the head outputs [GMC].
+*Thickness in cm (0.15 → 1.5 mm). **Bold** = captured and verified. `ZCorr_Str` / `ZCorr_Rnd`
+= the bevel blade's trim in degrees on straight edges / closed curves (`ZCorrection_Straight` /
+`ZCorrection_Round`, §3.2). `HeadUpDown` = head settle time in ms: GMC sleeps
+`HDSleep`/`HUSleep` after switching the head outputs [GMC].
 
 **Tool priority:** Straight = 1, Bevel = 2, V-Groove = 3, Score/Deboss = 4, Pens = 5
 [GCF `Heads[*].Priority`].
@@ -842,8 +907,8 @@ See §2.7. Do not reproduce it; the machine moves without it.
 
 **Settled:** head spacing (77.7 mm, §4.2) · `@X` codes (§2.1) · `#R` = ramp time (§3.1) · `#C1`
 = dead time · `$C`, `#Z`/`#N`, `#O`, `#C20`–`#C28` (§2.3) · `#C35` (§1) · baud 115200 8-N-1 (§1) ·
-GMC's curve flattening (§3) · GMC's blade angle per vector (§3.2) · GMC's overlap lap on closed
-curves (§7.1) · GMC's pauses (§5).
+GMC's curve flattening (§3) · GMC's blade angle per vector and the profile trims (§3.2) · GMC's
+soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses (§5).
 
 **Open**, with what answers each. The probe is read-only; check stages 3–7 move the machine (see
 `docs/hardware-testing.md`).
@@ -875,6 +940,8 @@ curves (§7.1) · GMC's pauses (§5).
 | A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the runner splits corners until then | a stage-5 check, not yet written |
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
 | Why the oval's head-down is `41`, not `05` | — | test cuts |
+| What the blade trim corrects, and the right value per material on this machine and blade | GMC's per-profile trims (§8) | trim test cuts |
+| The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: `#S4000` against `#S400`, with and without a slow lead-in, trim 0 against the profile's |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
 | `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |
@@ -934,6 +1001,14 @@ The machine controls **XY position and blade rotation** only. Depth is set by ha
 ---
 
 ## 13. Changelog
+
+### 2026-11-06: start of a cut and the blade trim
+
+| Was | Now | Source |
+|-----|-----|--------|
+| Z shifts 774 → 783 with thickness | the profile's blade trim: 3° on C10, 4° on C11 and C12 | GCF `ZCorrection_Straight`; CAP g_multi_C10–C12 |
+| `#R470` "thickness-dependent"; `#R700` from slow-ramp tools | GMC's thickness soft start, straight head only: `#R` and `#S` scaled with thickness; bevel edges get none (§3.3) | GMC; GCF `DynamicMatSetting`; CAP |
+| `#R253` unexplained | diagonal ramp smoothing (§3.3) | GMC |
 
 ### 2026-11-06: blade angle and closed curves
 

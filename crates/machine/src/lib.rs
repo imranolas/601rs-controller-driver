@@ -63,17 +63,18 @@
 //!
 //! The serial line carries about 11,500 bytes/s (115200 baud, the controller's maximum). A path
 //! that needs more starves: the controller runs its buffer dry and slows or stalls mid-contour.
-//! That is GMC's pause in curves. Its oval (`g_oval_mount`) has 1,107 vectors with a median
-//! segment of 0.77 mm, each a full `L20,X…,Y…,Z…`; at its feed of 855 mm/s it needs 22,300
-//! bytes/s, almost twice what the line carries. Three rules:
+//! That is GMC's pause in curves. Its oval (`g_oval_mount`, 1.9 laps with GMC's overlap) has
+//! 1,107 vectors with a median segment of 0.77 mm, each a full `L20,X…,Y…,Z…`; at its feed of
+//! 855 mm/s it needs 22,300 bytes/s, almost twice what the line carries. Three rules:
 //! - **Budget the bytes.** A path needs feed ÷ segment length × bytes per vector. Keep that
 //!   under about 70% of the line, checked when the program is converted, not found mid-cut.
-//! - **Break curves by chord tolerance,** not into fixed small steps: keep every point within a
-//!   tolerance of the true curve, e.g. 0.02 mm, under one 0.025 mm motor step. GMC's oval drops
-//!   from 1,107 to 316 vectors.
+//! - **Break curves by chord tolerance and turn,** not into fixed small steps: keep every point
+//!   within 0.02 mm of the true curve (under one 0.025 mm motor step), and turn at most 2° per
+//!   point, because the blade turns during each vector (PROGRAM_FORMAT §4.2). GMC's oval drops
+//!   from 1,107 to 425 vectors.
 //! - **Stream paths compactly** with `Controller::path`: one absolute vector, then relative
 //!   steps without the `L20,` prefix, unchanged axes left out. That halves the bytes per vector
-//!   and stays exact. Together with the chord tolerance, GMC's oval needs a third of the line.
+//!   and stays exact. With the flattening above, GMC's oval needs 43% of the line.
 //!
 //! # Feeds, ramps and dead time in one stream
 //!
@@ -88,6 +89,25 @@
 //!   dead time only applies when a stream starts from an empty queue (its purpose is to let
 //!   several vectors arrive before motion starts); with just-in-time streaming that happens
 //!   once per job, so keep it short.
+//!
+//! # Starting a cut
+//!
+//! `#S` is the speed the motors start at, with no ramp. GMC leaves it at 100 mm/s for the bevel
+//! head at every thickness, so each bevel edge jumps from rest to 100 mm/s (or straight to the
+//! cutting speed, if lower) with the blade in the board. Operators see a wobble at the start on
+//! thick board. GMC softens the start only for the straight head (protocol reference §3.3).
+//! The machine layer softens it for both:
+//! - **A start speed per job, by thickness:** `#S` from the head's 4000 steps/s down to 400
+//!   (10 mm/s), linearly from 2 mm to 3.5 mm of board (GMC's rule, without its jump at 3.5 mm).
+//!   A job is one board, so it is set once with the other parameters. Travel loses a few
+//!   milliseconds; the tightest curves, whose speed is `#S`, slow down too, which suits thick
+//!   board.
+//! - **The ramp stays one per job** (above), not GMC's 700 ms on thick board, which would slow
+//!   every travel move. If the start still wobbles, begin the cut with a few millimetres at a
+//!   third, slow speed entry: the controller starts at that speed and should accelerate into the
+//!   cut without a mode switch (to confirm with the test cuts).
+//! - Which of these the wobble needs, and whether the blade trim plays a part, is for test cuts
+//!   on thick board (protocol reference §10).
 //!
 //! # Streaming just in time
 //!
