@@ -442,13 +442,25 @@ The spec's prose uses `*023` as its limit-switch example [SPEC1 p.6], but its ta
 file error and the limits 032–039. `@E` calls every code but 0 "still to be defined" [SPEC1
 p.14]; the table came later.
 
-**Answer or event?** The driver (`controller::core`, `error_may_answer`) takes a `*NNN` as the
-answer to the outstanding command only if that command can be rejected: a query never is, and
-in mode 2 only `@M` is. Any other `*NNN` is an event: it is published as
-`Event::Unsolicited`, and the next operation fails with `ControllerError::AsyncError`. Open: in
-modes 0 and 1 a limit fault that arrives while a command is outstanding is taken as that
-command's rejection. Treating `*032`–`*039`, `*040` and `*068` as events always would fix that;
-`*056` and `*062` could be either (§10).
+**Answer or event?** A `*NNN` does not say whether it answers the waiting command or reports a
+fault that crossed it, and the table cannot always tell: the "either" codes, codes the spec
+lacks (`*069`), and in mode 2 a streamed command's error arriving while `@M` waits. So the
+driver (`controller::core`) settles it instead of guessing. When a `*NNN` arrives while a
+command waits for its reply, a probe goes out right behind the command (`@I1xx`, an input
+nothing uses, as for a resync). Replies come in order, so once the probe's answer is in, so is
+the command's: a CR or value before it is the command's answer and the `*NNN` was a fault;
+nothing before it means the `*NNN` was the rejection. It costs one round trip per `*NNN`.
+
+A fault is published as `Event::Unsolicited` and reported as `ControllerError::AsyncError` by
+the next wait or stream, or by the next command that would move the machine or change its
+outputs, settings or mode; until then none of those is sent. Reading state, `@B`, `@S` and `@@`
+still go through.
+
+Taking a `*NNN` as the answer to any command but a query, as the driver first did, goes wrong in
+a way the runner's fault test found: a limit fault arriving just before a mode switch's
+acknowledgement is taken for its rejection, the acknowledgement then pairs with the next
+command, and the host's idea of the mode is wrong (replayed by
+`a_fault_ahead_of_a_mode_switch…` in `crates/sim/tests/host_core.rs`).
 
 ### 2.7 Licence (mode 9, do not reproduce)
 
@@ -997,7 +1009,7 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | `#C19` with a held stream | fed by `@H` | stage 6 |
 | `@S` loses the position | yes (spec) | stage 7 |
 | Limit fault: async `*03x`, `@Y` bit, recovery | spec | stage 7 (only if a limit input is mapped) |
-| Fault attribution in modes 0 and 1 (§2.6): treat `*032`–`*039`, `*040`, `*068` always as events? What do `*056` and `*062` answer? | `*NNN` answers a non-query | stage 7 and real jobs |
+| Does a master command ever overtake the reply to the command before it? Settling a `*NNN` (§2.6) and every resync rely on it not doing so | no: replies come in order | stage 2: a command and a probe in one write, 20 times each for a mode-0 write, `@M0` and `&C52` (refused like GMC's `#C52,800` [CAP g_init]); `ControllerError::Overtaken` if the probe is answered first |
 | No `0x01` after mode-2 paths? | none (captures) | any session log |
 | A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the machine model splits a cut at its corners until then (head up, turn, head down) | a stage-5 check, not yet written |
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
@@ -1018,11 +1030,11 @@ A Rust workspace in `crates/`, layered so each layer can be tested without the o
 |-------|------|
 | `protocol` | Pure, no I/O: encodes commands, decodes replies and signal bytes, error texts, typed settings (`Setting`, `OverridePct`, `StreamFlags`, `Command::path`). |
 | `link` | Bytes to the controller: a serial port, an in-memory pair (optionally paced at a line rate), and a tap that logs every byte with a timestamp. Reader and writer are separate halves. |
-| `controller` | A session with the controller. `HostCore` is a pure state machine (bytes in, outputs and deadlines out) that decides what is a reply, tracks sync, mode, flow control and the stop latch. A driver runs it with a reader thread and two locks, writer before state. `Controller<M>` only offers the commands mode `M` accepts; `StopHandle` brakes from any thread. |
+| `controller` | A session with the controller. `HostCore` is a pure state machine (bytes in, outputs and deadlines out) that decides what is a reply (a `*NNN` while a command waits is settled by a probe, §2.6), tracks sync, mode, flow control, unreported faults and the stop latch. A driver runs it with a reader thread and two locks, writer before state. `Controller<M>` only offers the commands mode `M` accepts; `StopHandle` brakes from any thread. |
 | `sim` | `SimCore` speaks the whole protocol GMC uses; `spawn` runs it behind a link paced at the line rate, with fault injection. Every GMC capture and every session log in `testdata/sessions/` is replayed against it (`crates/sim/tests/fidelity.rs`). |
 | `program` | The program format (`PROGRAM_FORMAT.md`): types, parsing, validation. |
 | `machine` | The machine model, pure: the machine profile, board frame mm/deg → steps, each cut lowered to controller commands as one unit (head down only inside a cut), soft limits, the byte budget, the run time. Written: the profile, the mapping, the lowering in GMC's form (held to the captures by golden tests, `crates/machine/tests/golden.rs`) and in one stream per cut (each part a capability, off until `gunnar check` shows it), and the run-time and line-budget estimate. |
-| `runner` | Drives the cutter on a controller session: homed state, programs and manual operations, pause at the end of a cut, stop now, the safe end state on every exit. Design notes written, code to come. |
+| `runner` | Drives the cutter on a controller session: checks and writes the controller configuration the machine profile assumes, homes as GMC does, runs programs (progress per op; `pause` ops on the green button or the operator; pause and cancel between cuts; stop now from any thread) and manual operations (park, clamps), and after any failure brakes, resynchronises, clears the error and restores the safe state (heads up, clamps released), then requires homing. Tested against the simulator over a real session (`crates/runner/tests/runner.rs`). |
 | `route`, `nest`, `solvers` | The cut order and the nesting, and both as one WebAssembly module for the browser. |
 | `gunnar` | The command line: `ports`, `capture`, `probe`, `check`. |
 

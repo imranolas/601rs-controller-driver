@@ -9,10 +9,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use controller::{
-    Axis, Config, Controller, ControllerError, ErrorCode, Event, Setting, Signal, WatchdogMs,
+    Axis, Config, Controller, ControllerError, ErrorCode, Event, Mode, Setting, Signal, WatchdogMs,
     connect, mode,
 };
 use link::memory::{self, Remote};
+use protocol::{Command, Reply};
 
 // ----------------------------------------------------------------------------- fake controller
 
@@ -285,8 +286,46 @@ fn rejected_command_keeps_pairing() {
         other => panic!("expected Rejected, got {other:?}"),
     }
     ctl.status().expect("still in sync");
-    // No resync was needed: the *021 *was* the reply.
-    assert_eq!(finish(ctl, fake), ["@I100", "@V", "@M0", "#C19,500", "@X"]);
+    // One probe settled it: its answer came next, so the *021 was the reply.
+    assert_eq!(
+        finish(ctl, fake),
+        ["@I100", "@V", "@M0", "#C19,500", "@I101", "@X"]
+    );
+}
+
+/// The reply-order check: a command and a probe in one write. In order, the command gets its
+/// reply. Answered the other way round, the check says so, and the late reply is discarded by
+/// the resync instead of pairing with the next command.
+#[test]
+fn reply_order_is_checked_with_a_probe_behind_the_command() {
+    let (link, fake) = fake(|l, _| match l {
+        "#C19,500" => Act::Silent,
+        "@I102" => reply("@I102,0\r\r"), // the probe first, then #C19's ack
+        other => standard(other),
+    });
+    let mut ctl = open(link);
+    let reply = ctl
+        .request_with_probe(&Command::SetMode(Mode::Parameters))
+        .expect("in order");
+    assert_eq!(reply, Reply::Ack);
+    let late = Command::Set(Setting::HostWatchdog(
+        WatchdogMs::new(500).expect("in range"),
+    ));
+    assert!(matches!(
+        ctl.request_with_probe(&late),
+        Err(ControllerError::Overtaken { .. })
+    ));
+    ctl.status().expect("resynced past the late ack");
+    assert!(matches!(
+        ctl.request_with_probe(&Command::SetMode(Mode::Jog)),
+        Err(ControllerError::WrongMode { .. })
+    ));
+    assert_eq!(
+        finish(ctl, fake),
+        [
+            "@I100", "@V", "@M0", "@M0", "@I101", "#C19,500", "@I102", "@I103", "@X"
+        ]
+    );
 }
 
 #[test]
@@ -541,8 +580,8 @@ fn disconnect_is_reported_and_sticky() {
 }
 
 /// Found by the simulator: a limit switch fires while an `@X` poll is in flight, so `*033`
-/// arrives before `@X04`. Queries are never rejected, so the `*033` is an async fault and the
-/// `@X04` still pairs with the poll; nothing gets out of step.
+/// arrives before `@X04`. The `@X04` comes before the settling probe's answer, so it is the
+/// poll's reply and the `*033` a fault; nothing gets out of step.
 #[test]
 fn fault_racing_a_status_poll_is_async_not_a_rejection() {
     let (link, fake) = fake(|line, _| match line {

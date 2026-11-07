@@ -1,7 +1,14 @@
 //! The **runner** drives the cutter: it holds the controller session and every safety rule that
 //! depends on sequence and state, and runs programs and the station's manual operations with
 //! it. The machine model (`machine`) decides what each cut sends; the runner decides when, and
-//! stops. (To implement.)
+//! stops.
+//!
+//! [`Runner`] holds a controller session ([`Runner::new`]) and does one thing at a time on it:
+//! [`configure`](Runner::configure) the controller as the machine profile needs,
+//! [`home`](Runner::home), [`park`](Runner::park), [`clamp`](Runner::clamp), or
+//! [`run`](Runner::run) a program, reporting [`Event`]s and taking [`Request`]s between cuts.
+//! Its [`stop_handle`](Runner::stop_handle) stops the machine at once from any thread. The
+//! station runs it on a thread of its own. `tests/runner.rs` drives it against the simulator.
 //!
 //! What it owns:
 //! - **State:** homed (from `@X` flag 4), head, clamps, the run. No motion before homing.
@@ -93,3 +100,8 @@
 //! tell which streamed command was refused or lost, and the controller may already have cut
 //! past the gap. With the byte budget and flow control, `*022` cannot happen; if it does, the
 //! pacing has a bug.
+
+mod run;
+mod session;
+
+pub use run::{Cause, Config, Error, Event, Outcome, Request, Runner};

@@ -287,9 +287,8 @@ pub enum Command {
 }
 
 impl Command {
-    /// A pure master query: answered with a value in any state, never with `*NNN`. A `*NNN`
-    /// that arrives while one is outstanding is therefore an asynchronous fault (e.g. a limit
-    /// switch reached during the poll), not the reply.
+    /// A pure master query: reads state, changes nothing, and is answered with a value in any
+    /// state.
     pub fn is_query(&self) -> bool {
         use Command::*;
         matches!(

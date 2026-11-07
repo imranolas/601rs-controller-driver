@@ -4,6 +4,7 @@
 //! from GMC's parameters [GCF] and its captures [CAP]; the protocol reference cites each.
 
 use program::Head as HeadKind;
+use protocol::{Axis, Setting, SignalAcks, Units};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,8 +54,46 @@ pub struct Profile {
     /// Where the carriage parks at the end of a job, steps.
     pub park_steps: [i32; 2],
     pub line: Line,
+    /// The controller configuration everything here assumes.
+    pub controller: ControllerConfig,
+    pub homing: Homing,
     /// What `gunnar check` has shown this controller does beyond GMC's form.
     pub capabilities: Capabilities,
+}
+
+/// The controller configuration the machine model assumes, beyond what each job sets: GMC
+/// writes it at connect [CAP g_init], and the runner checks it there (protocol reference §10:
+/// whether the box boots with it is for the probe to say). See
+/// [`Profile::controller_settings`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerConfig {
+    /// `#ZZ`: the blade axis's steps per revolution. With `#C13` (rotary) the controller turns
+    /// it the short way round to each angle; the blade angles assume it.
+    pub z_steps_per_rev: u32,
+    /// `#NZ`: its µm per revolution.
+    pub z_um_per_rev: u32,
+    /// `#C14`: dynamic path speed, bits 1 diagonal, 2 radius, 4 tangential (the radius from the
+    /// blade's turn), 8 buffer fill. Curves slow down only with 2 or 4; the run-time estimate
+    /// assumes 4.
+    pub dynamic_speed: u8,
+    /// `#C2`: extra braking criteria. Bit 2 (stop on a change of speed entry) must be off for
+    /// the one-stream form, where travel and cutting use different entries.
+    pub brake_criteria: u8,
+}
+
+/// How the machine homes: GMC's sequence, Z first, then X and Y [CAP g_init; protocol
+/// reference §4.1].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Homing {
+    /// `#G10` and `#G11`: the speeds (steps/s) of the switch search and the back-off.
+    pub search_speed: u32,
+    pub back_off_speed: u32,
+    /// `#R` while homing X and Y.
+    pub ramp_ms: u16,
+    /// `#O`: how far each axis moves off its switch after homing, steps (X, Y, Z).
+    pub offset_steps: [i32; 3],
 }
 
 /// The serial line to the controller.
@@ -279,6 +318,18 @@ impl Profile {
             // [GCF] AutoParkX/Y 140 × 20 cm, the bevel blade's position: its carriage less the
             // bevel's offset, 147.15 × 19.81 cm [CAP].
             park_steps: [58_860, 7_923],
+            controller: ControllerConfig {
+                z_steps_per_rev: 3000,
+                z_um_per_rev: 10_000,
+                dynamic_speed: 13,
+                brake_criteria: 0,
+            },
+            homing: Homing {
+                search_speed: 1750,
+                back_off_speed: 750,
+                ramp_ms: 100,
+                offset_steps: [300, 300, 0],
+            },
             line: Line {
                 bytes_per_sec: 11_520.0,
                 budget_share: 0.7,
@@ -305,6 +356,41 @@ impl Profile {
         let top = self.max_speed as f64 / self.scale.y_steps_per_mm;
         let ms = (1000.0 * top / accel) as u32;
         u16::try_from(ms.min(u32::from(self.accel.max_ramp_ms))).unwrap_or(self.accel.max_ramp_ms)
+    }
+
+    /// The controller configuration to check at connect, and to write where it differs:
+    /// steps as units, the maximum speed the ramps are measured against, the blade axis's
+    /// resolution and rotary turning, the dynamic speed and braking, the homing ramp, and the
+    /// signals the session uses (the green button's as bytes, `#C35,1`, as GMC sets it; the
+    /// buffer's flow control only for the one-stream form).
+    pub fn controller_settings(&self) -> Vec<Setting> {
+        let c = self.controller;
+        vec![
+            Setting::Units(Units::Steps),
+            Setting::MaxSpeed(self.max_speed),
+            Setting::StepsPerRev {
+                axis: Axis::Z,
+                value: c.z_steps_per_rev,
+            },
+            Setting::MicrometresPerRev {
+                axis: Axis::Z,
+                value: c.z_um_per_rev,
+            },
+            Setting::RotaryZ(true),
+            Setting::DynamicSpeed(c.dynamic_speed),
+            Setting::BrakeCriteria(c.brake_criteria),
+            Setting::HomingRamp(true),
+            Setting::PositionedSignal(true),
+            Setting::HomingDoneSignal(true),
+            Setting::SignalAcks(SignalAcks {
+                input1: true,
+                input2: false,
+            }),
+            // The buffer's 0x03/0x02 flow control: GMC never enables it and doesn't expect it,
+            // so GMC's form keeps it off; one stream per cut sends the next cut while the last
+            // one runs, and needs it (gunnar check stage 6).
+            Setting::FlowControl(self.capabilities.streams()),
+        ]
     }
 
     /// The carriage position in machine mm for steps.

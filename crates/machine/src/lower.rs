@@ -248,6 +248,29 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
     })
 }
 
+/// A manual park: both heads up, the clamps as `clamps` (output bits), and head-up travel to
+/// the park. (A job parks at its end by itself.)
+pub fn park(profile: &Profile, clamps: u8) -> Vec<Step> {
+    let p = profile;
+    let [x, y] = p.park_steps;
+    vec![
+        Step::Send(Command::SetOutputs(clamps | p.neutral_outputs)),
+        Step::Send(Command::Set(Setting::DeadTimeMs(0))),
+        Step::Send(Command::Set(Setting::RampMs(p.ramp_ms(p.accel.travel)))),
+        Step::Send(Command::Set(Setting::Speed {
+            entry: ENTRY,
+            value: p.speed(p.travel_speed_pct),
+        })),
+        Step::Send(Command::Vector {
+            speed_entry: ENTRY,
+            x,
+            y,
+            z: 0,
+        }),
+        Step::WaitIdle,
+    ]
+}
+
 /// A speed in % that the machine can run: over 0, at most 100.
 fn is_pct(v: f64) -> bool {
     v > 0.0 && v <= 100.0

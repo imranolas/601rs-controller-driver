@@ -27,8 +27,8 @@ route       the cut order: which cut next and which way round, so the head trave
 solvers     route and nest for the browser: one WebAssembly module, their array formats and
             error codes (route and nest themselves stay plain typed libraries)
 
-runner      drives the cutter: session, homed?, head and clamps, programs and manual
-            operations; pause, stop now, safe end state, progress events (to implement)
+runner      drives the cutter: configures the controller, homes, runs programs and manual
+            operations; pause, cancel, holds, stop now, safe state after any failure, events
 machine     the machine model, pure: profile, mm/deg → steps, each cut lowered as one unit
             (GMC's form, held to its captures, or one stream per cut), soft limits, run time,
             byte budget

@@ -5,6 +5,8 @@
 //! - **One outstanding command.** A command expecting a reply is matched with *its* reply
 //!   before anything else is sent. Every wait has a deadline that ends in an explicit
 //!   [`ControllerError`], never in "carry on".
+//! - **Rejection or fault, settled.** A `*NNN` while a command waits may be its rejection or a
+//!   fault that crossed it; a probe written right behind it tells which (see [`core`]).
 //! - **Resync.** After a timeout or an unexpected reply, the next operation first
 //!   re-establishes reply pairing: it reads an input nothing else uses ([`RESYNC_PROBE_INPUTS`])
 //!   and discards everything that arrives before that reply. GMC never did this.
@@ -16,7 +18,9 @@
 //! - **Mode-2 streaming** without per-command replies, honouring the controller's
 //!   0x03/0x02 buffer signals when enabled (`#C7,1`).
 //! - **Errors are never swallowed.** `*NNN` arriving while nobody asked (e.g. a limit switch
-//!   during a cut) is reported by the next operation as [`ControllerError::AsyncError`].
+//!   during a cut) is reported as [`ControllerError::AsyncError`] by the next wait, stream, or
+//!   command that would move the machine or change its outputs, settings or mode. Until then
+//!   none of those is sent; reading state, braking and `@@` still are.
 //!
 //! How it is built: [`core::HostCore`] holds every one of those rules and is pure (bytes and
 //! time in, bytes and outcomes out), like the simulator's `SimCore`. The session runs it on a

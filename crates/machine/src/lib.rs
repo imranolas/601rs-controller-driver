@@ -100,10 +100,12 @@ mod lower;
 mod profile;
 
 pub use estimate::{Estimate, Host, OpEstimate, estimate};
-pub use lower::{ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower};
+pub use lower::{
+    ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, park,
+};
 pub use profile::{
-    Accel, Capabilities, Clamps, DeadTime, Envelope, Head, Line, Profile, RadiusSlowdown, Scale,
-    SoftStart,
+    Accel, Capabilities, Clamps, ControllerConfig, DeadTime, Envelope, Head, Homing, Line, Profile,
+    RadiusSlowdown, Scale, SoftStart,
 };
 
 #[cfg(test)]

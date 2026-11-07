@@ -11,6 +11,12 @@ publish.workspace = true
 machine.workspace = true
 controller.workspace = true
 program.workspace = true
+protocol.workspace = true
+
+[dev-dependencies]
+sim.workspace = true
+link.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

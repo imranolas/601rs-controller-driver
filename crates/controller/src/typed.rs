@@ -147,6 +147,26 @@ impl<M: ModeMarker> Controller<M> {
         }
     }
 
+    /// Send `command` and a probe in one write, without waiting between them, and return the
+    /// command's reply: the reply-order check `gunnar check` runs. Reply pairing relies on the
+    /// controller answering in the order it is sent; if the probe is answered first, this
+    /// fails with [`ControllerError::Overtaken`]. A rejection is returned as
+    /// [`ControllerError::Rejected`], as by any other call. `command` must be one this mode
+    /// takes, and not a switch to another mode, which only [`Self::into_mode`] makes
+    /// ([`ControllerError::WrongMode`] if not; nothing is sent).
+    pub fn request_with_probe(&mut self, command: &Command) -> Result<Reply> {
+        let takes = command.expects_reply()
+            && command.required_mode().is_none_or(|mode| mode == M::MODE)
+            && !matches!(command, Command::SetMode(to) if *to != M::MODE);
+        if !takes {
+            return Err(ControllerError::WrongMode {
+                command: command.clone(),
+                mode: M::MODE,
+            });
+        }
+        self.session.request_with_probe(command)
+    }
+
     /// `@E`: current error code (0 = none).
     pub fn error_code(&mut self) -> Result<ErrorCode> {
         self.value(&Command::ErrorCode, reply::parse_error_code)
@@ -424,5 +444,17 @@ impl Controller<mode::Cutting> {
     /// `C<bits>`: one-shot special functions for the next motion.
     pub fn flags(&mut self, flags: StreamFlags) -> Result<()> {
         self.session.stream(&Command::StreamFlags(flags))
+    }
+
+    /// Stream any mode-2 command (a vector, a follow-on step, `A`, `W`, `C`, …), as a lowered
+    /// job lists them. Anything that isn't a mode-2 command is refused without being sent.
+    pub fn stream(&mut self, command: &Command) -> Result<()> {
+        if command.required_mode() != Some(Mode::Cutting) {
+            return Err(ControllerError::WrongMode {
+                command: command.clone(),
+                mode: Mode::Cutting,
+            });
+        }
+        self.session.stream(command)
     }
 }

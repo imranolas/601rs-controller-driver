@@ -2,7 +2,7 @@
 //!
 //! | Stage | Moves | Answers |
 //! |-------|-------|---------|
-//! | 2 | no  | `0x05` heartbeat (`#C8`), green button edges `0x06`/`0x07` (`#C35`) |
+//! | 2 | no  | replies come back in the order sent (a command and a probe in one write), `0x05` heartbeat (`#C8`), green button edges `0x06`/`0x07` (`#C35`) |
 //! | 3 | yes | homing like GMC, `0x04`, jogs and `0x01`, `@B`, `@Q` vs `$A`, outputs across a mode switch, clamp sides |
 //! | 4 | yes | a mode-2 square the way GMC does it: `@X` 15 → 14 → 04, exact return; `@B` mid-path discards the rest |
 //! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16`; compact paths, a second speed entry, in-stream `G`, what `@N` counts and how wide it is |
@@ -19,8 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use controller::{
-    Axis, Controller, ControllerError, Event, JogTarget, Level, LimitSwitch, ModeMarker,
-    OverridePct, Setting, SettingKey, Side, Signal, SignalAcks, SpeedOverride, StopHandle,
+    Axis, Controller, ControllerError, Event, JogTarget, Level, LimitSwitch, Mode, ModeMarker,
+    OverridePct, Param, Setting, SettingKey, Side, Signal, SignalAcks, SpeedOverride, StopHandle,
     StreamFlags, Units, WatchdogMs, mode,
 };
 use machine::Profile;
@@ -184,7 +184,7 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
 
     for &stage in stages {
         let title = match stage {
-            2 => "Stage 2: signals (no motion)",
+            2 => "Stage 2: reply order and signals (no motion)",
             3 => "Stage 3: homing, jogs, brake, outputs",
             4 => "Stage 4: mode-2 square, GMC style",
             5 => "Stage 5: v1.00 in-stream commands",
@@ -338,6 +338,8 @@ fn require_homed(p: &mut Params, ctx: &mut Ctx, what: &str) -> Res<bool> {
 // ------------------------------------------------------------------ stage 2
 
 fn stage2(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    reply_order(&mut p, ctx)?;
+
     p.set(Setting::HeartbeatMs(500))?;
     ctx.drain();
     thread::sleep(ctx.t(2000));
@@ -378,6 +380,67 @@ fn stage2(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         format!("expected 0x06 then 0x07, saw {got:?}"),
     );
     Ok(p)
+}
+
+/// How often each command goes out with a probe behind it.
+const ORDER_ROUNDS: usize = 20;
+
+/// Reply pairing, settling a `*NNN` (a rejection, or a fault that crossed the command?) and
+/// every resync rely on the controller answering in the order it is sent. Here a command and a
+/// probe go out in one write, without waiting, many times over, and the command's reply must
+/// come first every time. Three kinds of reply: a CR to a mode-0 write (the dead time, written
+/// back as it is), a CR to a master command (`@M0`, the switch a crossing fault was once taken
+/// to reject), and a rejection (`&C52`: GMC's `#C52,800` is refused with `*021` [CAP g_init],
+/// so C52 is no parameter).
+fn reply_order(p: &mut Params, ctx: &mut Ctx) -> Res<()> {
+    let dead_time = p.read_setting(SettingKey::DeadTime)?;
+    let commands = [
+        Command::Set(dead_time),
+        Command::SetMode(Mode::Parameters),
+        Command::QueryParam(Param::Config(52)),
+    ];
+    let mut refused = false;
+    for command in commands {
+        let mut overtaken = 0;
+        let mut replies: Vec<String> = Vec::new();
+        for _ in 0..ORDER_ROUNDS {
+            let reply = match p.request_with_probe(&command) {
+                Ok(reply) => reply.to_string(),
+                Err(ControllerError::Rejected { code, .. }) => {
+                    refused = true;
+                    code.to_string()
+                }
+                Err(ControllerError::Overtaken { .. }) => {
+                    overtaken += 1;
+                    // Its own reply is still to come, and a `*021` arriving unasked would pass
+                    // for a fault and hold back the rest of the stage. Let it arrive; drop it.
+                    thread::sleep(ctx.t(100));
+                    let _ = p.wait_idle(Duration::from_secs(1));
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if !replies.contains(&reply) {
+                replies.push(reply);
+            }
+        }
+        ctx.r.check(
+            overtaken == 0,
+            &format!("reply order: {command}"),
+            format!(
+                "{} of {ORDER_ROUNDS} answered before the probe sent right behind; reply: {}",
+                ORDER_ROUNDS - overtaken,
+                replies.join(", ")
+            ),
+        );
+    }
+    if !refused {
+        ctx.r.info(
+            "reply order: a rejection",
+            "&C52 was answered, not refused: the order of a rejection is still unseen",
+        );
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ stage 3

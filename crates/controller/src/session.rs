@@ -105,6 +105,10 @@ impl Shared {
     }
 }
 
+/// How the core registers a request: [`HostCore::request`] or [`HostCore::request_with_probe`].
+type Register =
+    fn(&mut HostCore, &Command, Instant) -> std::result::Result<(RequestId, Vec<u8>), Blocked>;
+
 pub(crate) struct Session {
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
@@ -168,12 +172,22 @@ impl Session {
     /// Send a command that expects a reply and return that reply, resyncing first if pairing
     /// is uncertain.
     pub(crate) fn request(&mut self, command: &Command) -> Result<Reply> {
+        self.submit(command, HostCore::request)
+    }
+
+    /// Send `command` with a probe right behind it, without waiting between them (see
+    /// [`HostCore::request_with_probe`]).
+    pub(crate) fn request_with_probe(&mut self, command: &Command) -> Result<Reply> {
+        self.submit(command, HostCore::request_with_probe)
+    }
+
+    fn submit(&mut self, command: &Command, register: Register) -> Result<Reply> {
         loop {
             let mut writer = lock(&self.shared.writer);
             // The core registers the request just before its bytes go out. A spontaneous line
             // arriving in between is judged exactly as one arriving just after: the controller
             // cannot answer a command it has not received yet.
-            let decided = self.shared.lock().core.request(command, Instant::now());
+            let decided = register(&mut self.shared.lock().core, command, Instant::now());
             match decided {
                 Ok((id, bytes)) => {
                     self.shared.write(&mut **writer, &bytes)?;
@@ -206,11 +220,25 @@ impl Session {
     }
 
     /// Block until request `id` completes. The core finishes it with its reply, a timeout
-    /// (checked here, at its deadline), a stop or a closed link.
-    fn wait_for(&self, mut st: MutexGuard<'_, State>, id: RequestId) -> Result<Reply> {
+    /// (checked here, at its deadline), a stop or a closed link. If a `*NNN` crosses the
+    /// request, the probe that settles it is written from here.
+    fn wait_for<'a>(&'a self, mut st: MutexGuard<'a, State>, id: RequestId) -> Result<Reply> {
         loop {
             if let Some((_, result)) = st.done.take_if(|(done, _)| *done == id) {
                 return result;
+            }
+            if st.core.probe_due() {
+                // Writes take the writer lock first, so let go of the state lock and take both
+                // in order. A stop in between finishes the request, and nothing is written.
+                drop(st);
+                let mut writer = lock(&self.shared.writer);
+                let probe = self.shared.lock().core.settling_probe(Instant::now());
+                if let Some(bytes) = probe {
+                    self.shared.write(&mut **writer, &bytes)?;
+                }
+                drop(writer);
+                st = self.shared.lock();
+                continue;
             }
             let now = Instant::now();
             let outputs = st.core.tick(now);

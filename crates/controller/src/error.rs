@@ -1,4 +1,4 @@
-use protocol::{Command, ErrorCode, Reply, Status};
+use protocol::{Command, ErrorCode, Mode, Reply, Status};
 
 /// What came back while a resync probe went unanswered.
 fn heard(bytes: &u64, lines: &[String]) -> String {
@@ -45,6 +45,11 @@ pub enum ControllerError {
     #[error("controller rejected `{command}` with {code}")]
     Rejected { command: Command, code: ErrorCode },
 
+    /// A probe sent right behind `command` was answered before `command` was: the controller
+    /// does not answer in the order it is sent, which reply pairing relies on.
+    #[error("the probe sent after `{command}` was answered first: replies came out of order")]
+    Overtaken { command: Command },
+
     /// A `*NNN` arrived that was not the reply to a command we sent: a fault during motion
     /// (e.g. `*033` limit switch) or an error caused by a streamed mode-2 command.
     #[error("controller reported {code}")]
@@ -68,6 +73,10 @@ pub enum ControllerError {
 
     #[error("a stop was issued; call clear_stop() before continuing")]
     Stopped,
+
+    /// A command offered in a mode that doesn't take it; it was not sent.
+    #[error("`{command}` is not a {mode:?} command")]
+    WrongMode { command: Command, mode: Mode },
 }
 
 pub type Result<T> = std::result::Result<T, ControllerError>;

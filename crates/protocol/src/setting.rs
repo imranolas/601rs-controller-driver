@@ -144,6 +144,25 @@ pub enum Setting {
     BrakeAngle { entry: u8, degrees: u8 },
     /// `#C20`–`#C28`: the radius slowdown [CAP].
     Radius(Radius, u32),
+    /// `#M<v>`: the maximum speed (steps/s with `#C11,0`). Ramps (`#R`) are the time to reach
+    /// it [SPEC1 p.8, p.19; CAP g_init `#M36000`].
+    MaxSpeed(u32),
+    /// `#Z<a>,<n>`: steps per revolution of an axis; with `#C13` the controller turns a rotary
+    /// axis the short way round [SPEC1 p.20; CAP g_init `#ZZ,3000`].
+    StepsPerRev { axis: Axis, value: u32 },
+    /// `#N<a>,<n>`: µm per revolution of an axis [SPEC1 p.20; CAP g_init `#NZ,10000`].
+    MicrometresPerRev { axis: Axis, value: u32 },
+    /// `#C2`: extra braking criteria, bits: 1 an XY-to-Z direction change beyond the braking
+    /// angle, 2 a change of speed entry, 4 the start and end of a Z move, 8 U moves [SPEC1
+    /// p.22]. GMC sends `#C2,0` [CAP g_init].
+    BrakeCriteria(u8),
+    /// `#C12`: ramp when homing reaches the switch [SPEC1 p.24; CAP g_init `#C12,1`].
+    HomingRamp(bool),
+    /// `#C13`: Z is a rotary axis, always turned the short way [SPEC1 p.24; CAP `#C13,1`].
+    RotaryZ(bool),
+    /// `#C14`: dynamic path speed, bits: 1 diagonal, 2 radius, 4 tangential (the radius from
+    /// the Z axis), 8 buffer fill [SPEC1 p.24–25]. GMC sends `#C14,13` [CAP g_init].
+    DynamicSpeed(u8),
     /// `#O<a>,<value>`: offset driven after homing (steps with `#C11,0`) [SPEC1 p.20; CAP g_init].
     HomeOffset { axis: Axis, value: i32 },
 }
@@ -164,6 +183,13 @@ pub enum SettingKey {
     StartSpeed,
     BrakeAngle(u8),
     Radius(Radius),
+    MaxSpeed,
+    StepsPerRev(Axis),
+    MicrometresPerRev(Axis),
+    BrakeCriteria,
+    HomingRamp,
+    RotaryZ,
+    DynamicSpeed,
     HomeOffset(Axis),
 }
 
@@ -184,6 +210,13 @@ impl SettingKey {
             Self::StartSpeed => Param::StartSpeed,
             Self::BrakeAngle(entry) => Param::BrakeAngle(entry),
             Self::Radius(r) => Param::Config(r.register()),
+            Self::MaxSpeed => Param::MaxSpeed,
+            Self::StepsPerRev(axis) => Param::StepsPerRev(axis),
+            Self::MicrometresPerRev(axis) => Param::MicrometresPerRev(axis),
+            Self::BrakeCriteria => Param::Config(2),
+            Self::HomingRamp => Param::Config(12),
+            Self::RotaryZ => Param::Config(13),
+            Self::DynamicSpeed => Param::Config(14),
             Self::HomeOffset(axis) => Param::HomeOffset(axis),
         }
     }
@@ -212,6 +245,13 @@ impl Setting {
             Self::StartSpeed(_) => SettingKey::StartSpeed,
             Self::BrakeAngle { entry, .. } => SettingKey::BrakeAngle(entry),
             Self::Radius(r, _) => SettingKey::Radius(r),
+            Self::MaxSpeed(_) => SettingKey::MaxSpeed,
+            Self::StepsPerRev { axis, .. } => SettingKey::StepsPerRev(axis),
+            Self::MicrometresPerRev { axis, .. } => SettingKey::MicrometresPerRev(axis),
+            Self::BrakeCriteria(_) => SettingKey::BrakeCriteria,
+            Self::HomingRamp(_) => SettingKey::HomingRamp,
+            Self::RotaryZ(_) => SettingKey::RotaryZ,
+            Self::DynamicSpeed(_) => SettingKey::DynamicSpeed,
             Self::HomeOffset { axis, .. } => SettingKey::HomeOffset(axis),
         }
     }
@@ -248,6 +288,21 @@ impl Setting {
                 degrees: value.parse().ok().filter(|&d| d <= 90)?,
             },
             SettingKey::Radius(r) => Self::Radius(r, value.parse().ok()?),
+            SettingKey::MaxSpeed => Self::MaxSpeed(value.parse().ok()?),
+            SettingKey::StepsPerRev(axis) => Self::StepsPerRev {
+                axis,
+                value: value.parse().ok()?,
+            },
+            SettingKey::MicrometresPerRev(axis) => Self::MicrometresPerRev {
+                axis,
+                value: value.parse().ok()?,
+            },
+            SettingKey::BrakeCriteria => {
+                Self::BrakeCriteria(value.parse().ok().filter(|&b| b < 16)?)
+            }
+            SettingKey::HomingRamp => Self::HomingRamp(parse_flag(value)?),
+            SettingKey::RotaryZ => Self::RotaryZ(parse_flag(value)?),
+            SettingKey::DynamicSpeed => Self::DynamicSpeed(value.parse().ok().filter(|&b| b < 16)?),
             SettingKey::HomeOffset(axis) => Self::HomeOffset {
                 axis,
                 value: value.parse().ok()?,
@@ -274,6 +329,13 @@ impl fmt::Display for Setting {
             Self::StartSpeed(v) => write!(f, "#S{v}"),
             Self::BrakeAngle { entry, degrees } => write!(f, "#B{entry},{degrees}"),
             Self::Radius(r, v) => write!(f, "#C{},{v}", r.register()),
+            Self::MaxSpeed(v) => write!(f, "#M{v}"),
+            Self::StepsPerRev { axis, value } => write!(f, "#Z{},{value}", axis.upper()),
+            Self::MicrometresPerRev { axis, value } => write!(f, "#N{},{value}", axis.upper()),
+            Self::BrakeCriteria(bits) => write!(f, "#C2,{bits}"),
+            Self::HomingRamp(on) => write!(f, "#C12,{}", flag(on)),
+            Self::RotaryZ(on) => write!(f, "#C13,{}", flag(on)),
+            Self::DynamicSpeed(bits) => write!(f, "#C14,{bits}"),
             Self::HomeOffset { axis, value } => write!(f, "#O{},{value}", axis.upper()),
         }
     }
@@ -328,6 +390,27 @@ mod tests {
             "&C21,12000",
         ),
         (Setting::Radius(Radius::Steepness, 1), "#C28,1", "&C28,1"),
+        (Setting::MaxSpeed(36000), "#M36000", "&M36000"),
+        (
+            Setting::StepsPerRev {
+                axis: Axis::Z,
+                value: 3000,
+            },
+            "#ZZ,3000",
+            "&ZZ,3000",
+        ),
+        (
+            Setting::MicrometresPerRev {
+                axis: Axis::Z,
+                value: 10000,
+            },
+            "#NZ,10000",
+            "&NZ,10000",
+        ),
+        (Setting::BrakeCriteria(0), "#C2,0", "&C2,0"),
+        (Setting::HomingRamp(true), "#C12,1", "&C12,1"),
+        (Setting::RotaryZ(true), "#C13,1", "&C13,1"),
+        (Setting::DynamicSpeed(13), "#C14,13", "&C14,13"),
         (
             Setting::HomeOffset {
                 axis: Axis::X,

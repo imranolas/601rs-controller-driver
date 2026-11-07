@@ -82,9 +82,12 @@ impl Bench {
     }
 
     /// The result of request `id`: delivering what is in flight and letting time pass until
-    /// the core finishes it.
+    /// the core finishes it, writing the probe that settles a `*NNN` when one is due.
     fn completion(&mut self, id: RequestId) -> Result<Reply, ControllerError> {
         loop {
+            if let Some(probe) = self.host.settling_probe(self.host_now()) {
+                self.transmit(&probe);
+            }
             let found = self
                 .outputs
                 .iter()
@@ -180,6 +183,49 @@ fn a_fault_during_a_status_poll_is_a_fault_not_the_reply() {
     };
     assert!(s.error && s.homed, "{s}");
     assert_eq!(b.host.take_async_error(), Some(ErrorCode(33)));
+}
+
+/// The runner's case: a limit fault is already on its way when a mode switch goes out, so
+/// `*033` arrives just ahead of the switch's acknowledgement. The switch stands, the fault is a
+/// fault, and the next command that would act fails with it.
+#[test]
+fn a_fault_ahead_of_a_mode_switch_is_a_fault_and_the_switch_stands() {
+    let mut b = Bench::homed();
+    b.request(&Command::SetMode(Mode::Cutting)).expect("@M2");
+    let fault = b.sim.inject_error(33, b.now);
+    b.in_flight.extend(fault);
+    assert!(matches!(
+        b.request(&Command::SetMode(Mode::Parameters)),
+        Ok(Reply::Ack)
+    ));
+    assert_eq!(b.host.mode(), Some(Mode::Parameters));
+    assert!(b.saw(&Event::Unsolicited("*033".into())));
+    assert!(matches!(
+        b.request(&Command::SetMode(Mode::Jog)),
+        Err(ControllerError::AsyncError {
+            code: ErrorCode(33)
+        })
+    ));
+    assert_eq!(
+        b.sim.received(),
+        ["@I100", "@M2", "@M0", "@I101"],
+        "one probe settled it; the held @M1 never went out"
+    );
+}
+
+/// A real rejection, settled the same way: the simulator refuses mode 2 before homing.
+#[test]
+fn a_rejection_is_still_a_rejection() {
+    let mut b = Bench::new(SimConfig::default());
+    assert!(matches!(
+        b.request(&Command::SetMode(Mode::Cutting)),
+        Err(ControllerError::Rejected {
+            code: ErrorCode(41),
+            ..
+        })
+    ));
+    assert_eq!(b.host.take_async_error(), None);
+    assert!(matches!(b.request(&Command::Status), Ok(Reply::Status(_))));
 }
 
 /// A stop finishes the outstanding request at once and refuses everything until cleared.
