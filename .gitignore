@@ -1,1 +1,3 @@
 /target
+# third-party tools built locally (PackingSolver for the UI spike)
+/.tools

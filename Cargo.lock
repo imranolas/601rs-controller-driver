@@ -90,6 +90,7 @@ dependencies = [
  "controller",
  "ctrlc",
  "link",
+ "machine",
  "protocol",
  "sim",
 ]
@@ -158,8 +159,12 @@ dependencies = [
 name = "machine"
 version = "0.1.0"
 dependencies = [
- "controller",
+ "link",
+ "program",
  "protocol",
+ "serde",
+ "serde_json",
+ "sim",
 ]
 
 [[package]]
@@ -255,6 +260,7 @@ version = "0.1.0"
 name = "runner"
 version = "0.1.0"
 dependencies = [
+ "controller",
  "machine",
  "program",
 ]

@@ -19,6 +19,6 @@ pub use command::{
 pub use decode::{Decoder, Frame, Signal};
 pub use errors::ErrorCode;
 pub use reply::{InputDef, Reply};
-pub use setting::{Setting, SettingKey, SignalAcks, Units, WatchdogMs};
+pub use setting::{Radius, Setting, SettingKey, SignalAcks, Units, WatchdogMs};
 pub use status::Status;
 pub use switches::{LimitSwitch, Side, Switches};

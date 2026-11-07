@@ -23,6 +23,7 @@ use controller::{
     OverridePct, Setting, SettingKey, Side, Signal, SignalAcks, SpeedOverride, StopHandle,
     StreamFlags, Units, WatchdogMs, mode,
 };
+use machine::Profile;
 use protocol::Command;
 
 use crate::operator::{Confirm, Operator};
@@ -34,14 +35,31 @@ const ENTRY: u8 = 20;
 /// A second entry, at half the speed: stage 5 checks that each vector's entry picks its feed,
 /// which is how one stream can travel and cut at different speeds.
 const TRAVEL_ENTRY: u8 = 21;
+/// The machine's facts, from its profile (`machine::Profile`).
+fn profile() -> Profile {
+    Profile::gunnar_601()
+}
+
 /// X/Y scale [GCF `MachineScale` 400 /cm].
-const STEPS_PER_MM: i32 = 40;
-const STEP_20MM: i32 = 20 * STEPS_PER_MM;
-/// End of the X drivable range in steps: GMC's `DRX` 156 cm × 400 steps/cm [GCF], its own
-/// soft-limit basis. A fitted X+ limit switch sits at or just beyond it.
-const X_DRIVABLE: i32 = 62_400;
+fn steps_per_mm() -> i32 {
+    profile().scale.x_steps_per_mm.round() as i32
+}
+
+fn step_20mm() -> i32 {
+    20 * steps_per_mm()
+}
+
+/// End of the X drivable range in steps: GMC's `DRX` 156 cm [GCF], its own soft-limit basis and
+/// the profile's envelope. A fitted X+ limit switch sits at or just beyond it.
+fn x_drivable() -> i32 {
+    let p = profile();
+    (p.envelope_mm.x[1] * p.scale.x_steps_per_mm).round() as i32
+}
+
 /// How far past the drivable range stage 7 may drive while looking for the limit switch.
-const LIMIT_OVERTRAVEL: i32 = STEP_20MM;
+fn limit_overtravel() -> i32 {
+    step_20mm()
+}
 /// Stage 7's speed towards the limit switch, steps/s (10 mm/s).
 const LIMIT_SPEED: u32 = 400;
 /// The override stage 5 runs at.
@@ -397,18 +415,18 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         let i = axis.index();
         let start = pos(&mut j)?;
         ctx.drain();
-        j.jog_steps(ENTRY, axis, JogTarget::By(STEP_20MM * dir))?;
+        j.jog_steps(ENTRY, axis, JogTarget::By(step_20mm() * dir))?;
         idle(&mut j)?;
         let end = pos(&mut j)?;
         let positioned = ctx.signals().contains(&Signal::Positioned);
         ctx.r.check(
-            end[i] - start[i] == STEP_20MM * dir,
+            end[i] - start[i] == step_20mm() * dir,
             &format!("jog {axis:?}"),
             format!(
                 "{} → {} steps (asked {:+})",
                 start[i],
                 end[i],
-                STEP_20MM * dir
+                step_20mm() * dir
             ),
         );
         ctx.r.check(
@@ -427,16 +445,16 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         == Confirm::Go
     {
         let start = pos(&mut j)?;
-        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * STEP_20MM * x_dir))?;
+        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * x_dir))?;
         thread::sleep(ctx.t(800));
         j.brake()?;
         idle(&mut j)?;
         let end = pos(&mut j)?;
         let moved = (end[0] - start[0]) * x_dir;
         ctx.r.check(
-            moved > 0 && moved < 5 * STEP_20MM,
+            moved > 0 && moved < 5 * step_20mm(),
             "@B brakes a jog",
-            format!("stopped after {moved} of {} steps", 5 * STEP_20MM),
+            format!("stopped after {moved} of {} steps", 5 * step_20mm()),
         );
         j.jog_steps(ENTRY, Axis::X, JogTarget::To(start[0]))?;
         idle(&mut j)?;
@@ -521,8 +539,8 @@ fn stage4(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     }
     setup_moves(&mut p, ctx)?;
     let (dx, dy) = (
-        STEP_20MM * away(&mut p, Axis::X)?,
-        STEP_20MM * away(&mut p, Axis::Y)?,
+        step_20mm() * away(&mut p, Axis::X)?,
+        step_20mm() * away(&mut p, Axis::Y)?,
     );
     let [x0, y0, z0] = pos(&mut p)?;
     let mut c = p.into_cutting()?;
@@ -646,8 +664,8 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
-    let d = STEP_20MM * away(&mut p, Axis::X)?;
-    let dy = STEP_20MM * away(&mut p, Axis::Y)?;
+    let d = step_20mm() * away(&mut p, Axis::X)?;
+    let dy = step_20mm() * away(&mut p, Axis::Y)?;
     let [x0, y0, z0] = pos(&mut p)?;
     let mut c = p.into_cutting()?;
 
@@ -840,14 +858,22 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     c.vector(ENTRY, x0 + d2, y0, z0)?;
     c.stream_speed(ENTRY, (ctx.speed / 2).max(1))?;
     c.vector(ENTRY, x0, y0, z0)?;
-    let t_out = loop {
-        if (c.position_steps(Axis::X)? - x0).abs() >= d2.abs() {
-            break started.elapsed();
+    // The carriage turns back the moment it arrives, so a poll seldom sees the far point
+    // itself: the outward time is the last poll before it started back.
+    let mut far = (Duration::ZERO, 0);
+    loop {
+        let x = (c.position_steps(Axis::X)? - x0).abs();
+        if x > far.1 {
+            far = (started.elapsed(), x);
+        }
+        if far.1 >= d2.abs() * 9 / 10 && x < far.1 {
+            break;
         }
         if started.elapsed() > Duration::from_secs(120) {
             return Err("the outward move never arrived".into());
         }
-    };
+    }
+    let t_out = far.0;
     idle(&mut c)?;
     let t_back = started.elapsed().saturating_sub(t_out);
     let ratio = t_back.as_secs_f64() / t_out.as_secs_f64().max(1e-3);
@@ -870,7 +896,7 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
 
     // (h) How wide is @N (shown as `@Nxxxx` [SPEC1 p.15])? Set it near 10 000 and run three
     //     short vectors, the kind of command it certainly counts.
-    let step = STEPS_PER_MM * d.signum(); // 1 mm away from home
+    let step = steps_per_mm() * d.signum(); // 1 mm away from home
     c.set_command_counter(9998)?;
     for x in [x0 + step, x0, x0 + step] {
         c.vector(ENTRY, x, y0, z0)?;
@@ -1221,7 +1247,7 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     ) == Confirm::Go
     {
         let mut j = p.into_jog()?;
-        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * STEP_20MM * dir))?;
+        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * dir))?;
         thread::sleep(ctx.t(800));
         ctx.stop.emergency_stop()?;
         thread::sleep(ctx.t(200));
@@ -1254,17 +1280,17 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     // Drive no further than just past the drivable range: a mapped input is not proof of a
     // working switch, and if it never trips the move must end on its own, not at the frame.
     let target = if dir > 0 {
-        X_DRIVABLE + LIMIT_OVERTRAVEL
+        x_drivable() + limit_overtravel()
     } else {
-        -LIMIT_OVERTRAVEL
+        -limit_overtravel()
     };
     let x = p.position_steps(Axis::X)?;
     let distance = u64::from((target - x).unsigned_abs());
     if ctx.op.confirm(&format!(
         "Drive X slowly (10 mm/s) towards the {switch} limit switch until it trips: at most {} mm, \
          to X {} mm (20 mm past GMC's drivable range). Hand on the e-stop; Ctrl-C brakes.",
-        (target - x).abs() / STEPS_PER_MM,
-        target / STEPS_PER_MM
+        (target - x).abs() / steps_per_mm(),
+        target / steps_per_mm()
     )) != Confirm::Go
     {
         ctx.r.skip("limit switch", "skipped");
@@ -1303,7 +1329,7 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         format!("{sw:?}"),
     );
     j.clear_error()?;
-    j.jog_steps(ENTRY, Axis::X, JogTarget::By(-STEP_20MM * dir))?;
+    j.jog_steps(ENTRY, Axis::X, JogTarget::By(-step_20mm() * dir))?;
     idle(&mut j)?;
     let sw = j.switches()?;
     ctx.r.check(

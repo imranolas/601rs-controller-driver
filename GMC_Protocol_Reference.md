@@ -27,6 +27,7 @@ this document and cites it rather than repeating it.
 | **[SESSION name]** | Logs written by `gunnar probe` / `gunnar check` at the machine, in `testdata/sessions/`. None yet. |
 | **[GCF]** | GMC's machine and tool parameters for the 601 (its `.gcf` file; not included). |
 | **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included). |
+| **[HELP …]** | GMC's user documentation: [HELP RN] its release notes, and **[HELP CA n]** page n of its Configuration Assistant (calibration of borders, overcuts, trims, the throttle, COE). |
 
 **Captures** [CAP]:
 - `g_init`: power-on, licence exchange, configuration, homing (66 s)
@@ -337,24 +338,55 @@ unknown. Nothing in the driver depends on it.
 Bit `i` of the hex value is aux signal `i + 1`, logical output `Q242 + i` [SPEC1 p.11, p.32]. The
 roles come from the machine parameters [GCF `i_*`; GMC]:
 
-| Bit | Hex | `.gcf` name | Role |
+| Bit | Hex | `.gcf` name | Role, from how GMC uses it on the 601 |
 |-----|-----|-------------|------|
-| 0 | 01 | `i_t` | bevel tool *(name only)* |
-| 1 | 02 | `i_bh` | head-up / hold; set at init and on head-up [GMC] |
-| 2 | 04 | `i_b` | blade / bevel down [GMC] |
-| 3 | 08 | `i_sh` | straight head |
-| 4 | 10 | `i_dd` | head-switch pulse, 250 ms [GMC] |
-| 5 | 20 | `i_pl` | clamp ("p… left") |
-| 6 | 40 | `i_pr` | clamp ("p… right") |
-| 7 | 80 | `i_free` | spare |
+| 0 | 01 | `i_t` | the bevel blade's plunge: on to cut, off to take the blade out. Alone, GMC's slow head-down for closed curves [GMC] |
+| 1 | 02 | `i_bh` | holds the **bevel** head up. On at connect [GMC] and for the bevel's full head-up [GMC]; off whenever the bevel goes down; and on, untouched, while the straight head cuts (`4A`), so it keeps the bevel head clear |
+| 2 | 04 | `i_b` | joins `i_t` for the bevel's normal head-down; never set alone. GMC calls the head-down without it "slow" [GMC] |
+| 3 | 08 | `i_sh` | the straight head: on down, off up; nothing else [GMC] |
+| 4 | 10 | `i_dd` | a 250 ms pulse [GMC], only in the V-groove depth adjustment: not used in mat cutting |
+| 5 | 20 | `i_pl` | the clamp for a board on the **right** half of the table (below) |
+| 6 | 40 | `i_pr` | the clamp for a board on the **left** half, where boards are registered: every job in the captures clamps with it |
+| 7 | 80 | `i_free` | spare on the 601: GMC sets it only with a third tool position's head down on its native-USB machines [GMC] |
+
+So the bevel head has three states: up (`i_bh`, `02`), down with the blade out (all three
+off, `00`: GMC treats it as the head staying down [GMC]), and cutting (`i_t` + `i_b`,
+`05`, or `i_t` alone, `01`). The straight head has two, and every straight-head output keeps
+`i_bh` on: `08` alone would drop the bevel head too.
+
+**The clamps** [GMC]: for a board up to half
+the table's width (780 mm on the 601), GMC closes
+`i_pr` (`40`) alone; a wider board, and the connect, get both (`60`). **Cut Other End (COE)**
+switches the clamping side and moves the registration to the mirrored end of the table, so the
+operator can load one end while the machine cuts the other: GMC shifts the job by
+the table's width less the board's and clamps with `20`, where the usual end
+clamps with `40`. With the park at the right (high X), `40` is the left clamp and `20` the
+right, as the capture notes say: the `.gcf` names have them the other way round. Stage 3 still
+asks the operator. GMC calibrates COE as the size of the table: a test cut at each end, the far
+border checked to ±0.2 mm [HELP CA 4000]. COE needs a second registration in the machine profile
+and a choice of end per job; neither exists yet.
 
 What GMC writes [CAP g_init, g_motions, g_regular_mount]:
 - `02` neutral (`i_bh` only), at the end of every job.
 - `62` both clamps, at connect.
-- Bevel edge: `45` head down (`40` + `05`: `i_t` + `i_b`), then `40` head up (clamp only).
-  `05` is GMC's default bevel head-down [GMC].
-- Bevel oval: `41` head down (`40` + `01`: `i_t` without `i_b`) [CAP g_oval_mount]. Which code
-  path drops `i_b` for the curve is not traced.
+- Bevel edge: `45` head down (`40` + `05`: `i_t` + `i_b`), then `40`, the blade out with the
+  head still down, then `42`, the head up. On board up to `SafeTurn` (0.2 cm [GCF]) GMC hops between an opening's edges
+  after `40` alone and raises the head only at the end of the opening [GMC]. `05` is GMC's
+  default bevel head-down [GMC].
+- Bevel oval: `41` head down (`40` + `01`: `i_t` without `i_b`) [CAP g_oval_mount]. This is
+  GMC's **slow head-down** [GMC], which it uses instead of the usual one for a shape that
+  gets its overlap (a closed smooth curve, §7.1) unless it is an outer contour [GMC]; its other path tests that the cut
+  closes on itself, the first segment within 22.5° of the way back from the last point to the
+  first [GMC]. On the F1 it sets `i_t` and `i_b`; on the 601,
+  `i_t` alone. The name says why: on a rectangle the blade goes in at the overcut, outside the
+  edge that shows, but on a closed curve it goes in on that edge. GMC's Configuration Assistant
+  says how [HELP CA 4100 "Setting the Throttle"]: a throttle screw on the Z head "creates a
+  delayed blade entry into the matboard" for circles and small curves, so the blade "does not
+  leave any marks". It is set so that, on a circle cut without overcut, the blade's entry starts
+  between two marks along the curve: the blade comes down slowly while the carriage already
+  moves, and the circle overcut ("the amount of time that the blade head retraces the curved
+  opening", `CurveAddon`, §7.1) then cuts over the entry. So `i_t` alone lowers the blade
+  through the throttle, and `i_b` most likely bypasses it for the normal plunge.
 - Straight edge: `4A` head down (`40` + `0A`: `i_bh` + `i_sh`), then `42` head up.
 - Between jobs and tools: `42` (`i_bh` + `i_pr`); `22` (`i_bh` + `i_pl`) in the jog capture.
 
@@ -473,7 +505,7 @@ v_ref   = (AbsMaxSpeed / ScaleY) × 10        = (36000 / 400) × 10 = 900   mm/s
 | `_RampeCut` | 3600 | **250** | cutting (most tools) |
 | `_FastZRampe` | 8000 | **112** | short travel with a large blade rotation [GMC] |
 | `_RampeCut` | 420 | **700** (clamped) | deboss and pens (not in the captures) |
-| (thickness rule) | — | **470**, **700** | straight-head cuts on 2.7 and 4.1 mm board (§3.3) |
+| (thickness rule) | — | **470**, **700** | straight-head cuts on 2.7 and 4.6 mm board (§3.3) |
 | (diagonal rule) | — | **253** | a cut whose first segment is off the axis: the oval (§3.3) |
 
 These account for every `#R` in the captures except `#R300` at connect and `#R,100` before
@@ -500,10 +532,13 @@ heading = direction of travel, clockwise from +X (travel towards −Y = 90°)
 
 **The trim is deliberate yaw.** Every profile carries a straight-edge trim of 0–7° and a curve
 trim, 0° except C3's 1° (§8). So on every straight edge GMC runs the bevel blade 1–7° off its
-direction of travel, on purpose. What it corrects is not documented. The values follow the
-material, not the thickness (Arqadia back 7°, the 4.1 mm board 4°), which suggests a hand-tuned
-correction for how hard each board pushes the angled blade off line. Calibrating it is open
-(§10).
+direction of travel, on purpose. It corrects **hooked corners** [HELP CA 3800 "Hooked
+Corners"]: "All cuts should run absolutely straight. If at the beginning of a cut a hooked
+corner occurs, this can be corrected by using the straight degree correction." The angled blade
+steers off line as it enters, and the trim points it back. It is calibrated per mat profile with
+a test rectangle; on 1.3 mm board it should fall between 2° and 6°, or the Z axis needs aligning
+again; and "the Round Degree Correction should normally be set to 0°". The values follow the
+material, not the thickness (Arqadia back 7°, the 4.6 mm board 4°).
 
 **Which heading.** Each vector carries the heading of **the chord it cuts**, the line from the
 previous point to its own [GMC]. Along a
@@ -559,7 +594,7 @@ The captures [CAP g_multi_C10, g_multi_C11, g_multi_C12]:
 |-------|---------------------|-------------|
 | 1.5 mm (C10) | `#R250 #S1000` | `#R250 #S4000` |
 | 2.7 mm (C11) | `#R470 #S2232` | `#R250 #S4000` |
-| 4.1 mm (C12) | `#R700 #S400` | `#R250 #S4000` |
+| 4.6 mm (C12) | `#R700 #S400` | `#R250 #S4000` |
 
 **Bevel edges get no soft start at any thickness.** Each one jumps to 100 mm/s (or to the
 cutting speed) with the blade in the board, then accelerates at 3,600 mm/s²:
@@ -568,7 +603,7 @@ cutting speed) with the blade in the board, then accelerates at 3,600 mm/s²:
 |------------|-----------|-----------------------|
 | 1.5 mm at 95 % (855 mm/s) | 100 mm/s | ~100 mm (0.2 s) |
 | 2.7 mm at 35 % (315 mm/s) | 100 mm/s | ~12 mm |
-| 4.1 mm at 10 % (90 mm/s) | 90 mm/s | no ramp |
+| 4.6 mm at 10 % (90 mm/s) | 90 mm/s | no ramp |
 
 Operators see a wobble at the start of cuts on thick board that changes with the cutting speed.
 The profile's speed % is the only start setting that varies with thickness for the bevel, so
@@ -610,7 +645,8 @@ the head goes up at every corner, the blade turns, the head goes down again. GMC
      @M1  $A40 (bevel) or $A42 (straight)
 4. END OF JOB
    $A42                         head up, clamps held
-   @M0 #C1,0 #R225 #G20,36000  @M2 L20,X58860,Y7923,Z0     park; blade back to 0
+   @M0 #C1,0 #R225 #G20,36000  @M2 L20,X58860,Y7923,Z0     park (AutoPark 140 × 20 cm for the
+                                                             bevel blade [GCF]); blade back to 0
    @M1  $A02                    release
    idle: poll @I221 (start button)
 ```
@@ -625,6 +661,32 @@ loses the position and the machine must home again [SPEC1 p.14].
 **Feature order (from the captures):** every interior window is cut, each as a complete closed
 loop, **before** the outer boundary. The boundary frees the piece, so it must come last
 [CAP g_multi_*].
+
+**Travel.** GMC's cut order comes from fixed sort keys, not from travel [GMC]:
+- **Heads one after another,** by their configured priority, every cut of one head before
+  the next; V-groove first. The priorities are configuration; in the captures the bevel head
+  goes first.
+- **Openings (contours):** farthest first, by the distance from the origin to each contour's
+  bounding-box corner. A head with `ChildrenPreCut` cuts a contour lying inside another
+  before it. A closed curve is cut clockwise, or by face side on a `MatThicknessDependent`
+  head. Its start is the corner farthest from the origin, but only on the last contour of a
+  head; the others start at their first segment. The manual order only chooses which
+  entities are cut; it doesn't reorder them.
+- **Straight lines (the border):** collinear lines that overlap or touch are merged, so a shared
+  edge is cut once. Then they are sorted by their distance from the axes, descending, with
+  the topmost horizontal first, and every line is turned to run +X/+Y (direction setting 3,
+  which GMC sets for the straight head on machines without a vacuum table).
+- **No travel minimisation,** except in vacuum-table mode, which picks lines and contours
+  nearest-first. Nothing in the ordering refers to the clamp.
+
+So within a window the edges follow round (travel of a few millimetres), but the second window
+starts at a fixed corner, and after each border edge the head travels back across the board.
+On `g_multi_C10` that is 1.53 m of head-up travel between cuts for 2.54 m of cutting, plus
+1.46 m back to the park at (1471.5, 198.1) [CAP g_multi_C10]. The same cuts in the order the
+route optimiser (`crates/route`) chooses travel 0.32 m between cuts: each window entered at its
+nearest corner and the border cut as one loop, still finishing on the clamp-side edge
+GMC's own optimiser lays out sheets (nesting, with "filler" pieces and a rotation switch); it
+doesn't order cuts.
 
 ### 4.1 Connect and homing (the `g_init` timeline, 66 s)
 
@@ -802,7 +864,7 @@ the cut to run further past each corner.
 |---------|-----------|---------------|--------------------|
 | C10 | 1.5 mm | 10776 → 2616 | 8160 |
 | C11 | 2.7 mm | 10824 → 2568 | 8256 |
-| C12 | 4.1 mm | 10900 → 2492 | 8408 |
+| C12 | 4.6 mm | 10900 → 2492 | 8408 |
 
 The cut grows by the same amount at both ends, which matches
 `Heads[Bevelled].MatThicknessDependent = true` [GCF]. The blade angle Z changes too (774 → 783),
@@ -920,7 +982,7 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Does it boot with GMC's connect configuration, or must the driver write it (`C2`, `C5`, `C11`–`C14`, `C16`, `C35`, `#ZZ`, `#NZ`, `#M`)? | must write | probe ("box vs GMC at connect") |
 | Boot values of the registers GMC never writes: `C4`, `C6`, `C7`, `C8`, `C19`, `&D` homing directions | — | probe |
 | Do the v1.00 queries exist on firmware 2.00 (`@N`, `@O`, `@Y`, `@Q242`–`@Q249`)? | yes | probe |
-| Which clamp each of bits `20` and `40` closes | `.gcf` names | stage 3 (operator answers) |
+| Which clamp each of bits `20` and `40` closes | `40` left, `20` right, from GMC's clamp logic (§2.5) | stage 3 (operator answers) |
 | Do outputs survive a mode switch? | yes (captures) | stage 3 (`@Q249` across `@M`) |
 | Does `@B` in mode 2 discard the rest of the path, or resume it? | discard | stages 4 and 6 |
 | Compact follow-on vectors on 2.00; after `G`, `A`, `W`? | accepted | stage 5 |
@@ -937,10 +999,10 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Limit fault: async `*03x`, `@Y` bit, recovery | spec | stage 7 (only if a limit input is mapped) |
 | Fault attribution in modes 0 and 1 (§2.6): treat `*032`–`*039`, `*040`, `*068` always as events? What do `*056` and `*062` answer? | `*NNN` answers a non-query | stage 7 and real jobs |
 | No `0x01` after mode-2 paths? | none (captures) | any session log |
-| A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the runner splits corners until then | a stage-5 check, not yet written |
+| A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the machine model splits a cut at its corners until then (head up, turn, head down) | a stage-5 check, not yet written |
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
-| Why the oval's head-down is `41`, not `05` | — | test cuts |
-| What the blade trim corrects, and the right value per material on this machine and blade | GMC's per-profile trims (§8) | trim test cuts |
+| Does `i_b` bypass the Z head's throttle (§2.5: `01` is the throttled, delayed blade entry for curves)? | yes | stage 3, switching each with the operator watching |
+| The right trim per material on this machine and blade (it corrects hooked corners, §3.2) | GMC's per-profile trims (§8) | GMC's procedure: a test rectangle per profile, the corners checked [HELP CA 3800] |
 | The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: `#S4000` against `#S400`, with and without a slow lead-in, trim 0 against the profile's |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
@@ -958,8 +1020,10 @@ A Rust workspace in `crates/`, layered so each layer can be tested without the o
 | `link` | Bytes to the controller: a serial port, an in-memory pair (optionally paced at a line rate), and a tap that logs every byte with a timestamp. Reader and writer are separate halves. |
 | `controller` | A session with the controller. `HostCore` is a pure state machine (bytes in, outputs and deadlines out) that decides what is a reply, tracks sync, mode, flow control and the stop latch. A driver runs it with a reader thread and two locks, writer before state. `Controller<M>` only offers the commands mode `M` accepts; `StopHandle` brakes from any thread. |
 | `sim` | `SimCore` speaks the whole protocol GMC uses; `spawn` runs it behind a link paced at the line rate, with fault injection. Every GMC capture and every session log in `testdata/sessions/` is replayed against it (`crates/sim/tests/fidelity.rs`). |
-| `machine` | The safe layer in mm and degrees: cuts as units, soft limits, head never down while travelling. Design notes written, code to come. |
-| `program`, `runner` | The program format (`PROGRAM_FORMAT.md`) and its execution. `runner` is to come. |
+| `program` | The program format (`PROGRAM_FORMAT.md`): types, parsing, validation. |
+| `machine` | The machine model, pure: the machine profile, board frame mm/deg → steps, each cut lowered to controller commands as one unit (head down only inside a cut), soft limits, the byte budget, the run time. Written: the profile, the mapping, the lowering in GMC's form (held to the captures by golden tests, `crates/machine/tests/golden.rs`) and in one stream per cut (each part a capability, off until `gunnar check` shows it), and the run-time and line-budget estimate. |
+| `runner` | Drives the cutter on a controller session: homed state, programs and manual operations, pause at the end of a cut, stop now, the safe end state on every exit. Design notes written, code to come. |
+| `route`, `nest`, `solvers` | The cut order and the nesting, and both as one WebAssembly module for the browser. |
 | `gunnar` | The command line: `ports`, `capture`, `probe`, `check`. |
 
 What the session layer guarantees, and why:
@@ -984,8 +1048,9 @@ What the session layer guarantees, and why:
 ```
 SVG/DXF in  →  layers → tools (bevel / straight / score, by the cut-type convention)
             →  offset for bevel and kerf; overcut per §7
-            →  nest (PackingSolver, rectangle guillotine — validated winner)
-            →  sequence: interiors before the boundary; batch tools by priority
+            →  nest (crates/nest: three-stage guillotine, after PackingSolver's tree search)
+            →  sequence: interiors before the boundary, then the order and each cut's way round
+               that travel least (crates/route)
             →  flatten curves by chord tolerance (0.02 mm, turn ≤ 2° per point; PROGRAM_FORMAT §4.2)
             →  closed smooth cuts: overlap past the start, run-out toward the waste (§7.1)
             →  blade angle: the curve's tangent at smooth points; stop and turn at corners (§3.2)

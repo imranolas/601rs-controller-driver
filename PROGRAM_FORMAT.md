@@ -4,6 +4,11 @@ A **program** is one complete, compiled machine run for one board: everything th
 between "board loaded" and "board released". Designers and the order queue **produce** programs.
 The runner **executes** them. A program is the only contract between the two.
 
+In this document *the runner* is everything that executes a program. In the code that is two
+crates: `machine`, the machine model, converts (units, head offsets, blade angles, each cut
+lowered to controller commands, limits, byte budget), and `runner` drives (the session, homing,
+the order of things, pausing, stopping, the safe end state, progress).
+
 ```
 Order ──▶ Design ──(compiler)──▶ PROGRAM ──(runner + machine profile)──▶ wire bytes ──▶ controller
                                     ▲
@@ -28,7 +33,8 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 4. **Data, not code.** Plain JSON: no loops, no variables, no expressions. Any language can read
    and write it, and a program can be diffed, stored and previewed.
 5. **The runner owns everything around the program.** Homing, controller configuration, the safe
-   end state and abort handling all belong to the runner. The program only says what to cut.
+   end state and abort handling all belong to the runner (the `runner` crate). The program only
+   says what to cut.
 
 ---
 
@@ -39,7 +45,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
   All coordinates are in **mm**, as JSON numbers, to 0.001 mm. Blade angles come from the
   directions between points (§4.2), and on the short segments of a tight curve, coordinates
   rounded to 0.01 mm would make those directions wander by a degree or more.
-- The runner maps board frame → machine steps using the machine profile (§8): board origin
+- The machine model maps board frame → machine steps using the machine profile (§8): board origin
   offset, the selected head's offset (bevel −71.5 / straight +6.2 mm in X), and the scales
   (40 steps/mm, 8.333 steps/°).
 - **Angles** are in degrees. Field names carry their unit as a suffix: `_mm`, `_deg`, `_pct`, `_ms`.
@@ -74,7 +80,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 | `material` | yes | Defaults for every cut. Values come from the material library (today: the `.gcf` profiles C1–C16). |
 | `material.speed_pct` | yes | Cutting speed as % of the machine maximum (1–100). |
 | `material.head_settle_ms` | yes | Wait after a head goes down or up (`.gcf` `HeadUpDown`). |
-| `material.blade_angle_offset_deg` | no | Per-head blade angle trim, default 0. GMC gives the bevel head the material's `ZCorrection_Straight` (3° on C10) and the straight head its own setting (0). On closed curves GMC gives the bevel `ZCorrection_Round` instead (0 on C10), which v1 can't express yet (§9 Q8). |
+| `material.blade_angle_offset_deg` | no | Per-head blade angle trim, default 0. GMC gives the bevel head the material's `ZCorrection_Straight` (3° on C10) and the straight head its own setting (0). On closed curves GMC gives the bevel `ZCorrection_Round` instead (0 on C10): `bevel_round`, optional, the bevel trim if absent. A closed curve is a cut with no corners that turns through a full loop (its overlap takes it past 360°). |
 | `ops` | yes | The operations. |
 
 ---
@@ -199,12 +205,12 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 
 ## 5. What the runner adds (not in the program)
 
-| Phase | Runner behaviour |
-|-------|------------------|
-| Before | Check validation (§6) and soft limits against the profile's envelope. Require the machine to be homed (offer to home if not). Push controller configuration (`#C…`, I/O mapping). Require the operator to confirm that the board is loaded. |
-| During | Lower the program to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, a softer start on thick board (protocol reference §3.3), blade angles by the rules in §4.2 and unwrapped (the rotary axis keeps counting past 360° along a cut, as in the captures), streaming and flow control, `@X` waits. Report progress per op `id`/`label`. |
-| After (normal) | Raise the head, release the clamps (`$A02`), park, and report the run as complete. |
-| Abort / error | `@B` brake, head up, release the clamps, then report *which op failed and why* in plain language. A run is never resumed silently in the middle of an op. |
+| Phase | `machine` (converts, no state) | `runner` (drives) |
+|-------|------------------|------------------|
+| Before | Soft limits against the profile's envelope (V10); the byte budget of every cut; the estimated run time. | Check validation (§6), with the machine model for V10. Require the machine to be homed (offer to home if not). Push controller configuration (`#C…`, I/O mapping). Require the operator to confirm that the board is loaded. |
+| During | Lower each op to wire commands: head offsets, step scaling, `#R`/`#G20` from the laws, `#C1` dead time, a softer start on thick board (protocol reference §3.3), blade angles by the rules in §4.2 and unwrapped (the rotary axis keeps counting past 360° along a cut, as in the captures). | Send them: streaming and flow control, `@X` waits. Pause at the end of the current cut. Report progress per op `id`/`label`. |
+| After (normal) | | Raise the head, release the clamps (`$A02`), park, and report the run as complete. |
+| Abort / error | | `@B` brake, head up, release the clamps, then report *which op failed and why* in plain language. A run is never resumed silently in the middle of an op. |
 
 ---
 
@@ -221,7 +227,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | V7 | Within a `cut`, the direction change between consecutive segments is ≤ the break angle (15°, from the profile). |
 | V8 | `ids`, when present, are unique within the program. |
 | V9 | The `pause` `resume` value is known. |
-| V10 *(runner)* | Every machine coordinate, after the profile mapping, is inside the machine's soft-limit envelope. |
+| V10 *(machine model)* | Every machine coordinate, after the profile mapping, is inside the machine's soft-limit envelope. |
 
 V1–V9 need no machine profile, so the designer can check them while editing. V10 needs the profile.
 
@@ -306,14 +312,14 @@ Keeping this separate is what makes programs portable across recalibrations and 
 
 | # | Question | Settled by |
 |---|----------|-----------|
-| Q1 | Board registration and Y direction (board frame → machine steps) | Golden test against `g_regular_mount`, then the first hardware session |
+| Q1 | Board registration and Y direction (board frame → machine steps) | GMC's placement is settled by the golden tests (`crates/machine/tests/golden.rs`): the board's corner at machine (21.225, 20.725) mm, its straight edges at X 601–602, Y 761–762 steps, +Y as +Y. Which machine stop that is, and the physical Y direction: the first hardware session |
 | Q2 | Bevel-side convention: left or right of travel? Does GMC cut openings clockwise? | Path direction in `g_regular_mount` / `g_multi_*` |
 | Q3 | Where exactly GMC applies the Front/Back Begin/End overcut trims | Test cuts, one trim at a time |
 | ~~Q4~~ | Blade-angle formula | **Settled.** In machine steps, Z = 8.333 × (direction of travel, clockwise from +X − head's `blade_mount_deg` + trim), truncated toward zero. Checked against `g_regular_mount`: a bevel edge travelling −Y gives (90 + 3) → 774; a straight edge travelling +X gives (0 − 180 + 0) → −1499 (protocol reference §3.2) |
 | Q5 | Does a run wait for the start button before cutting (GMC polls I221)? Per program or per queue item? | Product decision |
 | Q6 | Does `pause` with clamps engaged work for flipping, or do flips need `clamp none` first? | Product + hardware |
-| Q7 | Corners: does a turn-only vector inside a stream stop the carriage and turn the blade at a safe speed? GMC only sends one on its own (`L20,z…`), never mid-path. Until the machine confirms it, the runner splits a corner into two strokes (head up, turn, head down) | Hardware check, to add to `gunnar check` stage 5 |
-| Q8 | A separate blade trim for closed curves, as GMC has (`ZCorrection_Round`)? | Format decision |
+| Q7 | Corners: does a turn-only vector inside a stream stop the carriage and turn the blade at a safe speed? GMC only sends one on its own (`L20,z…`), never mid-path. Until the machine confirms it, the machine model splits a corner into two strokes (head up, turn, head down) | Hardware check, to add to `gunnar check` stage 5 |
+| ~~Q8~~ | A separate blade trim for closed curves, as GMC has (`ZCorrection_Round`)? | **Settled:** `material.blade_angle_offset_deg.bevel_round` (§3), optional, so v1 stays v1 |
 | Q9 | Do the 2° turn limit, the blade-angle rule and GMC's overlap and run-out values cut clean on this machine? | Test cuts |
 
 ---

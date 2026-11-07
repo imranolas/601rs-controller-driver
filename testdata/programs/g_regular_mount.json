@@ -1,0 +1,140 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "g_regular_mount",
+  "meta": {
+    "source": "the cuts GMC made in testdata/captures/g_regular_mount.txt, in board mm (crates/machine/tests/golden.rs)"
+  },
+  "board": {
+    "width_mm": 200.0,
+    "height_mm": 310.0,
+    "thickness_mm": 1.5
+  },
+  "material": {
+    "name": "MSK_1.5",
+    "speed_pct": 95.0,
+    "head_settle_ms": 250,
+    "blade_angle_offset_deg": {
+      "straight": 0.0,
+      "bevel": 3.0
+    }
+  },
+  "ops": [
+    {
+      "op": "clamp",
+      "side": "left"
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          149.65,
+          250.55
+        ],
+        [
+          149.65,
+          46.55
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          150.05,
+          50.35
+        ],
+        [
+          46.05,
+          50.35
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          49.85,
+          49.95
+        ],
+        [
+          49.85,
+          253.95
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          49.45,
+          250.15
+        ],
+        [
+          153.45,
+          250.15
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.25,
+          310.0
+        ],
+        [
+          202.05,
+          310.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          200.0,
+          0.75
+        ],
+        [
+          200.0,
+          312.55
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.25,
+          0.0
+        ],
+        [
+          202.05,
+          0.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.0,
+          0.75
+        ],
+        [
+          0.0,
+          312.55
+        ]
+      ]
+    }
+  ]
+}

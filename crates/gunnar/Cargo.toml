@@ -11,6 +11,7 @@ publish.workspace = true
 link.workspace = true
 protocol.workspace = true
 controller.workspace = true
+machine.workspace = true
 sim.workspace = true
 ctrlc.workspace = true
 

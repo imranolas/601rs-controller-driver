@@ -3,7 +3,7 @@
 //! Parsing rejects structurally invalid programs (unknown fields, unknown ops, bad enums).
 //! The semantic rules (V4 segment length, V5 within board, V7 break angle, V8 unique ids)
 //! will live in `validate`, which is still to come; V10 (machine envelope) needs a
-//! machine profile and belongs to the runner.
+//! machine profile and belongs to the machine model (`machine::lower` checks it).
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,9 @@ pub struct BladeOffsets {
     pub straight: f64,
     #[serde(default)]
     pub bevel: f64,
+    /// The bevel head's trim on closed curves (GMC's `ZCorrection_Round`); `bevel` if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bevel_round: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

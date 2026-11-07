@@ -79,6 +79,9 @@
             },
             "bevel": {
               "type": "number"
+            },
+            "bevel_round": {
+              "type": "number"
             }
           }
         }

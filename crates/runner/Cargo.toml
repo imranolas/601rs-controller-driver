@@ -1,6 +1,6 @@
 [package]
 name = "runner"
-description = "Executes a validated program on the machine; pause, stop-now, progress events."
+description = "Drives the cutter: session, homing, programs and manual operations; pause, stop now, safe end state."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 machine.workspace = true
+controller.workspace = true
 program.workspace = true
 
 [lints]

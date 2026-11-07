@@ -165,6 +165,10 @@ pub struct SimCore {
     /// When the machine last became free (end of the previous motion), so queued motions
     /// chain back-to-back however coarse the ticks are.
     free_at: SimTime,
+    /// The last path vector: when it ends, its XY direction, its speed entry. The next one
+    /// carries on without a new ramp if it starts then, turning no more than the entry's
+    /// braking angle: the controller's look-ahead [SPEC1 p.8].
+    last_path: Option<(SimTime, [f64; 2], u8)>,
     flow_paused: bool,
     /// The green button is held down until this time (a press lasts [`BUTTON_HOLD`]).
     button_release_at: Option<SimTime>,
@@ -265,6 +269,7 @@ impl SimCore {
             command_counter: 0,
             last_host: Duration::ZERO,
             free_at: Duration::ZERO,
+            last_path: None,
             flow_paused: false,
             button_release_at: None,
             limit_hit: None,
@@ -1007,6 +1012,20 @@ impl SimCore {
     // ------------------------------------------------------------------ time
 
     fn start_motion(&mut self, from: [i64; 3], to: [i64; 3], speed: u8, kind: Kind, now: SimTime) {
+        self.last_path = None;
+        self.start_motion_from(from, to, speed, kind, now, true);
+    }
+
+    /// Start a motion; `from_rest`: it ramps up first (it doesn't carry on from the last one).
+    fn start_motion_from(
+        &mut self,
+        from: [i64; 3],
+        to: [i64; 3],
+        speed: u8,
+        kind: Kind,
+        now: SimTime,
+        from_rest: bool,
+    ) {
         // A jog of ≥ 999999 is "run until stopped" [SPEC p.30; CAP g_motions `$L20,x-999999`].
         // Even with instant motion it must keep running until braked.
         let endless = kind == Kind::Jog && (0..3).any(|a| (to[a] - from[a]).abs() >= ENDLESS_JOG);
@@ -1026,7 +1045,7 @@ impl SimCore {
         let duration = if endless && self.cfg.instant_motion {
             Duration::from_secs(3600)
         } else {
-            self.move_duration(from, to, speed)
+            self.move_duration(from, to, speed, from_rest)
         };
         self.motion = Some(Motion {
             from,
@@ -1038,7 +1057,7 @@ impl SimCore {
         });
     }
 
-    fn move_duration(&self, from: [i64; 3], to: [i64; 3], speed: u8) -> Duration {
+    fn move_duration(&self, from: [i64; 3], to: [i64; 3], speed: u8, from_rest: bool) -> Duration {
         if self.cfg.instant_motion {
             return Duration::ZERO;
         }
@@ -1059,7 +1078,23 @@ impl SimCore {
         } else {
             100
         }) / 100.0;
-        Duration::from_secs_f64(distance / speed) + Duration::from_millis(u64::from(self.ramp_ms))
+        if !from_rest || self.ramp_ms == 0 {
+            return Duration::from_secs_f64(distance / speed);
+        }
+        // From rest to rest: accelerate at #M per #R ms [SPEC1 p.8, p.19], cruise, brake. With
+        // no #M yet, the ramp reaches this move's own speed.
+        let top = if self.max_speed > 0 {
+            f64::from(self.max_speed)
+        } else {
+            speed
+        };
+        let accel = top / (f64::from(self.ramp_ms) / 1000.0);
+        let secs = if distance < speed * speed / accel {
+            2.0 * (distance / accel).sqrt()
+        } else {
+            distance / speed + speed / accel
+        };
+        Duration::from_secs_f64(secs)
     }
 
     /// Advance the model to `now`. Returns bytes the controller sends on its own (signals,
@@ -1179,7 +1214,31 @@ impl SimCore {
                             Item::WaitInput { .. } | Item::Override(_) => {}
                             Item::Vector { target, speed } => {
                                 let from = self.pos;
-                                self.start_motion(from, target, speed, Kind::Path, start_at);
+                                let dir = direction(from, target);
+                                let carries_on = match (self.last_path, dir) {
+                                    (Some((end, last, entry)), Some(dir)) => {
+                                        end == start_at && entry == speed && {
+                                            let cos = (last[0] * dir[0] + last[1] * dir[1])
+                                                .clamp(-1.0, 1.0);
+                                            let limit =
+                                                self.brake_angles.get(&speed).copied().unwrap_or(0);
+                                            cos.acos().to_degrees() <= f64::from(limit)
+                                        }
+                                    }
+                                    _ => false,
+                                };
+                                self.start_motion_from(
+                                    from,
+                                    target,
+                                    speed,
+                                    Kind::Path,
+                                    start_at,
+                                    !carries_on,
+                                );
+                                self.last_path = match (&self.motion, dir) {
+                                    (Some(m), Some(dir)) => Some((m.end, dir, speed)),
+                                    _ => None,
+                                };
                             }
                             Item::Outputs(bits) => self.outputs = bits,
                             Item::Dwell(d) => {
@@ -1246,6 +1305,13 @@ fn protocol_limit_bit(code: u16) -> Option<u32> {
     let axis = u32::from(k / 2);
     let plus = k % 2 == 1;
     Some(axis * 2 + if plus { 0 } else { 1 })
+}
+
+/// The XY direction of a move, as a unit vector; `None` if it doesn't move in XY.
+fn direction(from: [i64; 3], to: [i64; 3]) -> Option<[f64; 2]> {
+    let (dx, dy) = ((to[0] - from[0]) as f64, (to[1] - from[1]) as f64);
+    let len = dx.hypot(dy);
+    (len > 0.0).then(|| [dx / len, dy / len])
 }
 
 #[cfg(test)]

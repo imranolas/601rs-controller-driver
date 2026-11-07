@@ -1,0 +1,196 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "g_multi_Cx_20",
+  "meta": {
+    "source": "the cuts GMC made in testdata/captures/g_multi_Cx_20.txt, in board mm (crates/machine/tests/golden.rs)"
+  },
+  "board": {
+    "width_mm": 350.0,
+    "height_mm": 300.0,
+    "thickness_mm": 1.5
+  },
+  "material": {
+    "name": "MSK_1.5",
+    "speed_pct": 20.0,
+    "head_settle_ms": 250,
+    "blade_angle_offset_deg": {
+      "straight": 0.0,
+      "bevel": 3.0
+    }
+  },
+  "ops": [
+    {
+      "op": "clamp",
+      "side": "left"
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          299.675,
+          250.575
+        ],
+        [
+          299.675,
+          46.575
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          300.075,
+          50.375
+        ],
+        [
+          196.075,
+          50.375
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.875,
+          49.975
+        ],
+        [
+          199.875,
+          253.975
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.475,
+          250.175
+        ],
+        [
+          303.475,
+          250.175
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          49.475,
+          250.175
+        ],
+        [
+          153.45,
+          250.175
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          149.675,
+          250.575
+        ],
+        [
+          149.675,
+          46.575
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          150.075,
+          50.375
+        ],
+        [
+          46.075,
+          50.375
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          49.875,
+          49.975
+        ],
+        [
+          49.875,
+          253.975
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.25,
+          300.025
+        ],
+        [
+          352.075,
+          300.025
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          350.025,
+          0.775
+        ],
+        [
+          350.025,
+          302.55
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.25,
+          0.025
+        ],
+        [
+          352.075,
+          0.025
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "straight",
+      "path_mm": [
+        [
+          0.025,
+          0.775
+        ],
+        [
+          0.025,
+          302.55
+        ]
+      ]
+    }
+  ]
+}

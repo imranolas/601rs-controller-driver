@@ -1,63 +1,48 @@
-//! The **safe** layer: machine operations in millimetres and degrees.
+//! The **machine model**: how a program's cuts become controller commands on this machine, and
+//! whether they can. Pure: no session, no clock, no I/O, so the compiler, the browser's cut
+//! preview and the golden tests use it just as the runner does.
 //!
-//! Safety depends on sequence and state, so this layer is a state machine, not a filter.
-//! Invariants it owns (to implement):
-//! - No motion before homing; homed state tracked from `@X` flag 4.
-//! - **No travel with a head down.** A cut is a single unit: travel head-up → orient blade →
-//!   head down → stroke → head up. There is no public "head down" operation.
-//! - Soft limits: every target is checked against the machine envelope before sending.
-//! - Units: board frame mm/deg → steps via the machine profile (scale, head offsets,
-//!   board origin); blade angle unwrapping for the rotary Z axis.
-//! - Ramp/speed laws: `#R = min(700, 900000 / accel)`, `#G20 = 360 × speed%`.
-//! - Pause at the end of the current cut; stop-now via the controller's stop lane;
-//!   defined safe end state (head up, clamps released) on every exit path.
+//! - [`Profile`] ([`Profile::gunnar_601`]): the machine's facts, readable as JSON.
+//! - [`frame`]: board millimetres to steps for each head, and the blade's direction.
+//! - [`lower`]: a program as the steps that run it, in GMC's form or one stream per cut.
+//! - [`estimate`]: its run time, and how much of the serial line each path needs.
 //!
-//! Depends on `controller`; knows nothing about the program file format.
+//! The tests hold it to GMC's own jobs (`tests/golden.rs`: every motion of ten captured jobs,
+//! straight edges and the oval), run its jobs on the simulator in both forms
+//! (`tests/simulated.rs`), and check the estimate against GMC's run times (`tests/estimate.rs`).
 //!
-//! # Who does what: the host or the controller
+//! What it owns:
+//! - **The machine profile** (PROGRAM_FORMAT §8): scales (40 steps/mm, 8.333 steps/°), the board
+//!   origin, each head's offset (bevel −71.5, straight +6.2 mm in X), the soft-limit envelope,
+//!   the park position, speeds and accelerations, and the head and clamp output bits. The one
+//!   source of machine facts for every crate: `gunnar`'s checks, the simulator's settings, the
+//!   compiler's travel model and park.
+//! - **Units:** board frame mm/deg → steps for the selected head; blade angles by the rules in
+//!   PROGRAM_FORMAT §4.2 and protocol reference §3.2, unwrapped so the rotary axis keeps counting
+//!   past 360° along a cut.
+//! - **A cut as a unit.** A program cut lowers to one sequence: travel head-up, orient the blade,
+//!   head down, settle, stroke, head up. Nothing else lowers to head down, so nothing this crate
+//!   produces can travel with a blade in the board. That is safety by construction; the runner
+//!   adds safety by sequence.
+//! - **The job's settings:** the ramp and speed laws (`#R = min(700, 900000 / accel)`,
+//!   `#G20 = 360 × speed%`), the speed entries, the start speed by thickness (below).
+//! - **Checks before a run**, none of which needs the machine: every coordinate inside the
+//!   envelope after the head offsets (PROGRAM_FORMAT V10), every cut within the serial line's
+//!   byte budget, and the estimated run time. The cut preview shows the same.
 //!
-//! Give each job to whoever owns its timing or its information.
+//! A cut lowers to one of two forms:
+//! - **GMC's,** proven by the captures on this firmware: settings in mode 0, head down and up
+//!   with `$A` in mode 1, the path in mode 2, `@X` polled until idle ([`lower`]). The golden
+//!   tests (`tests/golden.rs`) hold it to GMC's own jobs: every motion of the `g_multi`
+//!   captures (three boards, five speeds) and `g_regular_mount` runs with the same vectors and
+//!   the same controller settings and outputs, with two deliberate differences, both described
+//!   there. That also fixes where GMC places the board ([`Profile::board_origin_mm`]). The oval
+//!   comes with curves.
+//! - **One stream per cut,** the controller timing the head, the settle and the start (the
+//!   runner's "Who does what"). It needs firmware 2.00 to honour the v1.00 spec, so each part
+//!   is a capability in the profile, switched on once `gunnar check` has shown it on the box.
 //!
-//! **The controller** owns timing relative to motion, and facts only it has. Handing it these
-//! jobs replaces GMC's choreography of mode switches and round trips (1,694 mode switches for
-//! 1,334 vectors in its captures) with one stream per cut, timed exactly, with the look-ahead
-//! intact. Each needs firmware 2.00 to honour what the v1.00 spec says; `gunnar check` stages
-//! 2, 5 and 6 test them, except `G` in the stream, which no stage covers yet.
-//!
-//! | Job | On the controller | What GMC does instead |
-//! |---|---|---|
-//! | Let the head settle before cutting | `W<ms>` in the stream (`head_settle_ms`) | the `#C1` dead time (100/200 ms), set in mode 0 before each cut |
-//! | Head down and up, clamps | `A<hh>` in the stream, in order with the vectors | `$A` in mode 1 between moves |
-//! | Wait for the green button (a `Pause` op) | `I221` in the stream | polls `@I221` |
-//! | Start a positioning move at once | `C1` before the vector | `@M0`, `#C1,0`, `@M2` |
-//! | Feed per segment | `G<entry>,<v>` in the stream | `@M0`, `#G20,…`, `@M2` per feature |
-//! | Progress through a cut | the `@N` command counter | nothing |
-//! | Not overrunning its buffer | `#C7,1`: it sends 0x03 when almost full, 0x02 when there is room | sends whole contours and relies on them fitting |
-//! | Stopping when the host dies | `#C19` host watchdog | nothing |
-//! | Reporting the green button | `#C35,1`: 0x06 pressed, 0x07 released | enables it, but also polls `@I221` |
-//!
-//! **The host** owns the decisions: what to cut and in what order, soft limits, units and
-//! board geometry, pairing replies with commands and recovering from doubt, and stopping.
-//!
-//! **Not earned yet:**
-//! - Switching the speed override on and off in the stream (`C8`/`C16`): only if the UI gets
-//!   a speed knob.
-//! - The `#C8` heartbeat: idle `@X` polling already shows the controller is alive.
-//! - Pacing the stream by asking `@H` (`controller::Config::stream_window_bytes`): the host
-//!   doing what `#C7` lets the controller do. Worth it only if the controller's 0x03 warning
-//!   reaches the host too late over the real link, which `gunnar check` stage 6 shows. Keep one
-//!   of the two, not both.
-//!
-//! # Consequences of handing work to the controller
-//!
-//! - **A brake discards what is queued, safe state included.** Head-up queued as `A02` behind
-//!   a cut is thrown away with the cut, so the stop path restores the safe state itself:
-//!   brake, `clear_stop`, head up, clamps released. (That `@B` discards the queue is what
-//!   `gunnar check` stages 4 and 6 confirm on the machine.)
-//! - **Stream one cut at a time.** Whatever has been streamed runs unless braked, so the unit
-//!   of streaming is the unit of safety: travel head-up, orient the blade, head down, settle,
-//!   stroke, head up. The look-ahead works within a cut and the host decides between cuts,
-//!   which is what makes "pause at the end of the current cut" possible.
+//! Depends on `protocol` (the commands) and `program` (the cuts), not on `controller`.
 //!
 //! # Keeping up with the cut
 //!
@@ -72,7 +57,7 @@
 //!   within 0.02 mm of the true curve (under one 0.025 mm motor step), and turn at most 2° per
 //!   point, because the blade turns during each vector (PROGRAM_FORMAT §4.2). GMC's oval drops
 //!   from 1,107 to 425 vectors.
-//! - **Stream paths compactly** with `Controller::path`: one absolute vector, then relative
+//! - **Stream paths compactly** with `protocol::Command::path`: one absolute vector, then relative
 //!   steps without the `L20,` prefix, unchanged axes left out. That halves the bytes per vector
 //!   and stays exact. With the flattening above, GMC's oval needs 43% of the line.
 //!
@@ -108,21 +93,18 @@
 //!   cut without a mode switch (to confirm with the test cuts).
 //! - Which of these the wobble needs, and whether the blade trim plays a part, is for test cuts
 //!   on thick board (protocol reference §10).
-//!
-//! # Streaming just in time
-//!
-//! Send cut N+1 when `@N` reaches cut N's last command. The queue never empties, so cuts follow
-//! each other without a gap, and a pause requested before that point still stops after cut N.
-//! Keep a running count instead of resetting `@N` per cut, since the next cut is queued while
-//! the previous one runs. Stage 5 settles what the counter means on firmware 2.00: which
-//! commands it counts, whether it numbers the command being executed or those finished, and
-//! whether it wraps after 9999.
-//!
-//! # Faults during a cut
-//!
-//! An unprompted fault during a cut (`*022` buffer overrun, a limit switch, `*068` from the host
-//! watchdog) stops the cut at once: brake, `clear_stop`, head up, clamps released, and report
-//! which cut failed and why. Never retry. Mode 2 has no per-command replies, so the host cannot
-//! tell which streamed command was refused or lost, and the controller may already have cut
-//! past the gap. With the byte budget and flow control, `*022` cannot happen; if it does, the
-//! pacing has a bug.
+
+mod estimate;
+pub mod frame;
+mod lower;
+mod profile;
+
+pub use estimate::{Estimate, Host, OpEstimate, estimate};
+pub use lower::{ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower};
+pub use profile::{
+    Accel, Capabilities, Clamps, DeadTime, Envelope, Head, Line, Profile, RadiusSlowdown, Scale,
+    SoftStart,
+};
+
+#[cfg(test)]
+mod tests;

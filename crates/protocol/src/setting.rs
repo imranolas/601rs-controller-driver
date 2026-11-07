@@ -70,6 +70,41 @@ impl WatchdogMs {
     }
 }
 
+/// The radius slowdown registers `#C20`–`#C28` [SPEC1 p.9, p.26–27; protocol reference
+/// §2.4.1]: how the controller slows down on tight curves in mode 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Radius {
+    /// `#C20`: RADMIN, the radius (steps) at which the carriage runs at the start speed `#S`.
+    Min,
+    /// `#C21`: RADMAX, the radius (steps) from which it runs at full speed.
+    Max,
+    /// `#C24`: a new speed differing by less than this (%) is ignored.
+    LowerPct,
+    /// `#C25`: a new speed differing by more than this (%) applies at once.
+    UpperPct,
+    /// `#C26`: how often a faster speed must recur before it applies.
+    FasterCount,
+    /// `#C27`: how often a slower speed must recur before it applies.
+    SlowerCount,
+    /// `#C28`: steepness of the slowdown below RADMIN.
+    Steepness,
+}
+
+impl Radius {
+    /// The register number.
+    pub const fn register(self) -> u8 {
+        match self {
+            Self::Min => 20,
+            Self::Max => 21,
+            Self::LowerPct => 24,
+            Self::UpperPct => 25,
+            Self::FasterCount => 26,
+            Self::SlowerCount => 27,
+            Self::Steepness => 28,
+        }
+    }
+}
+
 /// A setting with its value: one mode-0 `#…` command. Read one back with
 /// [`Setting::from_reply`]; [`Setting::key`] says which it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,6 +136,14 @@ pub enum Setting {
     Speed { entry: u8, value: u32 },
     /// `#R<ms>`: maximum ramp time [CAP].
     RampMs(u16),
+    /// `#S<v>`: start/stop speed (steps/s with `#C11,0`): motors start at it without a ramp
+    /// [SPEC1 p.8, p.19; CAP].
+    StartSpeed(u32),
+    /// `#B<entry>,<degrees>`: braking angle of a speed-table entry, 0–90°: a sharper direction
+    /// change brakes to a stop [SPEC1 p.19; CAP `#B20,90`].
+    BrakeAngle { entry: u8, degrees: u8 },
+    /// `#C20`–`#C28`: the radius slowdown [CAP].
+    Radius(Radius, u32),
     /// `#O<a>,<value>`: offset driven after homing (steps with `#C11,0`) [SPEC1 p.20; CAP g_init].
     HomeOffset { axis: Axis, value: i32 },
 }
@@ -118,6 +161,9 @@ pub enum SettingKey {
     SignalAcks,
     Speed(u8),
     Ramp,
+    StartSpeed,
+    BrakeAngle(u8),
+    Radius(Radius),
     HomeOffset(Axis),
 }
 
@@ -135,6 +181,9 @@ impl SettingKey {
             Self::SignalAcks => Param::Config(35),
             Self::Speed(entry) => Param::Speed(entry),
             Self::Ramp => Param::Ramp,
+            Self::StartSpeed => Param::StartSpeed,
+            Self::BrakeAngle(entry) => Param::BrakeAngle(entry),
+            Self::Radius(r) => Param::Config(r.register()),
             Self::HomeOffset(axis) => Param::HomeOffset(axis),
         }
     }
@@ -160,6 +209,9 @@ impl Setting {
             Self::SignalAcks(_) => SettingKey::SignalAcks,
             Self::Speed { entry, .. } => SettingKey::Speed(entry),
             Self::RampMs(_) => SettingKey::Ramp,
+            Self::StartSpeed(_) => SettingKey::StartSpeed,
+            Self::BrakeAngle { entry, .. } => SettingKey::BrakeAngle(entry),
+            Self::Radius(r, _) => SettingKey::Radius(r),
             Self::HomeOffset { axis, .. } => SettingKey::HomeOffset(axis),
         }
     }
@@ -190,6 +242,12 @@ impl Setting {
                 value: value.parse().ok()?,
             },
             SettingKey::Ramp => Self::RampMs(value.parse().ok()?),
+            SettingKey::StartSpeed => Self::StartSpeed(value.parse().ok()?),
+            SettingKey::BrakeAngle(entry) => Self::BrakeAngle {
+                entry,
+                degrees: value.parse().ok().filter(|&d| d <= 90)?,
+            },
+            SettingKey::Radius(r) => Self::Radius(r, value.parse().ok()?),
             SettingKey::HomeOffset(axis) => Self::HomeOffset {
                 axis,
                 value: value.parse().ok()?,
@@ -213,6 +271,9 @@ impl fmt::Display for Setting {
             Self::SignalAcks(acks) => write!(f, "#C35,{}", acks.bits()),
             Self::Speed { entry, value } => write!(f, "#G{entry},{value}"),
             Self::RampMs(ms) => write!(f, "#R{ms}"),
+            Self::StartSpeed(v) => write!(f, "#S{v}"),
+            Self::BrakeAngle { entry, degrees } => write!(f, "#B{entry},{degrees}"),
+            Self::Radius(r, v) => write!(f, "#C{},{v}", r.register()),
             Self::HomeOffset { axis, value } => write!(f, "#O{},{value}", axis.upper()),
         }
     }
@@ -252,6 +313,21 @@ mod tests {
             "&G20,36000",
         ),
         (Setting::RampMs(225), "#R225", "&R225"),
+        (Setting::StartSpeed(4000), "#S4000", "&S4000"),
+        (
+            Setting::BrakeAngle {
+                entry: 20,
+                degrees: 90,
+            },
+            "#B20,90",
+            "&B20,90",
+        ),
+        (
+            Setting::Radius(Radius::Max, 12000),
+            "#C21,12000",
+            "&C21,12000",
+        ),
+        (Setting::Radius(Radius::Steepness, 1), "#C28,1", "&C28,1"),
         (
             Setting::HomeOffset {
                 axis: Axis::X,

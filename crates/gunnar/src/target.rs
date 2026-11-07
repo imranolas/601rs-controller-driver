@@ -87,8 +87,24 @@ pub fn open(
     log.note(&format!("gunnar {cmd} {port}"));
 
     let (link, sim) = if is_sim_port(port) {
+        // The machine as its profile describes it (SimConfig::default() is the placeholder
+        // the capture replays need).
+        let p = machine::Profile::gunnar_601();
+        let (e, sc) = (p.envelope_mm, p.scale);
+        let steps = |mm: f64, scale: f64| (mm * scale).round() as i64;
         let mut config = SimConfig {
             homed_at_start: false,
+            steps_per_mm: sc.x_steps_per_mm,
+            envelope: [
+                (
+                    steps(e.x[0], sc.x_steps_per_mm),
+                    steps(e.x[1], sc.x_steps_per_mm),
+                ),
+                (
+                    steps(e.y[0], sc.y_steps_per_mm),
+                    steps(e.y[1], sc.y_steps_per_mm),
+                ),
+            ],
             ..SimConfig::default()
         };
         if port == SIM_LIMITS {
