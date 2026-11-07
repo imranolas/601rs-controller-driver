@@ -234,7 +234,7 @@ impl Scheme {
         out.push(self.child(
             parent,
             Placed {
-                item: t as u16,
+                item: u16::try_from(t).expect("validate caps item types at u16::MAX"),
                 rotated,
                 x,
                 y,

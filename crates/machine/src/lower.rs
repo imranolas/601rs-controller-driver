@@ -169,7 +169,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
         clamps: 0,
         outputs: profile.neutral_outputs,
         head: None,
-        blade_mm: profile.carriage_mm(profile.park_steps),
+        carriage: profile.park_steps,
         blade_deg: 0.0,
         settings: HashMap::new(),
         streaming: false,
@@ -214,13 +214,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                 }
                 let z = (profile.scale.z_steps_per_deg * l.blade_deg) as i32;
                 let deg = l.blade_deg;
-                l.travel(
-                    Some(i),
-                    frame::steps(profile, head, p),
-                    frame::machine_mm(profile, p),
-                    z,
-                    deg,
-                )?;
+                l.travel(Some(i), frame::steps(profile, head, p), z, deg)?;
             }
             Op::Pause(p) => {
                 l.idle();
@@ -238,7 +232,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
 
     l.outputs(l.clamps | profile.neutral_outputs);
     let park = profile.park_steps;
-    l.travel(None, park, profile.carriage_mm(park), 0, 0.0)?;
+    l.travel(None, park, 0, 0.0)?;
     l.outputs(profile.neutral_outputs);
     l.idle();
     Ok(Job {
@@ -292,9 +286,9 @@ struct Lowering<'a> {
     outputs: u8,
     /// The head the last cut used.
     head: Option<HeadKind>,
-    /// Where the blade last was, machine mm, and its angle, degrees: GMC chooses each
+    /// Where the carriage last was, steps, and the blade's angle, degrees: GMC chooses each
     /// travel's ramp from how far both have to go.
-    blade_mm: [f64; 2],
+    carriage: [i32; 2],
     blade_deg: f64,
     /// Each setting as last sent, so an unchanged one isn't sent again.
     settings: HashMap<SettingKey, Setting>,
@@ -370,7 +364,6 @@ impl Lowering<'_> {
         &mut self,
         op: Option<usize>,
         steps: [i32; 2],
-        blade_mm: [f64; 2],
         z: i32,
         deg: f64,
     ) -> Result<(), Error> {
@@ -388,8 +381,8 @@ impl Lowering<'_> {
                 z,
             });
         } else {
-            let len_cm =
-                (blade_mm[0] - self.blade_mm[0]).hypot(blade_mm[1] - self.blade_mm[1]) / 10.0;
+            let [from, to] = [self.carriage, steps].map(|s| p.carriage_mm(s));
+            let len_cm = (to[0] - from[0]).hypot(to[1] - from[1]) / 10.0;
             let turn = (deg - self.blade_deg).abs();
             let fast = (len_cm < 1.0 && turn > 22.5)
                 || ((1.0..3.3).contains(&len_cm) && turn < 10.0)
@@ -411,7 +404,7 @@ impl Lowering<'_> {
                 z,
             });
         }
-        self.blade_mm = blade_mm;
+        self.carriage = steps;
         self.blade_deg = deg;
         Ok(())
     }
@@ -491,25 +484,13 @@ impl Lowering<'_> {
                 if self.caps.travel_entry {
                     settings(self);
                 }
-                self.travel(
-                    Some(op),
-                    steps[0],
-                    frame::machine_mm(p, stroke[0]),
-                    z[0],
-                    deg(0),
-                )?;
+                self.travel(Some(op), steps[0], z[0], deg(0))?;
                 if !self.caps.travel_entry {
                     settings(self);
                 }
                 self.head_to(self.clamps | down, settle);
             } else {
-                self.travel(
-                    Some(op),
-                    steps[0],
-                    frame::machine_mm(p, stroke[0]),
-                    z[0],
-                    deg(0),
-                )?;
+                self.travel(Some(op), steps[0], z[0], deg(0))?;
                 self.set(Setting::RampMs(cut_ramp));
                 self.head_to(self.clamps | down, settle);
                 settings(self);
@@ -543,7 +524,7 @@ impl Lowering<'_> {
                 self.set(Setting::RampMs(cut_ramp));
                 self.set(Setting::StartSpeed(p.start_speed));
             }
-            self.blade_mm = frame::machine_mm(p, stroke[last]);
+            self.carriage = steps[last];
             self.blade_deg = deg(last);
         }
         Ok(())

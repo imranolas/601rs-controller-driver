@@ -140,6 +140,9 @@ pub enum Error {
     HomingIncomplete(Status),
     /// The controller's configuration differs from the profile's and couldn't be set.
     Misconfigured(Vec<String>),
+    /// Talking to the controller failed while nothing was moving: a read, or a setting
+    /// written while idle. Nothing needed making safe, and homing is not lost.
+    Controller(Cause),
     /// Something failed in op `op` (`None`: outside the program's ops). The runner then
     /// stopped and made the machine safe: heads up, clamps released (`safe` says whether that
     /// worked). It must be homed again before it moves.
@@ -163,6 +166,7 @@ impl fmt::Display for Error {
                 "the controller's configuration won't take: {}",
                 what.join("; ")
             ),
+            Error::Controller(cause) => write!(f, "the controller: {cause}"),
             Error::Failed { op, cause, safe } => {
                 let at = op.map_or_else(
                     || "outside the program's ops".to_owned(),
@@ -180,6 +184,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<SessionError> for Error {
+    fn from(e: SessionError) -> Self {
+        Error::Controller(e.into())
+    }
+}
 
 /// Whether to carry on after a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,21 +252,13 @@ impl Runner {
     /// Whether the machine must be homed before it moves: after a stop or a failure, or if the
     /// controller doesn't know its position.
     pub fn needs_homing(&mut self) -> Result<bool, Error> {
-        let s = self.session.status().map_err(|e| Error::Failed {
-            op: None,
-            cause: e.into(),
-            safe: true,
-        })?;
+        let s = self.session.status()?;
         Ok(self.needs_homing || !s.homed)
     }
 
     /// Where the carriage is, steps (X, Y, Z).
     pub fn position(&mut self) -> Result<[i32; 3], Error> {
-        self.session.position().map_err(|e| Error::Failed {
-            op: None,
-            cause: e.into(),
-            safe: true,
-        })
+        Ok(self.session.position()?)
     }
 
     /// Bring the controller's configuration in line with the profile's
@@ -267,16 +269,11 @@ impl Runner {
         let mut wrong = Vec::new();
         for s in self.profile.controller_settings() {
             let key = s.key();
-            let fail = |e: SessionError| Error::Failed {
-                op: None,
-                cause: e.into(),
-                safe: true,
-            };
-            if self.session.read_setting(key).map_err(fail)? == s {
+            if self.session.read_setting(key)? == s {
                 continue;
             }
-            self.session.set(s).map_err(fail)?;
-            match self.session.read_setting(key).map_err(fail)? {
+            self.session.set(s)?;
+            match self.session.read_setting(key)? {
                 now if now == s => written.push(s),
                 now => wrong.push(format!("{key} reads `{now}` after `{s}`")),
             }

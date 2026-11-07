@@ -184,10 +184,17 @@ fn a_failed_write_is_a_disconnect() {
         left: 3, // @I100, @V, @M0
     });
     let mut ctl = open(link);
+    let events = ctl.subscribe();
     assert!(matches!(
         ctl.status(),
         Err(ControllerError::Disconnected(why)) if why == "cable pulled"
     ));
+    assert!(
+        events
+            .try_iter()
+            .any(|e| e == Event::Disconnected("cable pulled".into())),
+        "subscribers are told, as when a read fails"
+    );
     assert!(matches!(
         ctl.status(),
         Err(ControllerError::Disconnected(_))

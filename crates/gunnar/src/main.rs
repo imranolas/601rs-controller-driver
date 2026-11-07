@@ -102,27 +102,44 @@ fn parse_options(rest: &[String]) -> Res<Options> {
         match flag.as_str() {
             "--log" => o.log = Some(value.clone()),
             "--speed" => {
-                o.speed = value.parse()?;
-                if !(100..=4000).contains(&o.speed) {
-                    return Err("--speed must be 100..4000 steps/s (2.5–100 mm/s)".into());
-                }
+                o.speed = value
+                    .parse()
+                    .ok()
+                    .filter(|s| (100..=4000).contains(s))
+                    .ok_or_else(|| {
+                        format!("--speed {value}: give 100..4000 steps/s (2.5–100 mm/s)")
+                    })?;
             }
-            "--stage" => {
-                o.stages = match value.as_str() {
-                    "all" => (2..=7).collect(),
-                    v => match v.split_once('-') {
-                        Some((a, b)) => (a.parse()?..=b.parse()?).collect(),
-                        None => vec![v.parse()?],
-                    },
-                };
-                if o.stages.iter().any(|s| !(2..=7).contains(s)) {
-                    return Err("stages are 2..7 (stage 1 is `gunnar probe`)".into());
-                }
-            }
+            "--stage" => o.stages = parse_stages(value)?,
             _ => return Err(format!("unknown option {flag}\n{USAGE}").into()),
         }
     }
     Ok(o)
+}
+
+/// `all`, one stage (`3`) or a rising range (`3-5`), within 2..7.
+fn parse_stages(v: &str) -> Res<Vec<u8>> {
+    const STAGES: std::ops::RangeInclusive<u8> = 2..=7;
+    let bad = || {
+        format!("--stage {v}: give 2..7, a range such as 3-5, or all (stage 1 is `gunnar probe`)")
+    };
+    let stage = |s: &str| {
+        s.parse()
+            .ok()
+            .filter(|n| STAGES.contains(n))
+            .ok_or_else(bad)
+    };
+    let stages: Vec<u8> = match v {
+        "all" => STAGES.collect(),
+        v => match v.split_once('-') {
+            Some((a, b)) => (stage(a)?..=stage(b)?).collect(),
+            None => vec![stage(v)?],
+        },
+    };
+    if stages.is_empty() {
+        return Err(bad().into());
+    }
+    Ok(stages)
 }
 
 fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
@@ -175,6 +192,7 @@ fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
             op,
             speed: opts.speed,
             scale: if target.is_sim() { 0.1 } else { 1.0 },
+            quit: false,
         };
         let completed = check::run(ctl, &opts.stages, &mut ctx)?;
         report = ctx.r;
@@ -206,6 +224,17 @@ fn decode_capture(file: &str) -> Res<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stages_are_one_a_rising_range_or_all() {
+        assert_eq!(parse_stages("4").ok(), Some(vec![4]));
+        assert_eq!(parse_stages("3-5").ok(), Some(vec![3, 4, 5]));
+        assert_eq!(parse_stages("all").ok(), Some((2..=7).collect()));
+        for bad in ["5-3", "1", "8", "2-9", "x", "3-", ""] {
+            let e = parse_stages(bad).expect_err(bad).to_string();
+            assert!(e.starts_with("--stage"), "{bad}: {e}");
+        }
+    }
 
     #[test]
     fn port_list_hides_only_the_macos_dialin_twin() {

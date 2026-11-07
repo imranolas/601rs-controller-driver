@@ -305,6 +305,19 @@ fn a_fault_during_a_cut_makes_the_machine_safe() {
     assert!(r.needs_homing().expect("reads"));
 }
 
+/// A read that fails while nothing moves is the controller's failure, not a failed run: the
+/// runner made nothing safe, and the machine stays homed.
+#[test]
+fn a_failed_read_is_not_a_failed_run() {
+    let (mut r, sim) = ready();
+    sim.disconnect();
+    match r.position() {
+        Err(Error::Controller(_)) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(r.needs_homing(), Err(Error::Controller(_))));
+}
+
 #[test]
 fn manual_park_and_clamps() {
     let (mut r, sim) = start();

@@ -339,3 +339,14 @@ fn the_last_sheet_keeps_its_biggest_band() {
     let s = solve(&inst, &Options::default()).expect("solves");
     assert_eq!(extent(&s, 0, 0), 500);
 }
+
+/// The search counts item types in u16: one more is refused, not truncated into another type.
+#[test]
+fn too_many_item_types_are_refused() {
+    let inst = Instance {
+        objective: Objective::Knapsack,
+        bins: vec![sheet(1000, 1000, 0, 1)],
+        items: vec![item(1, 1, 1, false); usize::from(u16::MAX) + 1],
+    };
+    assert_eq!(solve(&inst, &Options::default()), Err(Error::TooMany));
+}

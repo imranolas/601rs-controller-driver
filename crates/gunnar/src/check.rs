@@ -96,9 +96,29 @@ pub struct Ctx {
     pub speed: u32,
     /// Simulator time runs faster; scale waits and timing thresholds by this.
     pub scale: f64,
+    /// The operator chose to stop: every prompt after that is answered "no", and the run ends
+    /// once the stage in hand has wound down (parameters are still restored).
+    pub quit: bool,
 }
 
 impl Ctx {
+    /// Ask before a step that moves or changes something. A step not taken is reported as
+    /// skipped, by the operator's choice or because they stopped the run.
+    fn go(&mut self, prompt: &str, step: &str) -> bool {
+        if self.quit {
+            return false;
+        }
+        match self.op.confirm(prompt) {
+            Confirm::Go => return true,
+            Confirm::Skip => self.r.skip(step, "skipped by the operator"),
+            Confirm::Quit => {
+                self.quit = true;
+                self.r.skip(step, "the operator stopped the run");
+            }
+        }
+        false
+    }
+
     /// `ms` of machine time as a wall-clock duration.
     fn t(&self, ms: u64) -> Duration {
         Duration::from_secs_f64(ms as f64 / 1000.0 * self.scale)
@@ -193,13 +213,11 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
             _ => continue,
         };
         ctx.r.heading(title);
-        match ctx.op.confirm(&format!("{title}. Start?")) {
-            Confirm::Go => {}
-            Confirm::Skip => {
-                ctx.r.skip(title, "skipped by the operator");
-                continue;
+        if !ctx.go(&format!("{title}. Start?"), title) {
+            if ctx.quit {
+                break;
             }
-            Confirm::Quit => break,
+            continue;
         }
         let result = match stage {
             2 => stage2(p, ctx),
@@ -210,6 +228,10 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
             _ => stage7(p, ctx),
         };
         match result {
+            Ok(back) if ctx.quit => {
+                p = back;
+                break;
+            }
             Ok(back) => p = back,
             Err(e) => {
                 let _ = ctx.stop.brake();
@@ -447,15 +469,13 @@ fn reply_order(p: &mut Params, ctx: &mut Ctx) -> Res<()> {
 
 fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     setup_moves(&mut p, ctx)?;
-    let mut p = match ctx
-        .op
-        .confirm("Home Z, then X and Y, exactly as GMC does (about a minute). Clear the table.")
-    {
-        Confirm::Go => home_all(p, ctx)?,
-        _ => {
-            ctx.r.skip("homing", "skipped by the operator");
-            p
-        }
+    let mut p = if ctx.go(
+        "Home Z, then X and Y, exactly as GMC does (about a minute). Clear the table.",
+        "homing",
+    ) {
+        home_all(p, ctx)?
+    } else {
+        p
     };
     if !require_homed(&mut p, ctx, "jogs")? {
         return Ok(p);
@@ -467,12 +487,10 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     let mut j = p.into_jog()?;
 
     for (axis, dir) in dirs {
-        if ctx
-            .op
-            .confirm(&format!("Jog {axis:?} 20 mm away from home and back."))
-            != Confirm::Go
-        {
-            ctx.r.skip(&format!("jog {axis:?}"), "skipped");
+        if !ctx.go(
+            &format!("Jog {axis:?} 20 mm away from home and back."),
+            &format!("jog {axis:?}"),
+        ) {
             continue;
         }
         let i = axis.index();
@@ -502,11 +520,10 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     }
 
     let x_dir = dirs[0].1;
-    if ctx
-        .op
-        .confirm("Jog X 100 mm away from home and brake (@B) after a moment.")
-        == Confirm::Go
-    {
+    if ctx.go(
+        "Jog X 100 mm away from home and brake (@B) after a moment.",
+        "@B during a jog",
+    ) {
         let start = pos(&mut j)?;
         j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * x_dir))?;
         thread::sleep(ctx.t(800));
@@ -544,11 +561,10 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     );
     j.set_outputs(0x02)?;
 
-    if ctx
-        .op
-        .confirm("Close each clamp in turn (outputs 0x20, then 0x40). Hands clear.")
-        == Confirm::Go
-    {
+    if ctx.go(
+        "Close each clamp in turn (outputs 0x20, then 0x40). Hands clear.",
+        "clamps",
+    ) {
         for (bits, label) in [
             (0x22u8, "bit 0x20 (.gcf i_pl)"),
             (0x42, "bit 0x40 (.gcf i_pr)"),
@@ -592,12 +608,10 @@ fn stage4(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     if !require_homed(&mut p, ctx, "stage 4")? {
         return Ok(p);
     }
-    if ctx
-        .op
-        .confirm("Drive a 20 mm square in mode 2, head up, and return.")
-        != Confirm::Go
-    {
-        ctx.r.skip("square", "skipped");
+    if !ctx.go(
+        "Drive a 20 mm square in mode 2, head up, and return.",
+        "square",
+    ) {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
@@ -624,14 +638,12 @@ fn stage4(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         "square returns exactly",
         format!("{end:?} vs start"),
     );
-    if ctx.op.confirm(
+    if ctx.go(
         "Drive the square again and brake it (@B) during the first leg: the rest of the path \
          must be discarded, not resumed. Head up.",
-    ) == Confirm::Go
-    {
+        "@B mid-path",
+    ) {
         brake_mid_path(&mut c, ctx, [x0, y0, z0], (dx, dy))?;
-    } else {
-        ctx.r.skip("@B mid-path", "skipped");
     }
     Ok(c.into_parameters()?)
 }
@@ -718,12 +730,10 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     if !require_homed(&mut p, ctx, "stage 5")? {
         return Ok(p);
     }
-    if ctx
-        .op
-        .confirm("Run v1.00 mode-2 features: short moves away from home, head up.")
-        != Confirm::Go
-    {
-        ctx.r.skip("v1.00", "skipped");
+    if !ctx.go(
+        "Run v1.00 mode-2 features: short moves away from home, head up.",
+        "v1.00",
+    ) {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
@@ -1028,11 +1038,10 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     p.set(Setting::HostWatchdog(ctx.watchdog(400)))?;
 
     // (a) Buffer size: fill it during a long dead time (nothing is consumed), then ask @H.
-    if ctx
-        .op
-        .confirm("Measure the buffer: 100 short moves on a 30 mm circle, then return.")
-        == Confirm::Go
-    {
+    if ctx.go(
+        "Measure the buffer: 100 short moves on a 30 mm circle, then return.",
+        "buffer size",
+    ) {
         p.set(Setting::FlowControl(false))?;
         p.set(Setting::DeadTimeMs(3000))?;
         let mut c = p.into_cutting()?;
@@ -1068,28 +1077,24 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     let mut c = p.into_cutting()?;
     let start = [x0, y0, z0];
     let mut reversed = false;
-    if ctx.op.confirm(
+    if ctx.go(
         "Stream 5 laps of the circle (~22 KB) with flow control (#C7,1) and the host watchdog \
          (#C19,400). Head up.",
-    ) == Confirm::Go
-    {
+        "flow control",
+    ) {
         reversed = stream_with_flow_control(&mut c, ctx, &pts, start)?;
-    } else {
-        ctx.r.skip("flow control", "skipped");
     }
     if reversed {
         ctx.r.skip(
             "@B on a held stream",
             "0x02/0x03 are the other way round: the driver's flow control must be fixed first",
         );
-    } else if ctx.op.confirm(
+    } else if ctx.go(
         "Stream the circle again and brake (@B) the moment the controller holds the stream \
          (0x03), or once everything is sent: nothing may move afterwards. Head up.",
-    ) == Confirm::Go
-    {
+        "@B on a held stream",
+    ) {
         brake_held_stream(&mut c, ctx, &pts, start)?;
-    } else {
-        ctx.r.skip("@B on a held stream", "skipped");
     }
     Ok(c.into_parameters()?)
 }
@@ -1304,11 +1309,11 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     setup_moves(&mut p, ctx)?;
     let dir = away(&mut p, Axis::X)?;
 
-    if ctx.op.confirm(
+    if ctx.go(
         "Jog X away from home and stop it with @S (no ramp: abrupt). The position is lost, so \
          the machine re-homes afterwards.",
-    ) == Confirm::Go
-    {
+        "@S",
+    ) {
         let mut j = p.into_jog()?;
         j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * dir))?;
         thread::sleep(ctx.t(800));
@@ -1349,14 +1354,13 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     };
     let x = p.position_steps(Axis::X)?;
     let distance = u64::from((target - x).unsigned_abs());
-    if ctx.op.confirm(&format!(
+    let prompt = format!(
         "Drive X slowly (10 mm/s) towards the {switch} limit switch until it trips: at most {} mm, \
          to X {} mm (20 mm past GMC's drivable range). Hand on the e-stop; Ctrl-C brakes.",
         (target - x).abs() / steps_per_mm(),
         target / steps_per_mm()
-    )) != Confirm::Go
-    {
-        ctx.r.skip("limit switch", "skipped");
+    );
+    if !ctx.go(&prompt, "limit switch") {
         return Ok(p);
     }
     p.set(Setting::Speed {

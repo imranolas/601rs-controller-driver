@@ -131,7 +131,7 @@ pub enum Error {
     NoBins,
     /// Item `0` fits no bin (bin packing needs every item).
     TooBig(usize),
-    /// More than 65,535 copies of an item, or more bins than that.
+    /// More than 65,535 copies of an item, item types or bins.
     TooMany,
     /// The layout failed its own check: a bug, reported rather than cut.
     Bug(Violation),
@@ -185,7 +185,11 @@ impl Instance {
             return Err(Error::BadSize);
         }
         let copies: u64 = self.bins.iter().map(|b| b.copies as u64).sum();
-        if copies > u16::MAX as u64 || self.items.iter().any(|i| i.copies > u16::MAX as u32) {
+        // The search keeps item types and counts as u16.
+        if copies > u16::MAX as u64
+            || self.items.len() > usize::from(u16::MAX)
+            || self.items.iter().any(|i| i.copies > u16::MAX as u32)
+        {
             return Err(Error::TooMany);
         }
         if self.objective == Objective::BinPacking {

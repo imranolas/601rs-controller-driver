@@ -30,7 +30,8 @@ cargo build --release -p gunnar
      the box boots with GMC's configuration or a driver must write it at connect, as GMC does.
 5. **Stages 2–7:** `./target/release/gunnar check /dev/cu.usbserial-XXXX --stage 2`, then
    `--stage 3`, and so on (or `--stage 2-7`). Each step says what it will do and waits for
-   Enter (`s` skips the step, `q` at a stage prompt ends the run).
+   Enter. `s` skips the step. `q` at any prompt ends the run: the stage in hand winds down
+   without asking anything more, and the parameters are restored.
 
 | Stage | Moves | What it checks |
 |-------|-------|----------------|

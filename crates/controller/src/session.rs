@@ -399,11 +399,9 @@ fn reader_loop(mut reader: Box<dyn Reader>, shared: &Shared) {
                 shared.deliver(&mut st, outputs);
             }
             Err(e) => {
-                let why = e.to_string();
                 let mut st = shared.lock();
-                let outputs = st.core.close(why.clone());
+                let outputs = st.core.close(e.to_string());
                 shared.deliver(&mut st, outputs);
-                shared.bus.emit(Event::Disconnected(why));
                 return;
             }
         }

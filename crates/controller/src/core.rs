@@ -587,9 +587,13 @@ impl HostCore {
     }
 
     /// The link is gone; an outstanding request finishes as `Disconnected`.
+    /// The first close tells subscribers, whichever side noticed (a read or a write).
     pub fn close(&mut self, why: String) -> Vec<Output> {
-        self.closed.get_or_insert_with(|| why.clone());
         let mut out = Vec::new();
+        if self.closed.is_none() {
+            self.closed = Some(why.clone());
+            out.push(Output::Event(Event::Disconnected(why.clone())));
+        }
         if let Some(pending) = self.pending.take() {
             self.abandon(pending, ControllerError::Disconnected(why), &mut out);
         }
