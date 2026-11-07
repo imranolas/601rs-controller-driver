@@ -1,0 +1,11 @@
+[package]
+name = "nest"
+description = "Nesting mats onto sheets: three-stage guillotine layouts by iterative beam search (after PackingSolver), for whole sheets and for drop-outs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

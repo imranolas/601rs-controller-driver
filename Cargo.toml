@@ -18,6 +18,8 @@ machine = { path = "crates/machine" }
 program = { path = "crates/program" }
 runner = { path = "crates/runner" }
 sim = { path = "crates/sim" }
+route = { path = "crates/route" }
+nest = { path = "crates/nest" }
 
 # external
 serde = { version = "1", features = ["derive"] }
@@ -32,3 +34,12 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+
+# The browser's WebAssembly module (solvers): one optimised unit, no unwinding, no symbols.
+# cargo build -p solvers --target wasm32-unknown-unknown --profile wasm
+[profile.wasm]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

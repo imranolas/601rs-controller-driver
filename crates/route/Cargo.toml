@@ -1,0 +1,11 @@
+[package]
+name = "route"
+description = "The route of a sheet's cuts: their order and the way each is cut, keeping head-up travel short within the cutting rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
