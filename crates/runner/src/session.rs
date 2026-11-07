@@ -4,8 +4,10 @@
 
 use std::time::Duration;
 
-use controller::{Controller, ControllerError, Mode, Setting, SettingKey, Status, mode};
+use controller::{Controller, Mode, ModeMarker, Setting, SettingKey, Status, mode};
 use protocol::{Axis, Command};
+
+use crate::error::Cause;
 
 enum Ctl {
     Parameters(Controller<mode::Parameters>),
@@ -13,7 +15,26 @@ enum Ctl {
     Cutting(Controller<mode::Cutting>),
 }
 
-/// The same call on whichever mode the controller is in (master commands).
+impl From<Controller<mode::Parameters>> for Ctl {
+    fn from(c: Controller<mode::Parameters>) -> Self {
+        Ctl::Parameters(c)
+    }
+}
+
+impl From<Controller<mode::Jog>> for Ctl {
+    fn from(c: Controller<mode::Jog>) -> Self {
+        Ctl::Jog(c)
+    }
+}
+
+impl From<Controller<mode::Cutting>> for Ctl {
+    fn from(c: Controller<mode::Cutting>) -> Self {
+        Ctl::Cutting(c)
+    }
+}
+
+/// The same call on whichever mode the controller is in (master commands). A macro, because
+/// the call is generic over the mode and a closure can't be.
 macro_rules! any {
     ($ctl:expr, $c:ident => $body:expr) => {
         match $ctl {
@@ -24,26 +45,28 @@ macro_rules! any {
     };
 }
 
-pub(crate) struct Session {
-    /// `None` only if a mode switch failed and lost the controller, which `into_mode` never
-    /// does (it hands the controller back), so in practice always `Some`.
-    ctl: Option<Ctl>,
-}
-
-/// Why a session call failed: the controller said so, or the session is gone.
-#[derive(Debug)]
-pub(crate) enum SessionError {
-    Controller(ControllerError),
-    Lost,
-}
-
-impl From<ControllerError> for SessionError {
-    fn from(e: ControllerError) -> Self {
-        SessionError::Controller(e)
+/// Switch `c` to `to`. A refused switch hands the controller back, still in its mode.
+fn switch<M: ModeMarker>(c: Controller<M>, to: Mode) -> (Ctl, Result<(), Cause>)
+where
+    Ctl: From<Controller<M>>,
+{
+    let switched = match to {
+        Mode::Parameters => c.into_parameters().map(Ctl::Parameters),
+        Mode::Jog => c.into_jog().map(Ctl::Jog),
+        Mode::Cutting => c.into_cutting().map(Ctl::Cutting),
+    };
+    match switched {
+        Ok(ctl) => (ctl, Ok(())),
+        Err(e) => (Ctl::from(*e.controller), Err(e.error.into())),
     }
 }
 
-type R<T> = std::result::Result<T, SessionError>;
+type R<T> = Result<T, Cause>;
+
+pub(crate) struct Session {
+    /// `None` only while a mode switch is under way, or if one panicked part-way.
+    ctl: Option<Ctl>,
+}
 
 impl Session {
     pub(crate) fn new(ctl: Controller<mode::Parameters>) -> Self {
@@ -53,15 +76,11 @@ impl Session {
     }
 
     fn ctl(&mut self) -> R<&mut Ctl> {
-        self.ctl.as_mut().ok_or(SessionError::Lost)
+        self.ctl.as_mut().ok_or(Cause::Lost)
     }
 
     pub(crate) fn mode(&self) -> Option<Mode> {
-        self.ctl.as_ref().map(|c| match c {
-            Ctl::Parameters(_) => Mode::Parameters,
-            Ctl::Jog(_) => Mode::Jog,
-            Ctl::Cutting(_) => Mode::Cutting,
-        })
+        self.ctl.as_ref().map(|c| any!(c, c => c.mode()))
     }
 
     /// Switch to `to` (`@M<n>`), unless already there. The controller refuses while anything
@@ -70,31 +89,36 @@ impl Session {
         if self.mode() == Some(to) {
             return Ok(());
         }
-        let ctl = self.ctl.take().ok_or(SessionError::Lost)?;
-        macro_rules! go {
-            ($c:expr, $back:path) => {
-                match to {
-                    Mode::Parameters => $c.into_parameters().map(Ctl::Parameters),
-                    Mode::Jog => $c.into_jog().map(Ctl::Jog),
-                    Mode::Cutting => $c.into_cutting().map(Ctl::Cutting),
-                }
-                .map_err(|e| ($back(*e.controller), e.error))
-            };
+        let ctl = self.ctl.take().ok_or(Cause::Lost)?;
+        let (ctl, result) = any!(ctl, c => switch(c, to));
+        self.ctl = Some(ctl);
+        result
+    }
+
+    /// The controller in mode 0, switching to it if need be.
+    fn params(&mut self) -> R<&mut Controller<mode::Parameters>> {
+        self.switch(Mode::Parameters)?;
+        match self.ctl()? {
+            Ctl::Parameters(c) => Ok(c),
+            _ => unreachable!("a switch to mode 0 that succeeded leaves the session in it"),
         }
-        let switched = match ctl {
-            Ctl::Parameters(c) => go!(c, Ctl::Parameters),
-            Ctl::Jog(c) => go!(c, Ctl::Jog),
-            Ctl::Cutting(c) => go!(c, Ctl::Cutting),
-        };
-        match switched {
-            Ok(ctl) => {
-                self.ctl = Some(ctl);
-                Ok(())
-            }
-            Err((ctl, e)) => {
-                self.ctl = Some(ctl);
-                Err(e.into())
-            }
+    }
+
+    /// The controller in mode 1, switching to it if need be.
+    fn jog(&mut self) -> R<&mut Controller<mode::Jog>> {
+        self.switch(Mode::Jog)?;
+        match self.ctl()? {
+            Ctl::Jog(c) => Ok(c),
+            _ => unreachable!("a switch to mode 1 that succeeded leaves the session in it"),
+        }
+    }
+
+    /// The controller in mode 2, switching to it if need be.
+    fn cutting(&mut self) -> R<&mut Controller<mode::Cutting>> {
+        self.switch(Mode::Cutting)?;
+        match self.ctl()? {
+            Ctl::Cutting(c) => Ok(c),
+            _ => unreachable!("a switch to mode 2 that succeeded leaves the session in it"),
         }
     }
 
@@ -139,42 +163,22 @@ impl Session {
     }
 
     pub(crate) fn set(&mut self, s: Setting) -> R<()> {
-        self.switch(Mode::Parameters)?;
-        match self.ctl()? {
-            Ctl::Parameters(c) => Ok(c.set(s)?),
-            _ => Err(SessionError::Lost),
-        }
+        Ok(self.params()?.set(s)?)
     }
 
     pub(crate) fn read_setting(&mut self, key: SettingKey) -> R<Setting> {
-        self.switch(Mode::Parameters)?;
-        match self.ctl()? {
-            Ctl::Parameters(c) => Ok(c.read_setting(key)?),
-            _ => Err(SessionError::Lost),
-        }
+        Ok(self.params()?.read_setting(key)?)
     }
 
     pub(crate) fn set_outputs(&mut self, bits: u8) -> R<()> {
-        self.switch(Mode::Jog)?;
-        match self.ctl()? {
-            Ctl::Jog(c) => Ok(c.set_outputs(bits)?),
-            _ => Err(SessionError::Lost),
-        }
+        Ok(self.jog()?.set_outputs(bits)?)
     }
 
     pub(crate) fn home(&mut self, axes: &[Axis]) -> R<()> {
-        self.switch(Mode::Jog)?;
-        match self.ctl()? {
-            Ctl::Jog(c) => Ok(c.home(axes)?),
-            _ => Err(SessionError::Lost),
-        }
+        Ok(self.jog()?.home(axes)?)
     }
 
     pub(crate) fn stream(&mut self, cmd: &Command) -> R<()> {
-        self.switch(Mode::Cutting)?;
-        match self.ctl()? {
-            Ctl::Cutting(c) => Ok(c.stream(cmd)?),
-            _ => Err(SessionError::Lost),
-        }
+        Ok(self.cutting()?.stream(cmd)?)
     }
 }

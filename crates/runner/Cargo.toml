@@ -12,6 +12,7 @@ machine.workspace = true
 controller.workspace = true
 program.workspace = true
 protocol.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 sim.workspace = true

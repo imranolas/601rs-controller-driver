@@ -6,7 +6,7 @@ use protocol::{Command, Setting};
 use crate::profile::Capabilities;
 
 use super::*;
-use crate::frame::{blade_steps, board_point, directions, steps};
+use crate::frame::{CarriageMm, blade_steps, board_point, directions, steps};
 
 fn p601() -> Profile {
     Profile::gunnar_601()
@@ -423,7 +423,7 @@ fn targets_outside_the_machine_are_refused() {
     let far = [[2000.0, 0.0], [2100.0, 0.0]];
     let err = lower(&program(1.5, vec![cut(HeadKind::Straight, &far)]), &p).expect_err("outside");
     assert!(
-        matches!(err, Error::OutsideEnvelope { op: Some(0), .. }),
+        matches!(err, Error::OutsideEnvelope { at: At::Op(0), .. }),
         "{err:?}"
     );
 }
@@ -433,4 +433,40 @@ fn the_profile_reads_back_from_json() {
     let p = p601();
     let text = serde_json::to_string_pretty(&p).expect("serialises");
     assert_eq!(serde_json::from_str::<Profile>(&text).expect("parses"), p);
+    assert!(
+        text.contains("\"board_origin_mm\": [\n"),
+        "a point is [x, y], whatever its frame"
+    );
+}
+
+#[test]
+fn points_carry_their_frame() {
+    let p = p601();
+    let carriage = p.carriage_mm([400, -80]);
+    assert_eq!(carriage, CarriageMm([10.0, -2.0]));
+    assert_eq!(p.carriage_steps(carriage), [400, -80]);
+    assert_eq!(carriage.to_string(), "(10.0, -2.0) mm");
+    assert_eq!(carriage.distance(CarriageMm([13.0, 2.0])), 5.0);
+    // The bevel head's blade is 71.5 mm to the carriage's left.
+    assert_eq!(p.bevel.blade(carriage).0[0], -61.5);
+}
+
+#[test]
+fn errors_say_where() {
+    assert_eq!(
+        Error::ZeroSegment { op: 2, point: 5 }.to_string(),
+        format!("op 2: points 4 and 5 are closer than {MIN_SEGMENT_MM} mm")
+    );
+    assert_eq!(
+        Error::BadNumber { at: At::Job }.to_string(),
+        "the job: a number is not finite or out of range"
+    );
+    assert_eq!(
+        Error::OutsideEnvelope {
+            at: At::Park,
+            carriage_mm: CarriageMm([1.0, -2.0])
+        }
+        .to_string(),
+        "the park: the carriage would reach (1.0, -2.0) mm, outside the machine's limits"
+    );
 }

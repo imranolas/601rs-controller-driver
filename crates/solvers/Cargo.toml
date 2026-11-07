@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 route.workspace = true
 nest.workspace = true
+thiserror.workspace = true
 
 # Its own lints: the workspace forbids unsafe code, and exporting functions to WebAssembly
 # needs a little, allowed item by item below.

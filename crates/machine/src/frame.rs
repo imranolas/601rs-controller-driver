@@ -1,4 +1,13 @@
 //! Board millimetres to motor steps, and the blade's direction along a path.
+//!
+//! Three frames, all in millimetres: the **board**'s ([`Pt`], the program's); the
+//! **machine**'s ([`MachineMm`]: where a blade is, from home); and the **carriage**'s
+//! ([`CarriageMm`]: where the carriage is, the frame of the steps and the soft limits). A blade
+//! is at the carriage plus its head's offset ([`Head::carriage`], [`Head::blade`]).
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 use crate::profile::{Head, Profile};
 
@@ -6,30 +15,45 @@ use crate::profile::{Head, Profile};
 /// +Y away from the operator).
 pub type Pt = [f64; 2];
 
+/// Where a blade is, mm from home. In JSON, `[x, y]`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MachineMm(pub [f64; 2]);
+
+/// Where the carriage is, mm from home.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarriageMm(pub [f64; 2]);
+
+impl CarriageMm {
+    pub fn distance(self, other: Self) -> f64 {
+        let ([x0, y0], [x1, y1]) = (self.0, other.0);
+        (x1 - x0).hypot(y1 - y0)
+    }
+}
+
+impl fmt::Display for CarriageMm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [x, y] = self.0;
+        write!(f, "({x:.1}, {y:.1}) mm")
+    }
+}
+
 /// The carriage steps that put `head`'s blade over board point `p`.
 pub fn steps(profile: &Profile, head: &Head, p: Pt) -> [i32; 2] {
-    let m = machine_mm(profile, p);
-    let s = profile.scale;
-    [
-        ((m[0] - head.offset_mm[0]) * s.x_steps_per_mm).round() as i32,
-        ((m[1] - head.offset_mm[1]) * s.y_steps_per_mm).round() as i32,
-    ]
+    profile.carriage_steps(head.carriage(machine_mm(profile, p)))
 }
 
 /// The board point under `head`'s blade with the carriage at `steps`.
 pub fn board_point(profile: &Profile, head: &Head, steps: [i32; 2]) -> Pt {
-    let c = profile.carriage_mm(steps);
-    let o = profile.board_origin_mm;
-    [
-        c[0] + head.offset_mm[0] - o[0],
-        c[1] + head.offset_mm[1] - o[1],
-    ]
+    let MachineMm([x, y]) = head.blade(profile.carriage_mm(steps));
+    let MachineMm([ox, oy]) = profile.board_origin_mm;
+    [x - ox, y - oy]
 }
 
-/// Board point `p` in machine millimetres.
-pub fn machine_mm(profile: &Profile, p: Pt) -> [f64; 2] {
-    let o = profile.board_origin_mm;
-    [o[0] + p[0], o[1] + p[1]]
+/// Board point `p` on the machine.
+pub fn machine_mm(profile: &Profile, [x, y]: Pt) -> MachineMm {
+    let MachineMm([ox, oy]) = profile.board_origin_mm;
+    MachineMm([ox + x, oy + y])
 }
 
 /// The direction of travel from `a` to `b`: degrees clockwise from +X, so travelling towards −Y

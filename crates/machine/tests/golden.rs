@@ -299,8 +299,8 @@ fn program_from(job: &Job, profile: &Profile) -> Program {
                 .iter()
                 .map(|s| {
                     [
-                        s[0] / scale.x_steps_per_mm + h.offset_mm[0] - o[0],
-                        s[1] / scale.y_steps_per_mm + h.offset_mm[1] - o[1],
+                        s[0] / scale.x_steps_per_mm + h.offset_mm[0] - o.0[0],
+                        s[1] / scale.y_steps_per_mm + h.offset_mm[1] - o.0[1],
                     ]
                     .map(clean)
                 })

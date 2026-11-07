@@ -100,8 +100,9 @@ mod lower;
 mod profile;
 
 pub use estimate::{Estimate, Host, OpEstimate, estimate};
+pub use frame::{CarriageMm, MachineMm};
 pub use lower::{
-    ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, park,
+    At, ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, park,
 };
 pub use profile::{
     Accel, Capabilities, Clamps, ControllerConfig, DeadTime, Envelope, Head, Homing, Line, Profile,

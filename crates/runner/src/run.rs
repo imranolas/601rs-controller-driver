@@ -4,14 +4,13 @@ use std::fmt;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
-use controller::{
-    Controller, ControllerError, Event as Signalled, Mode, Setting, Signal, StopHandle, Units, mode,
-};
+use controller::{Controller, Event as Signalled, Mode, Setting, Signal, StopHandle, Units, mode};
 use machine::{Host, Profile, Step};
-use program::{ClampSide, Op, Program, Resume};
+use program::{ClampSide, Program, Resume};
 use protocol::{Axis, Command, Status};
 
-use crate::session::{Session, SessionError};
+use crate::error::{Cause, Error, Mismatch};
+use crate::session::Session;
 
 /// How the runner waits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,93 +100,16 @@ pub enum Outcome {
     Cancelled { next: usize },
 }
 
-/// Why something failed on the controller's side.
+/// A failure during a run, and the op it happened in (`None`: outside the program's ops).
 #[derive(Debug)]
-pub enum Cause {
-    Controller(ControllerError),
-    /// The session is gone.
-    Lost,
-    /// The lowered job asked for a command the runner doesn't send: a bug in the lowering.
-    Unsupported(Command),
+struct Failure {
+    op: Option<usize>,
+    cause: Cause,
 }
 
-impl fmt::Display for Cause {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Cause::Controller(e) => e.fmt(f),
-            Cause::Lost => write!(f, "the controller session is gone"),
-            Cause::Unsupported(c) => write!(f, "`{c}` is not a command the runner sends (a bug)"),
-        }
-    }
-}
-
-impl From<SessionError> for Cause {
-    fn from(e: SessionError) -> Self {
-        match e {
-            SessionError::Controller(e) => Cause::Controller(e),
-            SessionError::Lost => Cause::Lost,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Error {
-    /// The program can't be cut on this machine (machine::lower refused it): nothing was sent.
-    Invalid(machine::Error),
-    /// The machine isn't homed, or hasn't been since a stop or a failure: home it first.
-    NotHomed,
-    /// Homing ended without the controller knowing its position.
-    HomingIncomplete(Status),
-    /// The controller's configuration differs from the profile's and couldn't be set.
-    Misconfigured(Vec<String>),
-    /// Talking to the controller failed while nothing was moving: a read, or a setting
-    /// written while idle. Nothing needed making safe, and homing is not lost.
-    Controller(Cause),
-    /// Something failed in op `op` (`None`: outside the program's ops). The runner then
-    /// stopped and made the machine safe: heads up, clamps released (`safe` says whether that
-    /// worked). It must be homed again before it moves.
-    Failed {
-        op: Option<usize>,
-        cause: Cause,
-        safe: bool,
-    },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Invalid(e) => write!(f, "the program can't be cut: {e}"),
-            Error::NotHomed => write!(f, "the machine must be homed first"),
-            Error::HomingIncomplete(s) => {
-                write!(f, "homing ended without a home position (status {s})")
-            }
-            Error::Misconfigured(what) => write!(
-                f,
-                "the controller's configuration won't take: {}",
-                what.join("; ")
-            ),
-            Error::Controller(cause) => write!(f, "the controller: {cause}"),
-            Error::Failed { op, cause, safe } => {
-                let at = op.map_or_else(
-                    || "outside the program's ops".to_owned(),
-                    |o| format!("in op {o}"),
-                );
-                let then = if *safe {
-                    "heads up, clamps released"
-                } else {
-                    "the safe state could NOT be confirmed"
-                };
-                write!(f, "failed {at}: {cause}; {then}; home before moving again")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<SessionError> for Error {
-    fn from(e: SessionError) -> Self {
-        Error::Controller(e.into())
+impl From<Cause> for Failure {
+    fn from(cause: Cause) -> Self {
+        Failure { op: None, cause }
     }
 }
 
@@ -274,8 +196,8 @@ impl Runner {
             }
             self.session.set(s)?;
             match self.session.read_setting(key)? {
-                now if now == s => written.push(s),
-                now => wrong.push(format!("{key} reads `{now}` after `{s}`")),
+                read if read == s => written.push(s),
+                read => wrong.push(Mismatch { wanted: s, read }),
             }
         }
         if wrong.is_empty() {
@@ -344,7 +266,7 @@ impl Runner {
             self.session.set(s)?;
         }
         self.session.home(&[Axis::X, Axis::Y])?;
-        Ok(self.session.wait_until(self.config.homing_timeout, homed)?)
+        self.session.wait_until(self.config.homing_timeout, homed)
     }
 
     /// Both heads up and travel to the park, the clamps as they are.
@@ -414,16 +336,14 @@ impl Runner {
                 });
                 Ok(outcome)
             }
-            Err((op, f)) => {
-                let e = self.fail(op, f);
-                if let Error::Failed { op, cause, safe } = &e {
-                    events(Event::Failed {
-                        op: *op,
-                        error: cause.to_string(),
-                        safe: *safe,
-                    });
-                }
-                Err(e)
+            Err(Failure { op, cause }) => {
+                let safe = self.recover();
+                events(Event::Failed {
+                    op,
+                    error: cause.to_string(),
+                    safe,
+                });
+                Err(Error::Failed { op, cause, safe })
             }
         }
     }
@@ -434,40 +354,48 @@ impl Runner {
         job: &machine::Job,
         requests: &Receiver<Request>,
         events: &mut dyn FnMut(Event),
-    ) -> Result<Outcome, (Option<usize>, Cause)> {
-        self.exec(&job.setup, None, requests, events)
-            .map_err(|f| (None, f))?;
-        let mut outcome = Outcome::Finished;
-        for (index, steps) in job.ops.iter().enumerate() {
-            if self
-                .between(index, requests, events)
-                .map_err(|f| (Some(index), f))?
-                == Flow::Cancel
-            {
-                outcome = Outcome::Cancelled { next: index };
-                break;
+    ) -> Result<Outcome, Failure> {
+        self.exec(&job.setup, None, requests, events)?;
+        let outcome = self.ops(program, job, requests, events)?;
+        if outcome != Outcome::Finished {
+            // The last cut may still be running in a stream: let it end first.
+            self.session.wait_idle(self.config.idle_timeout)?;
+        }
+        self.exec(&job.finish, None, requests, events)?;
+        Ok(outcome)
+    }
+
+    /// The program's ops in order, with the requests between them.
+    fn ops(
+        &mut self,
+        program: &Program,
+        job: &machine::Job,
+        requests: &Receiver<Request>,
+        events: &mut dyn FnMut(Event),
+    ) -> Result<Outcome, Failure> {
+        for (index, (op, steps)) in program.ops.iter().zip(&job.ops).enumerate() {
+            let at = |cause| Failure {
+                op: Some(index),
+                cause,
+            };
+            if self.between(index, requests, events).map_err(at)? == Flow::Cancel {
+                return Ok(Outcome::Cancelled { next: index });
             }
-            let (id, label) = names(&program.ops[index]);
-            events(Event::Op { index, id, label });
+            events(Event::Op {
+                index,
+                id: op.id().map(str::to_owned),
+                label: op.label().map(str::to_owned),
+            });
             if self
                 .exec(steps, Some(index), requests, events)
-                .map_err(|f| (Some(index), f))?
+                .map_err(at)?
                 == Flow::Cancel
             {
-                outcome = Outcome::Cancelled { next: index + 1 };
-                break;
+                return Ok(Outcome::Cancelled { next: index + 1 });
             }
             events(Event::OpDone { index });
         }
-        if outcome != Outcome::Finished {
-            // The last cut may still be running in a stream: let it end first.
-            self.session
-                .wait_idle(self.config.idle_timeout)
-                .map_err(|e| (None, e.into()))?;
-        }
-        self.exec(&job.finish, None, requests, events)
-            .map_err(|f| (None, f))?;
-        Ok(outcome)
+        Ok(Outcome::Finished)
     }
 
     /// Between cuts: act on the requests waiting.
@@ -567,7 +495,7 @@ impl Runner {
         Ok(())
     }
 
-    fn set_outputs(&mut self, bits: u8) -> Result<(), SessionError> {
+    fn set_outputs(&mut self, bits: u8) -> Result<(), Cause> {
         self.session.set_outputs(bits)?;
         self.outputs = Some(bits);
         Ok(())
@@ -575,9 +503,14 @@ impl Runner {
 
     /// Report a failure, after making the machine safe; it must be homed again.
     fn fail(&mut self, op: Option<usize>, cause: Cause) -> Error {
-        let safe = self.make_safe();
-        self.needs_homing = true;
+        let safe = self.recover();
         Error::Failed { op, cause, safe }
+    }
+
+    /// After a failure: make the machine safe, and want it homed again. Whether it is safe.
+    fn recover(&mut self) -> bool {
+        self.needs_homing = true;
+        self.make_safe()
     }
 
     /// After a stop or a failure (PROGRAM_FORMAT §5): brake (the stop handle may already have),
@@ -602,14 +535,5 @@ impl Drop for Runner {
         if self.busy {
             let _ = self.make_safe();
         }
-    }
-}
-
-fn names(op: &Op) -> (Option<String>, Option<String>) {
-    match op {
-        Op::Clamp(c) => (c.id.clone(), c.label.clone()),
-        Op::Cut(c) => (c.id.clone(), c.label.clone()),
-        Op::Move(m) => (m.id.clone(), m.label.clone()),
-        Op::Pause(p) => (p.id.clone(), p.label.clone()),
     }
 }

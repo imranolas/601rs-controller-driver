@@ -4,6 +4,8 @@
 //! from GMC's parameters [GCF] and its captures [CAP]; the protocol reference cites each.
 
 use program::Head as HeadKind;
+
+use crate::frame::{CarriageMm, MachineMm};
 use protocol::{Axis, Setting, SignalAcks, Units};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +22,7 @@ pub struct Profile {
     /// lie at X 601–602 and Y 761–762 steps (protocol reference §4.2). Which machine stop that
     /// is, and whether board +Y is machine +Y, the first session at the machine confirms
     /// (PROGRAM_FORMAT Q1); until then +Y is +Y.
-    pub board_origin_mm: [f64; 2],
+    pub board_origin_mm: MachineMm,
     pub bevel: Head,
     pub straight: Head,
     pub clamps: Clamps,
@@ -229,12 +231,32 @@ pub struct RadiusSlowdown {
     pub steepness: u32,
 }
 
-/// The carriage's range, machine mm.
+/// The carriage's range: where it may go, in carriage mm.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope {
     pub x: [f64; 2],
     pub y: [f64; 2],
+}
+
+impl Envelope {
+    pub fn contains(&self, CarriageMm([x, y]): CarriageMm) -> bool {
+        (self.x[0]..=self.x[1]).contains(&x) && (self.y[0]..=self.y[1]).contains(&y)
+    }
+}
+
+impl Head {
+    /// Where the carriage is with this head's blade at `blade`.
+    pub fn carriage(&self, MachineMm([x, y]): MachineMm) -> CarriageMm {
+        let [dx, dy] = self.offset_mm;
+        CarriageMm([x - dx, y - dy])
+    }
+
+    /// Where this head's blade is with the carriage at `carriage`.
+    pub fn blade(&self, CarriageMm([x, y]): CarriageMm) -> MachineMm {
+        let [dx, dy] = self.offset_mm;
+        MachineMm([x + dx, y + dy])
+    }
 }
 
 impl Profile {
@@ -248,7 +270,7 @@ impl Profile {
                 y_steps_per_mm: 40.0,
                 z_steps_per_deg: 8.3333,
             },
-            board_origin_mm: [21.225, 20.725],
+            board_origin_mm: MachineMm([21.225, 20.725]),
             // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP].
             bevel: Head {
                 offset_mm: [-71.5, 1.9],
@@ -393,11 +415,21 @@ impl Profile {
         ]
     }
 
-    /// The carriage position in machine mm for steps.
-    pub fn carriage_mm(&self, steps: [i32; 2]) -> [f64; 2] {
+    /// Where the carriage is at `steps`.
+    pub fn carriage_mm(&self, [x, y]: [i32; 2]) -> CarriageMm {
+        let s = self.scale;
+        CarriageMm([
+            f64::from(x) / s.x_steps_per_mm,
+            f64::from(y) / s.y_steps_per_mm,
+        ])
+    }
+
+    /// The steps that put the carriage nearest `c`.
+    pub fn carriage_steps(&self, CarriageMm([x, y]): CarriageMm) -> [i32; 2] {
+        let s = self.scale;
         [
-            steps[0] as f64 / self.scale.x_steps_per_mm,
-            steps[1] as f64 / self.scale.y_steps_per_mm,
+            (x * s.x_steps_per_mm).round() as i32,
+            (y * s.y_steps_per_mm).round() as i32,
         ]
     }
 }

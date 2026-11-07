@@ -101,7 +101,9 @@
 //! past the gap. With the byte budget and flow control, `*022` cannot happen; if it does, the
 //! pacing has a bug.
 
+mod error;
 mod run;
 mod session;
 
-pub use run::{Cause, Config, Error, Event, Outcome, Request, Runner};
+pub use error::{Cause, Error, Mismatch};
+pub use run::{Config, Event, Outcome, Request, Runner};

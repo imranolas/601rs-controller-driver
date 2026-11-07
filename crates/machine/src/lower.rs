@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use program::{ClampSide, Cut, Head as HeadKind, Op, Program, Resume};
 use protocol::{Command, Mode, Radius, Setting, SettingKey, StreamFlags};
 
-use crate::frame::{self, Pt};
+use crate::frame::{self, CarriageMm, Pt};
 use crate::profile::{Capabilities, Profile};
 
 /// The speed-table entry cutting uses, and in GMC's form travel too.
@@ -89,78 +89,59 @@ impl Job {
     }
 }
 
+/// Where in a job something is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum At {
+    /// The job as a whole (its material).
+    Job,
+    /// An op, by its index in the program.
+    Op(usize),
+    /// The park after the last op.
+    Park,
+}
+
+impl fmt::Display for At {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            At::Job => f.write_str("the job"),
+            At::Op(op) => write!(f, "op {op}"),
+            At::Park => f.write_str("the park"),
+        }
+    }
+}
+
 /// Why a program can't be lowered. `op` is the index into the program's ops; `point` into a
 /// cut's `path_mm`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
     /// A number isn't finite, or is out of range: a speed outside 1–100 %, a thickness that
     /// isn't positive (PROGRAM_FORMAT V2, V3).
-    BadNumber { op: Option<usize> },
+    #[error("{at}: a number is not finite or out of range")]
+    BadNumber { at: At },
     /// A cut has fewer than two points (V3).
+    #[error("op {op}: a cut needs at least two points")]
     TooShort { op: usize },
     /// Two consecutive points are closer than [`MIN_SEGMENT_MM`] (V4).
+    #[error("op {op}: points {} and {point} are closer than {} mm", .point - 1, MIN_SEGMENT_MM)]
     ZeroSegment { op: usize, point: usize },
     /// A cut turns more than the break angle at a point (V7): it must be two cuts.
+    #[error("op {op}: the cut turns {turn_deg:.1}° at point {point}; split it into two cuts")]
     SharpCorner {
         op: usize,
         point: usize,
         turn_deg: f64,
     },
-    /// The carriage would leave the machine's soft limits (V10); `op` is `None` for the park.
-    OutsideEnvelope {
-        op: Option<usize>,
-        carriage_mm: [f64; 2],
-    },
+    /// The carriage would leave the machine's soft limits (V10).
+    #[error("{at}: the carriage would reach {carriage_mm}, outside the machine's limits")]
+    OutsideEnvelope { at: At, carriage_mm: CarriageMm },
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let at =
-            |op: &Option<usize>| op.map_or_else(|| "the job".to_owned(), |o| format!("op {o}"));
-        match self {
-            Error::BadNumber { op } => {
-                write!(f, "{}: a number is not finite or out of range", at(op))
-            }
-            Error::TooShort { op } => write!(f, "op {op}: a cut needs at least two points"),
-            Error::ZeroSegment { op, point } => {
-                write!(
-                    f,
-                    "op {op}: points {} and {point} are closer than {MIN_SEGMENT_MM} mm",
-                    point - 1
-                )
-            }
-            Error::SharpCorner {
-                op,
-                point,
-                turn_deg,
-            } => {
-                write!(
-                    f,
-                    "op {op}: the cut turns {turn_deg:.1}° at point {point}; split it into two cuts"
-                )
-            }
-            Error::OutsideEnvelope {
-                op,
-                carriage_mm: [x, y],
-            } => {
-                write!(
-                    f,
-                    "{}: the carriage would reach ({x:.1}, {y:.1}) mm, outside the machine's limits",
-                    at(op)
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 /// Lower a program for a machine. The carriage is taken to start at the park.
 pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
     let m = &program.material;
     let thickness = program.board.thickness_mm;
     if !is_pct(m.speed_pct) || !(thickness.is_finite() && thickness > 0.0) {
-        return Err(Error::BadNumber { op: None });
+        return Err(Error::BadNumber { at: At::Job });
     }
     let mut l = Lowering {
         profile,
@@ -210,11 +191,11 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                 let head = profile.head(kind);
                 let p = mv.to_mm;
                 if !p.iter().all(|v| v.is_finite()) {
-                    return Err(Error::BadNumber { op: Some(i) });
+                    return Err(Error::BadNumber { at: At::Op(i) });
                 }
                 let z = (profile.scale.z_steps_per_deg * l.blade_deg) as i32;
                 let deg = l.blade_deg;
-                l.travel(Some(i), frame::steps(profile, head, p), z, deg)?;
+                l.travel(At::Op(i), frame::steps(profile, head, p), z, deg)?;
             }
             Op::Pause(p) => {
                 l.idle();
@@ -232,7 +213,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
 
     l.outputs(l.clamps | profile.neutral_outputs);
     let park = profile.park_steps;
-    l.travel(None, park, 0, 0.0)?;
+    l.travel(At::Park, park, 0, 0.0)?;
     l.outputs(profile.neutral_outputs);
     l.idle();
     Ok(Job {
@@ -360,14 +341,8 @@ impl Lowering<'_> {
     /// travel with a large turn of the blade takes the faster ramp, by its rule for a serial
     /// port [GMC]; in one stream it runs at the travel entry,
     /// with the stream's ramp.
-    fn travel(
-        &mut self,
-        op: Option<usize>,
-        steps: [i32; 2],
-        z: i32,
-        deg: f64,
-    ) -> Result<(), Error> {
-        self.check(op, steps)?;
+    fn travel(&mut self, at: At, steps: [i32; 2], z: i32, deg: f64) -> Result<(), Error> {
+        self.check(at, steps)?;
         let p = self.profile;
         if self.caps.travel_entry {
             self.send(Command::StreamFlags(StreamFlags {
@@ -381,8 +356,7 @@ impl Lowering<'_> {
                 z,
             });
         } else {
-            let [from, to] = [self.carriage, steps].map(|s| p.carriage_mm(s));
-            let len_cm = (to[0] - from[0]).hypot(to[1] - from[1]) / 10.0;
+            let len_cm = p.carriage_mm(self.carriage).distance(p.carriage_mm(steps)) / 10.0;
             let turn = (deg - self.blade_deg).abs();
             let fast = (len_cm < 1.0 && turn > 22.5)
                 || ((1.0..3.3).contains(&len_cm) && turn < 10.0)
@@ -409,14 +383,12 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    fn check(&self, op: Option<usize>, steps: [i32; 2]) -> Result<(), Error> {
-        let c = self.profile.carriage_mm(steps);
-        let e = self.profile.envelope_mm;
-        let inside = |v: f64, r: [f64; 2]| r[0] <= v && v <= r[1];
-        if inside(c[0], e.x) && inside(c[1], e.y) {
+    fn check(&self, at: At, steps: [i32; 2]) -> Result<(), Error> {
+        let carriage_mm = self.profile.carriage_mm(steps);
+        if self.profile.envelope_mm.contains(carriage_mm) {
             Ok(())
         } else {
-            Err(Error::OutsideEnvelope { op, carriage_mm: c })
+            Err(Error::OutsideEnvelope { at, carriage_mm })
         }
     }
 
@@ -427,7 +399,7 @@ impl Lowering<'_> {
         let head = *p.head(kind);
         let speed = cut.speed_pct.unwrap_or(m.speed_pct);
         if !is_pct(speed) {
-            return Err(Error::BadNumber { op: Some(op) });
+            return Err(Error::BadNumber { at: At::Op(op) });
         }
         let strokes = strokes(op, &cut.path_mm, p.break_angle_deg)?;
         let closed = strokes.len() == 1 && {
@@ -441,7 +413,7 @@ impl Lowering<'_> {
             HeadKind::Straight => offsets.straight,
         };
         if !trim.is_finite() {
-            return Err(Error::BadNumber { op: Some(op) });
+            return Err(Error::BadNumber { at: At::Op(op) });
         }
         let down = if closed {
             head.down_closed.unwrap_or(head.down)
@@ -484,19 +456,19 @@ impl Lowering<'_> {
                 if self.caps.travel_entry {
                     settings(self);
                 }
-                self.travel(Some(op), steps[0], z[0], deg(0))?;
+                self.travel(At::Op(op), steps[0], z[0], deg(0))?;
                 if !self.caps.travel_entry {
                     settings(self);
                 }
                 self.head_to(self.clamps | down, settle);
             } else {
-                self.travel(Some(op), steps[0], z[0], deg(0))?;
+                self.travel(At::Op(op), steps[0], z[0], deg(0))?;
                 self.set(Setting::RampMs(cut_ramp));
                 self.head_to(self.clamps | down, settle);
                 settings(self);
             }
             for q in &steps[1..] {
-                self.check(Some(op), *q)?;
+                self.check(At::Op(op), *q)?;
             }
             let points: Vec<[i32; 3]> = (1..=last)
                 .map(|k| [steps[k][0], steps[k][1], z[k]])
@@ -575,7 +547,7 @@ fn strokes(op: usize, path: &[Pt], break_deg: f64) -> Result<Vec<&[Pt]>, Error> 
         return Err(Error::TooShort { op });
     }
     if !path.iter().flatten().all(|v| v.is_finite()) {
-        return Err(Error::BadNumber { op: Some(op) });
+        return Err(Error::BadNumber { at: At::Op(op) });
     }
     for (k, w) in path.windows(2).enumerate() {
         if (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) < MIN_SEGMENT_MM {

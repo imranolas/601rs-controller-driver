@@ -25,8 +25,6 @@ mod guillotine;
 
 pub use check::{Violation, check};
 
-use std::fmt;
-
 /// A length, in the instance's unit.
 pub type Len = i32;
 /// An area, or a profit.
@@ -123,36 +121,25 @@ impl Default for Options {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// A bin or an item has no area, or trims leave a bin no room.
+    #[error("a bin or an item has no area, or its trims leave no room")]
     BadSize,
     /// No bins.
+    #[error("no bins")]
     NoBins,
     /// Item `0` fits no bin (bin packing needs every item).
+    #[error("item {0} fits no bin")]
     TooBig(usize),
     /// More than 65,535 copies of an item, item types or bins.
+    #[error("too many copies, item types or bins")]
     TooMany,
-    /// The layout failed its own check: a bug, reported rather than cut.
+    /// The layout failed its own check: a bug, reported rather than cut. The message carries
+    /// the violation, so it is not also given as the source.
+    #[error("the layout failed its own check ({0}): a bug")]
     Bug(Violation),
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::BadSize => write!(
-                f,
-                "a bin or an item has no area, or its trims leave no room"
-            ),
-            Error::NoBins => write!(f, "no bins"),
-            Error::TooBig(i) => write!(f, "item {i} fits no bin"),
-            Error::TooMany => write!(f, "too many copies or bins"),
-            Error::Bug(v) => write!(f, "the layout failed its own check ({v}): a bug"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl Instance {
     /// The bins with their copies laid out in order: bin indices of a [`Solution`] count these.

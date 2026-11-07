@@ -22,8 +22,6 @@
 //! Every move keeps the precedence, so a route is always legal. It is seeded, so the same input
 //! always gives the same route, and it starts from the given route, so it is never worse.
 
-use std::fmt;
-
 /// A point on the sheet, in millimetres.
 pub type Pt = [f64; 2];
 
@@ -72,42 +70,27 @@ impl Travel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// A job has no way to cut it.
+    #[error("job {0} has no way to cut it")]
     NoWays(usize),
     /// A job must come after a job that doesn't exist, or after itself.
+    #[error("job {0} must come after a job that doesn't exist, or itself")]
     BadAfter(usize),
     /// A job's flip list is the wrong length or names a way it doesn't have.
+    #[error("job {0} has a bad flip list")]
     BadFlip(usize),
     /// The precedence has a cycle, so no order can keep it.
+    #[error("the precedence has a cycle")]
     Cycle,
     /// The travel model needs a positive speed and acceleration.
+    #[error("the travel model needs a positive speed and acceleration")]
     BadTravel,
     /// A point isn't finite.
+    #[error("a point isn't finite")]
     NotFinite,
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::NoWays(j) => write!(f, "job {j} has no way to cut it"),
-            Error::BadAfter(j) => write!(
-                f,
-                "job {j} must come after a job that doesn't exist, or itself"
-            ),
-            Error::BadFlip(j) => write!(f, "job {j} has a bad flip list"),
-            Error::Cycle => write!(f, "the precedence has a cycle"),
-            Error::BadTravel => write!(
-                f,
-                "the travel model needs a positive speed and acceleration"
-            ),
-            Error::NotFinite => write!(f, "a point isn't finite"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 /// Improvements smaller than this (seconds) don't count, so the search can't cycle on rounding.
 const EPS: f64 = 1e-9;

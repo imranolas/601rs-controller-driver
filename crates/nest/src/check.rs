@@ -2,55 +2,36 @@
 //! structure (three stages, the first horizontal, each last-stage piece one item: an item may
 //! be narrower than its column, trimmed by a fourth cut).
 
-use std::fmt;
-
 use crate::{Instance, Len, Objective, Placement, Solution};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Violation {
     /// Bin packing places every copy; knapsack no more than the copies.
+    #[error("item {item}: {placed} placed, {copies} copies")]
     Count {
         item: usize,
         placed: u32,
         copies: u32,
     },
     /// A placement names an item or bin that doesn't exist.
+    #[error("placement {0} names an item or bin that doesn't exist")]
     Unknown(usize),
     /// A placement's footprint isn't its item's, turned only if the item may turn.
+    #[error("placement {0} isn't its item's size")]
     Size(usize),
     /// A placement reaches into the trims or past the bin.
+    #[error("placement {0} reaches into the trims")]
     Outside(usize),
     /// Two placements overlap.
+    #[error("placements {0} and {1} overlap")]
     Overlap(usize, usize),
     /// A bin's layout can't be cut with three guillotine stages, the first horizontal.
+    #[error("bin {bin} isn't a three-stage guillotine layout")]
     NotThreeStage { bin: usize },
     /// `bins_used` or `profit` doesn't match the placements.
+    #[error("the totals don't match the placements")]
     Totals,
 }
-
-impl fmt::Display for Violation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Violation::Count {
-                item,
-                placed,
-                copies,
-            } => write!(f, "item {item}: {placed} placed, {copies} copies"),
-            Violation::Unknown(p) => {
-                write!(f, "placement {p} names an item or bin that doesn't exist")
-            }
-            Violation::Size(p) => write!(f, "placement {p} isn't its item's size"),
-            Violation::Outside(p) => write!(f, "placement {p} reaches into the trims"),
-            Violation::Overlap(a, b) => write!(f, "placements {a} and {b} overlap"),
-            Violation::NotThreeStage { bin } => {
-                write!(f, "bin {bin} isn't a three-stage guillotine layout")
-            }
-            Violation::Totals => write!(f, "the totals don't match the placements"),
-        }
-    }
-}
-
-impl std::error::Error for Violation {}
 
 /// Check a layout against its instance.
 pub fn check(instance: &Instance, solution: &Solution) -> Result<(), Violation> {

@@ -1,22 +1,25 @@
 //! What the solvers' formats share: reading numbers off the input array, and why an input is
 //! refused, with one code per reason for the WebAssembly boundary.
 
-use std::fmt;
-
 /// Why a solver refused its input.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// A number isn't usable: not finite, not a whole number where one is needed, or out of
     /// range.
+    #[error("a number in the input isn't usable")]
     BadNumber,
     /// The input ended early, or carried more than it said.
+    #[error("the input is the wrong length")]
     BadLength,
     /// The input is for another version of the format.
+    #[error("the input is for another version of the format")]
     BadVersion,
     /// The route optimiser refused the problem.
-    Route(route::Error),
+    #[error(transparent)]
+    Route(#[from] route::Error),
     /// The nester refused the instance.
-    Nest(nest::Error),
+    #[error(transparent)]
+    Nest(#[from] nest::Error),
 }
 
 impl Error {
@@ -43,32 +46,6 @@ impl Error {
                 nest::Error::Bug(_) => 24,
             },
         }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::BadNumber => write!(f, "a number in the input isn't usable"),
-            Error::BadLength => write!(f, "the input is the wrong length"),
-            Error::BadVersion => write!(f, "the input is for another version of the format"),
-            Error::Route(e) => e.fmt(f),
-            Error::Nest(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<route::Error> for Error {
-    fn from(e: route::Error) -> Self {
-        Error::Route(e)
-    }
-}
-
-impl From<nest::Error> for Error {
-    fn from(e: nest::Error) -> Self {
-        Error::Nest(e)
     }
 }
 

@@ -87,6 +87,28 @@ pub enum Op {
     Pause(Pause),
 }
 
+impl Op {
+    /// The op's `id`, if the program gave it one.
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Op::Clamp(o) => o.id.as_deref(),
+            Op::Cut(o) => o.id.as_deref(),
+            Op::Move(o) => o.id.as_deref(),
+            Op::Pause(o) => o.id.as_deref(),
+        }
+    }
+
+    /// The op's `label`, if the program gave it one.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Op::Clamp(o) => o.label.as_deref(),
+            Op::Cut(o) => o.label.as_deref(),
+            Op::Move(o) => o.label.as_deref(),
+            Op::Pause(o) => o.label.as_deref(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Clamp {
