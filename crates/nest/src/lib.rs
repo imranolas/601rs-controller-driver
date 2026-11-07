@@ -21,11 +21,9 @@
 
 mod beam;
 mod check;
-mod flat;
 mod guillotine;
 
 pub use check::{Violation, check};
-pub use flat::{FLAT_VERSION, FlatError, solve_flat};
 
 use std::fmt;
 
@@ -118,7 +116,10 @@ impl Default for Options {
     /// sheet's leftover matched PackingSolver's leftovers objective on 163 of 165 (6 and 11 mm
     /// short on the other two). A gentler growth repeats more passes for nothing.
     fn default() -> Self {
-        Self { max_width: 1024, growth: 4.0 }
+        Self {
+            max_width: 1024,
+            growth: 4.0,
+        }
     }
 }
 
@@ -139,7 +140,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::BadSize => write!(f, "a bin or an item has no area, or its trims leave no room"),
+            Error::BadSize => write!(
+                f,
+                "a bin or an item has no area, or its trims leave no room"
+            ),
             Error::NoBins => write!(f, "no bins"),
             Error::TooBig(i) => write!(f, "item {i} fits no bin"),
             Error::TooMany => write!(f, "too many copies or bins"),
@@ -153,7 +157,10 @@ impl std::error::Error for Error {}
 impl Instance {
     /// The bins with their copies laid out in order: bin indices of a [`Solution`] count these.
     pub fn bin_sequence(&self) -> Vec<&Bin> {
-        self.bins.iter().flat_map(|b| std::iter::repeat_n(b, b.copies as usize)).collect()
+        self.bins
+            .iter()
+            .flat_map(|b| std::iter::repeat_n(b, b.copies as usize))
+            .collect()
     }
 
     pub fn profit(&self, item: usize) -> Area {
@@ -185,7 +192,8 @@ impl Instance {
             for (k, it) in self.items.iter().enumerate() {
                 let fits = |w: Len, h: Len| {
                     self.bins.iter().any(|b| {
-                        w <= b.w - b.trims.left - b.trims.right && h <= b.h - b.trims.top - b.trims.bottom
+                        w <= b.w - b.trims.left - b.trims.right
+                            && h <= b.h - b.trims.top - b.trims.bottom
                     })
                 };
                 if it.copies > 0 && !fits(it.w, it.h) && !(it.rotate && fits(it.h, it.w)) {
@@ -209,19 +217,30 @@ pub fn solve(instance: &Instance, options: &Options) -> Result<Solution, Error> 
         }
         let profit = Some(instance.profit(k));
         match groups.iter_mut().find(|(g, _)| {
-            g.rotate == it.rotate && g.profit == profit && ((g.w, g.h) == (it.w, it.h) || (it.rotate && (g.w, g.h) == (it.h, it.w)))
+            g.rotate == it.rotate
+                && g.profit == profit
+                && ((g.w, g.h) == (it.w, it.h) || (it.rotate && (g.w, g.h) == (it.h, it.w)))
         }) {
             Some((g, members)) => {
                 g.copies += it.copies;
                 members.push(k);
             }
-            None => groups.push((Item { profit, ..it.clone() }, vec![k])),
+            None => groups.push((
+                Item {
+                    profit,
+                    ..it.clone()
+                },
+                vec![k],
+            )),
         }
     }
     if groups.iter().any(|(g, _)| g.copies > u16::MAX as u32) {
         return Err(Error::TooMany);
     }
-    let merged = Instance { items: groups.iter().map(|(g, _)| g.clone()).collect(), ..instance.clone() };
+    let merged = Instance {
+        items: groups.iter().map(|(g, _)| g.clone()).collect(),
+        ..instance.clone()
+    };
     let mut solution = guillotine::solve(&merged, options);
     // Back to the original item types, copies in order.
     let mut next: Vec<(usize, u32)> = vec![(0, 0); groups.len()];

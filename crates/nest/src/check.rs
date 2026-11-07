@@ -9,7 +9,11 @@ use crate::{Instance, Len, Objective, Placement, Solution};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
     /// Bin packing places every copy; knapsack no more than the copies.
-    Count { item: usize, placed: u32, copies: u32 },
+    Count {
+        item: usize,
+        placed: u32,
+        copies: u32,
+    },
     /// A placement names an item or bin that doesn't exist.
     Unknown(usize),
     /// A placement's footprint isn't its item's, turned only if the item may turn.
@@ -27,12 +31,20 @@ pub enum Violation {
 impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Violation::Count { item, placed, copies } => write!(f, "item {item}: {placed} placed, {copies} copies"),
-            Violation::Unknown(p) => write!(f, "placement {p} names an item or bin that doesn't exist"),
+            Violation::Count {
+                item,
+                placed,
+                copies,
+            } => write!(f, "item {item}: {placed} placed, {copies} copies"),
+            Violation::Unknown(p) => {
+                write!(f, "placement {p} names an item or bin that doesn't exist")
+            }
             Violation::Size(p) => write!(f, "placement {p} isn't its item's size"),
             Violation::Outside(p) => write!(f, "placement {p} reaches into the trims"),
             Violation::Overlap(a, b) => write!(f, "placements {a} and {b} overlap"),
-            Violation::NotThreeStage { bin } => write!(f, "bin {bin} isn't a three-stage guillotine layout"),
+            Violation::NotThreeStage { bin } => {
+                write!(f, "bin {bin} isn't a three-stage guillotine layout")
+            }
             Violation::Totals => write!(f, "the totals don't match the placements"),
         }
     }
@@ -54,7 +66,11 @@ pub fn check(instance: &Instance, solution: &Solution) -> Result<(), Violation> 
             return Err(Violation::Size(k));
         }
         let t = bin.trims;
-        if p.x < t.left || p.y < t.top || p.x + p.w > bin.w - t.right || p.y + p.h > bin.h - t.bottom {
+        if p.x < t.left
+            || p.y < t.top
+            || p.x + p.w > bin.w - t.right
+            || p.y + p.h > bin.h - t.bottom
+        {
             return Err(Violation::Outside(k));
         }
         placed[p.item] += 1;
@@ -65,14 +81,23 @@ pub fn check(instance: &Instance, solution: &Solution) -> Result<(), Violation> 
             Objective::Knapsack => n > it.copies,
         };
         if wrong {
-            return Err(Violation::Count { item, placed: n, copies: it.copies });
+            return Err(Violation::Count {
+                item,
+                placed: n,
+                copies: it.copies,
+            });
         }
     }
     let ps = &solution.placements;
     for a in 0..ps.len() {
         for b in a + 1..ps.len() {
             let (p, q) = (&ps[a], &ps[b]);
-            if p.bin == q.bin && p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h {
+            if p.bin == q.bin
+                && p.x < q.x + q.w
+                && q.x < p.x + p.w
+                && p.y < q.y + q.h
+                && q.y < p.y + p.h
+            {
                 return Err(Violation::Overlap(a, b));
             }
         }
@@ -97,13 +122,18 @@ fn three_stage(rects: &[&Placement]) -> bool {
     let rows = |r: &&Placement| (r.y, r.y + r.h);
     let cols = |r: &&Placement| (r.x, r.x + r.w);
     groups(rects, rows).iter().all(|band| {
-        groups(band, cols).iter().all(|column| groups(column, rows).iter().all(|piece| piece.len() == 1))
+        groups(band, cols)
+            .iter()
+            .all(|column| groups(column, rows).iter().all(|piece| piece.len() == 1))
     })
 }
 
 /// Split rectangles into groups whose intervals (as `span` gives them) overlap, chained;
 /// touching intervals don't overlap, so a cut can run between them.
-fn groups<'a>(rects: &[&'a Placement], span: impl Fn(&&Placement) -> (Len, Len)) -> Vec<Vec<&'a Placement>> {
+fn groups<'a>(
+    rects: &[&'a Placement],
+    span: impl Fn(&&Placement) -> (Len, Len),
+) -> Vec<Vec<&'a Placement>> {
     let mut sorted: Vec<&Placement> = rects.to_vec();
     sorted.sort_by_key(|r| span(r).0);
     let mut out: Vec<Vec<&Placement>> = Vec::new();

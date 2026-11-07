@@ -62,15 +62,23 @@ pub(crate) fn search<S: Scheme>(scheme: &S, widths: Widths, best: &mut Option<S:
                             return true;
                         }
                     }
-                    if scheme.is_leaf(&child) || best.as_ref().is_some_and(|b| scheme.bound(&child, b)) {
+                    if scheme.is_leaf(&child)
+                        || best.as_ref().is_some_and(|b| scheme.bound(&child, b))
+                    {
                         continue;
                     }
                     let same = by_key.entry(scheme.key(&child)).or_default();
-                    if same.iter().any(|&i| next[i].as_ref().is_some_and(|n| scheme.dominates(n, &child))) {
+                    if same.iter().any(|&i| {
+                        next[i]
+                            .as_ref()
+                            .is_some_and(|n| scheme.dominates(n, &child))
+                    }) {
                         continue;
                     }
                     same.retain(|&i| {
-                        let dominated = next[i].as_ref().is_some_and(|n| scheme.dominates(&child, n));
+                        let dominated = next[i]
+                            .as_ref()
+                            .is_some_and(|n| scheme.dominates(&child, n));
                         if dominated {
                             next[i] = None;
                         }

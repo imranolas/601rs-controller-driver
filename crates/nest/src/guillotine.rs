@@ -47,7 +47,11 @@ struct Item {
 
 impl Item {
     fn size(&self, rotated: bool) -> (Len, Len) {
-        if rotated { (self.h, self.w) } else { (self.w, self.h) }
+        if rotated {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        }
     }
 }
 
@@ -151,7 +155,12 @@ struct Scheme {
 
 impl Scheme {
     fn guide(&self, n: &Node) -> f64 {
-        let (used, area, items, profit) = (n.current_area as f64, n.item_area as f64, n.items as f64, n.profit as f64);
+        let (used, area, items, profit) = (
+            n.current_area as f64,
+            n.item_area as f64,
+            n.items as f64,
+            n.profit as f64,
+        );
         match self.guide {
             Guide::AreaRatio => used / area,
             Guide::WasteRate => {
@@ -179,7 +188,15 @@ impl Scheme {
 
     /// Put item `t` (turned or not) at `level` in bin `b`, unless a sibling with the same
     /// item leaves more room.
-    fn insert(&self, out: &mut Vec<N>, parent: &N, t: usize, rotated: bool, level: Level, b: usize) {
+    fn insert(
+        &self,
+        out: &mut Vec<N>,
+        parent: &N,
+        t: usize,
+        rotated: bool,
+        level: Level,
+        b: usize,
+    ) {
         let (w, h) = self.items[t].size(rotated);
         let p = &parent.front;
         let bin = &self.bins[b];
@@ -199,15 +216,31 @@ impl Scheme {
             x1_prev,
             x1_curr: if in_strip { x3.max(p.x1_curr) } else { x3 },
             y2_prev: y,
-            y2_curr: if level == Level::SameRow { top.max(p.y2_curr) } else { top },
+            y2_curr: if level == Level::SameRow {
+                top.max(p.y2_curr)
+            } else {
+                top
+            },
             x3_curr: x3,
         };
         let same_item = |c: &N| c.item.is_some_and(|i| i.item as usize == t);
-        if out.iter().any(|c| same_item(c) && dominates(&c.front, &front)) {
+        if out
+            .iter()
+            .any(|c| same_item(c) && dominates(&c.front, &front))
+        {
             return;
         }
         out.retain(|c| !(same_item(c) && dominates(&front, &c.front)));
-        out.push(self.child(parent, Placed { item: t as u16, rotated, x, y }, front));
+        out.push(self.child(
+            parent,
+            Placed {
+                item: t as u16,
+                rotated,
+                x,
+                y,
+            },
+            front,
+        ));
     }
 
     /// Every item type with copies left, each way round, at `level` in bin `b`.
@@ -239,7 +272,8 @@ impl Scheme {
             } else {
                 (front.x1_prev - bin.x0) as Area * height
                     + (front.x1_curr - front.x1_prev) as Area * (front.y2_prev - bin.y0) as Area
-                    + (front.x3_curr - front.x1_prev) as Area * (front.y2_curr - front.y2_prev) as Area
+                    + (front.x3_curr - front.x1_prev) as Area
+                        * (front.y2_curr - front.y2_prev) as Area
             };
         let id = self.next_id.get();
         self.next_id.set(id + 1);
@@ -281,7 +315,12 @@ impl beam::Scheme for Scheme {
         let levels: &[Level] = if parent.item.is_none() {
             &[Level::NewBin]
         } else {
-            &[Level::SameRow, Level::NewRow, Level::NewStrip, Level::NewBin]
+            &[
+                Level::SameRow,
+                Level::NewRow,
+                Level::NewStrip,
+                Level::NewBin,
+            ]
         };
         let p = &parent.front;
         for &level in levels {
@@ -310,8 +349,12 @@ impl beam::Scheme for Scheme {
         if parent.item.is_some() {
             let same_bin = |c: &N| c.bins == parent.bins;
             let has_bin = out.iter().any(same_bin);
-            let has_strip = out.iter().any(|c| same_bin(c) && c.front.x1_curr == p.x1_curr);
-            let has_row = out.iter().any(|c| same_bin(c) && c.front.x1_curr == p.x1_curr && c.front.y2_curr == p.y2_curr);
+            let has_strip = out
+                .iter()
+                .any(|c| same_bin(c) && c.front.x1_curr == p.x1_curr);
+            let has_row = out.iter().any(|c| {
+                same_bin(c) && c.front.x1_curr == p.x1_curr && c.front.y2_curr == p.y2_curr
+            });
             out.retain(|c| {
                 let new_bin = c.bins > parent.bins;
                 let new_strip = new_bin || c.front.x1_prev >= p.x1_curr;
@@ -332,7 +375,9 @@ impl beam::Scheme for Scheme {
             // sheet (a full-width band at its end).
             Objective::BinPacking => {
                 self.is_leaf(n)
-                    && best.is_none_or(|b| !self.is_leaf(b) || (n.bins, n.current_area) < (b.bins, b.current_area))
+                    && best.is_none_or(|b| {
+                        !self.is_leaf(b) || (n.bins, n.current_area) < (b.bins, b.current_area)
+                    })
             }
             Objective::Knapsack => best.is_none_or(|b| n.profit > b.profit),
         }
@@ -351,18 +396,23 @@ impl beam::Scheme for Scheme {
                 let mut need = used;
                 let mut bins = 0;
                 while need > 0 {
-                    let Some(bin) = self.bins.get(bins) else { return true };
+                    let Some(bin) = self.bins.get(bins) else {
+                        return true;
+                    };
                     need -= bin.area();
                     bins += 1;
                 }
-                bins > best.bins as usize || (bins == best.bins as usize && used >= best.current_area)
+                bins > best.bins as usize
+                    || (bins == best.bins as usize && used >= best.current_area)
             }
             Objective::Knapsack => self.profit_bound(n) <= best.profit,
         }
     }
 
     fn order(&self, a: &N, b: &N) -> Ordering {
-        self.guide(a).total_cmp(&self.guide(b)).then(a.id.cmp(&b.id))
+        self.guide(a)
+            .total_cmp(&self.guide(b))
+            .then(a.id.cmp(&b.id))
     }
 
     fn key(&self, n: &N) -> Box<[u16]> {
@@ -376,7 +426,8 @@ impl beam::Scheme for Scheme {
     fn is_optimal(&self, best: &N) -> bool {
         match self.objective {
             Objective::BinPacking => {
-                self.is_leaf(best) && (best.bins as usize, best.current_area) <= (self.min_bins, self.min_area)
+                self.is_leaf(best)
+                    && (best.bins as usize, best.current_area) <= (self.min_bins, self.min_area)
             }
             Objective::Knapsack => best.profit >= self.total_profit,
         }
@@ -392,7 +443,14 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
         .bin_sequence()
         .iter()
         .enumerate()
-        .map(|(index, b)| Bin { index, x0: b.trims.top, x_end: b.h - b.trims.bottom, y0: b.trims.left, y_end: b.w - b.trims.right, area_before: 0 })
+        .map(|(index, b)| Bin {
+            index,
+            x0: b.trims.top,
+            x_end: b.h - b.trims.bottom,
+            y0: b.trims.left,
+            y_end: b.w - b.trims.right,
+            area_before: 0,
+        })
         .collect();
     // Knapsack: the bins by increasing area, whatever their order (as PackingSolver does), so
     // the small drop-outs are filled first.
@@ -437,7 +495,10 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
         Objective::BinPacking => [Guide::AreaRatio, Guide::WasteRate],
         Objective::Knapsack => [Guide::AreaPerProfit, Guide::AreaPerProfitPerItem],
     };
-    let widths = Widths { max_width: options.max_width.max(1), growth: options.growth.max(1.01) };
+    let widths = Widths {
+        max_width: options.max_width.max(1),
+        growth: options.growth.max(1.01),
+    };
     let mut best: Option<N> = None;
     for guide in guides {
         let scheme = Scheme {
@@ -445,7 +506,10 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
             total_item_area,
             total_profit: items.iter().map(|i| i.profit * i.copies as Area).sum(),
             total_bin_area: area_before,
-            efficiency: items.iter().map(|i| i.profit as f64 / i.area as f64).fold(0.0, f64::max),
+            efficiency: items
+                .iter()
+                .map(|i| i.profit as f64 / i.area as f64)
+                .fold(0.0, f64::max),
             min_bins,
             min_area,
             next_id: Cell::new(1),
@@ -479,6 +543,11 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
         node = n.parent.as_ref();
     }
     solution.placements.reverse();
-    solution.bins_used = solution.placements.iter().map(|p| p.bin + 1).max().unwrap_or(0);
+    solution.bins_used = solution
+        .placements
+        .iter()
+        .map(|p| p.bin + 1)
+        .max()
+        .unwrap_or(0);
     solution
 }

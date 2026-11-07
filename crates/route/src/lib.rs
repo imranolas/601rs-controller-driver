@@ -22,10 +22,6 @@
 //! Every move keeps the precedence, so a route is always legal. It is seeded, so the same input
 //! always gives the same route, and it starts from the given route, so it is never worse.
 
-mod flat;
-
-pub use flat::{FLAT_VERSION, solve_flat};
-
 use std::fmt;
 
 /// A point on the sheet, in millimetres.
@@ -76,7 +72,7 @@ impl Travel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// A job has no way to cut it.
     NoWays(usize),
@@ -86,43 +82,27 @@ pub enum Error {
     BadFlip(usize),
     /// The precedence has a cycle, so no order can keep it.
     Cycle,
-    /// A number isn't usable: not finite, or not a whole number where one is needed.
-    BadNumber,
-    /// The flat input ended early, or carried more than it said.
-    BadLength,
-    /// The flat input is for another version of the format.
-    BadVersion,
     /// The travel model needs a positive speed and acceleration.
     BadTravel,
-}
-
-impl Error {
-    /// A code for the WebAssembly boundary (always 2 or more; the shim negates it).
-    pub fn code(&self) -> i32 {
-        match self {
-            Error::NoWays(_) => 2,
-            Error::BadAfter(_) => 3,
-            Error::BadFlip(_) => 4,
-            Error::Cycle => 5,
-            Error::BadNumber => 6,
-            Error::BadLength => 7,
-            Error::BadVersion => 8,
-            Error::BadTravel => 9,
-        }
-    }
+    /// A point isn't finite.
+    NotFinite,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::NoWays(j) => write!(f, "job {j} has no way to cut it"),
-            Error::BadAfter(j) => write!(f, "job {j} must come after a job that doesn't exist, or itself"),
+            Error::BadAfter(j) => write!(
+                f,
+                "job {j} must come after a job that doesn't exist, or itself"
+            ),
             Error::BadFlip(j) => write!(f, "job {j} has a bad flip list"),
             Error::Cycle => write!(f, "the precedence has a cycle"),
-            Error::BadNumber => write!(f, "a number in the input isn't usable"),
-            Error::BadLength => write!(f, "the input is the wrong length"),
-            Error::BadVersion => write!(f, "the input is for another version of the format"),
-            Error::BadTravel => write!(f, "the travel model needs a positive speed and acceleration"),
+            Error::BadTravel => write!(
+                f,
+                "the travel model needs a positive speed and acceleration"
+            ),
+            Error::NotFinite => write!(f, "a point isn't finite"),
         }
     }
 }
@@ -148,18 +128,25 @@ pub struct Problem {
 impl Problem {
     pub fn new(mut jobs: Vec<Job>, start: Pt, travel: Travel) -> Result<Self, Error> {
         let n = jobs.len();
-        if !(travel.speed > 0.0 && travel.accel > 0.0 && travel.speed.is_finite() && travel.accel.is_finite()) {
+        if !(travel.speed > 0.0
+            && travel.accel > 0.0
+            && travel.speed.is_finite()
+            && travel.accel.is_finite())
+        {
             return Err(Error::BadTravel);
         }
         if !(start[0].is_finite() && start[1].is_finite()) {
-            return Err(Error::BadNumber);
+            return Err(Error::NotFinite);
         }
         for (i, j) in jobs.iter_mut().enumerate() {
             if j.ways.is_empty() {
                 return Err(Error::NoWays(i));
             }
-            if j.ways.iter().any(|w| !w.entry.iter().chain(&w.exit).all(|v| v.is_finite())) {
-                return Err(Error::BadNumber);
+            if j.ways
+                .iter()
+                .any(|w| !w.entry.iter().chain(&w.exit).all(|v| v.is_finite()))
+            {
+                return Err(Error::NotFinite);
             }
             if j.after.iter().any(|&p| p >= n || p == i) {
                 return Err(Error::BadAfter(i));
@@ -178,7 +165,13 @@ impl Problem {
                 succs[p].push(i);
             }
         }
-        let p = Self { jobs, start, end: None, travel, succs };
+        let p = Self {
+            jobs,
+            start,
+            end: None,
+            travel,
+            succs,
+        };
         if p.topological().len() < n {
             return Err(Error::Cycle);
         }
@@ -189,7 +182,7 @@ impl Problem {
     /// chooses how it finishes.
     pub fn with_end(mut self, end: Option<Pt>) -> Result<Self, Error> {
         if end.is_some_and(|e| !(e[0].is_finite() && e[1].is_finite())) {
-            return Err(Error::BadNumber);
+            return Err(Error::NotFinite);
         }
         self.end = end;
         Ok(self)
@@ -201,10 +194,14 @@ impl Problem {
 
     /// Head-up travel time from the start through the route (and on to the end, if set).
     pub fn cost(&self, r: &Route) -> f64 {
+        self.cost_of(&r.order, &r.ways)
+    }
+
+    fn cost_of(&self, order: &[usize], ways: &[usize]) -> f64 {
         let mut at = self.start;
         let mut c = 0.0;
-        for &j in &r.order {
-            let w = self.jobs[j].ways[r.ways[j]];
+        for &j in order {
+            let w = self.jobs[j].ways[ways[j]];
             c += self.travel.time(at, w.entry);
             at = w.exit;
         }
@@ -229,16 +226,26 @@ impl Problem {
             }
             pos[j] = i;
         }
-        (0..n).all(|j| r.ways[j] < self.jobs[j].ways.len() && self.jobs[j].after.iter().all(|&p| pos[p] < pos[j]))
+        (0..n).all(|j| {
+            r.ways[j] < self.jobs[j].ways.len()
+                && self.jobs[j].after.iter().all(|&p| pos[p] < pos[j])
+        })
     }
 
     /// The best way to cut each job for a fixed order: exact, by dynamic programming.
     pub fn best_ways(&self, order: &[usize]) -> Route {
         let mut ways = vec![0; self.jobs.len()];
         let Some(&first) = order.first() else {
-            return Route { order: Vec::new(), ways };
+            return Route {
+                order: Vec::new(),
+                ways,
+            };
         };
-        let mut cost: Vec<f64> = self.jobs[first].ways.iter().map(|w| self.travel.time(self.start, w.entry)).collect();
+        let mut cost: Vec<f64> = self.jobs[first]
+            .ways
+            .iter()
+            .map(|w| self.travel.time(self.start, w.entry))
+            .collect();
         let mut back: Vec<Vec<usize>> = vec![vec![0; cost.len()]];
         for k in 1..order.len() {
             let prev = &self.jobs[order[k - 1]].ways;
@@ -269,29 +276,16 @@ impl Problem {
             ways[order[k]] = wi;
             wi = back[k][wi];
         }
-        Route { order: order.to_vec(), ways }
-    }
-
-    /// An order that keeps the precedence: lowest-numbered ready job first.
-    fn topological(&self) -> Vec<usize> {
-        let mut waiting: Vec<usize> = self.jobs.iter().map(|j| j.after.len()).collect();
-        let mut ready: Vec<usize> = (0..self.jobs.len()).filter(|&j| waiting[j] == 0).rev().collect();
-        let mut order = Vec::with_capacity(self.jobs.len());
-        while let Some(j) = ready.pop() {
-            order.push(j);
-            for &s in &self.succs[j] {
-                waiting[s] -= 1;
-                if waiting[s] == 0 {
-                    ready.push(s);
-                    ready.sort_unstable_by(|a, b| b.cmp(a));
-                }
-            }
+        Route {
+            order: order.to_vec(),
+            ways,
         }
-        order
     }
 
-    /// Nearest ready job next, by its nearest way in.
-    pub fn nearest_first(&self) -> Route {
+    /// Build a route job by job: `pick` chooses one of the ready jobs (by its place in
+    /// `ready`) and a way for it, given where the head is. A cycle in the precedence ends the
+    /// route early.
+    fn build(&self, mut pick: impl FnMut(&[usize], Pt) -> (usize, usize)) -> Route {
         let n = self.jobs.len();
         let mut waiting: Vec<usize> = self.jobs.iter().map(|j| j.after.len()).collect();
         let mut ready: Vec<usize> = (0..n).filter(|&j| waiting[j] == 0).collect();
@@ -299,19 +293,11 @@ impl Problem {
         let mut ways = vec![0; n];
         let mut at = self.start;
         while !ready.is_empty() {
-            let (mut bi, mut bw, mut bc) = (0, 0, f64::INFINITY);
-            for (ri, &j) in ready.iter().enumerate() {
-                for (wi, w) in self.jobs[j].ways.iter().enumerate() {
-                    let c = self.travel.time(at, w.entry);
-                    if c < bc {
-                        (bi, bw, bc) = (ri, wi, c);
-                    }
-                }
-            }
-            let j = ready.swap_remove(bi);
+            let (r, w) = pick(&ready, at);
+            let j = ready.swap_remove(r);
             order.push(j);
-            ways[j] = bw;
-            at = self.jobs[j].ways[bw].exit;
+            ways[j] = w;
+            at = self.jobs[j].ways[w].exit;
             for &s in &self.succs[j] {
                 waiting[s] -= 1;
                 if waiting[s] == 0 {
@@ -320,6 +306,37 @@ impl Problem {
             }
         }
         Route { order, ways }
+    }
+
+    /// An order that keeps the precedence: lowest-numbered ready job first.
+    fn topological(&self) -> Vec<usize> {
+        let lowest = |ready: &[usize], _: Pt| {
+            (
+                ready
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|e| e.1)
+                    .map_or(0, |e| e.0),
+                0,
+            )
+        };
+        self.build(lowest).order
+    }
+
+    /// Nearest ready job next, by its nearest way in.
+    pub fn nearest_first(&self) -> Route {
+        self.build(|ready, at| {
+            let (mut best, mut cost) = ((0, 0), f64::INFINITY);
+            for (r, &j) in ready.iter().enumerate() {
+                for (w, way) in self.jobs[j].ways.iter().enumerate() {
+                    let c = self.travel.time(at, way.entry);
+                    if c < cost {
+                        (best, cost) = ((r, w), c);
+                    }
+                }
+            }
+            best
+        })
     }
 }
 
@@ -359,7 +376,15 @@ pub struct Tuning {
 
 impl Default for Tuning {
     fn default() -> Self {
-        Self { heat: 1.0, blink: 0.05, max_ruin: 30, max_run: 3, string: 0.8, runs: 4, bridge: 0.2 }
+        Self {
+            heat: 1.0,
+            blink: 0.05,
+            max_ruin: 30,
+            max_run: 3,
+            string: 0.8,
+            runs: 4,
+            bridge: 0.2,
+        }
     }
 }
 
@@ -376,7 +401,12 @@ pub enum Look {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { seed: 1, kicks: 0, look: Look::Near, tuning: Tuning::default() }
+        Self {
+            seed: 1,
+            kicks: 0,
+            look: Look::Near,
+            tuning: Tuning::default(),
+        }
     }
 }
 
@@ -393,7 +423,10 @@ pub fn optimise(p: &Problem, from: Option<&Route>, o: &Options) -> Route {
     let n = p.jobs.len();
     let given = match from {
         Some(r) if p.is_legal(r) => r.clone(),
-        _ => Route { order: p.topological(), ways: vec![0; n] },
+        _ => Route {
+            order: p.topological(),
+            ways: vec![0; n],
+        },
     };
     let mut best = given.clone();
     let mut best_cost = p.cost(&best);
@@ -411,7 +444,14 @@ pub fn optimise(p: &Problem, from: Option<&Route>, o: &Options) -> Route {
     let runs = o.tuning.runs.max(1);
     for run in 0..runs {
         let init = &starts[run % starts.len()];
-        let mut s = Search::new(p, &cands, init, o.seed.wrapping_add(run as u64), o.look, o.tuning);
+        let mut s = Search::new(
+            p,
+            &cands,
+            init,
+            o.seed.wrapping_add(run as u64),
+            o.look,
+            o.tuning,
+        );
         let r = s.iterate(kicks / runs);
         let c = p.cost(&r);
         if c < best_cost - EPS {
@@ -462,14 +502,20 @@ impl Cands {
             m
         };
         let nearest = |d: &dyn Fn(usize) -> f64, skip: usize| -> Vec<usize> {
-            let mut all: Vec<(f64, usize)> = (0..n).filter(|&o| o != skip).map(|o| (d(o), o)).collect();
+            let mut all: Vec<(f64, usize)> =
+                (0..n).filter(|&o| o != skip).map(|o| (d(o), o)).collect();
             all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
             all.into_iter().take(k).map(|e| e.1).collect()
         };
-        let next: Vec<Vec<usize>> = (0..n).map(|j| nearest(&|o| gap(&outs[j], &ins[o]), j)).collect();
-        let prev: Vec<Vec<usize>> = (0..n).map(|j| nearest(&|o| gap(&ins[j], &outs[o]), j)).collect();
-        let near: Vec<Vec<usize>> =
-            (0..n).map(|j| nearest(&|o| gap(&outs[j], &ins[o]).min(gap(&ins[j], &outs[o])), j)).collect();
+        let next: Vec<Vec<usize>> = (0..n)
+            .map(|j| nearest(&|o| gap(&outs[j], &ins[o]), j))
+            .collect();
+        let prev: Vec<Vec<usize>> = (0..n)
+            .map(|j| nearest(&|o| gap(&ins[j], &outs[o]), j))
+            .collect();
+        let near: Vec<Vec<usize>> = (0..n)
+            .map(|j| nearest(&|o| gap(&outs[j], &ins[o]).min(gap(&ins[j], &outs[o])), j))
+            .collect();
         let first = nearest(&|o| gap(&[p.start], &ins[o]), usize::MAX);
         let mut is_first = vec![false; n];
         for &j in &first {
@@ -489,7 +535,15 @@ impl Cands {
                 }
             }
         }
-        Self { next, prev, first, is_first, is_last, near, watchers }
+        Self {
+            next,
+            prev,
+            first,
+            is_first,
+            is_last,
+            near,
+            watchers,
+        }
     }
 }
 
@@ -517,7 +571,6 @@ impl Rng {
     }
 }
 
-
 #[derive(Debug)]
 struct Search<'a> {
     p: &'a Problem,
@@ -535,7 +588,14 @@ struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
-    fn new(p: &'a Problem, c: &'a Cands, init: &Route, seed: u64, look: Look, tune: Tuning) -> Self {
+    fn new(
+        p: &'a Problem,
+        c: &'a Cands,
+        init: &Route,
+        seed: u64,
+        look: Look,
+        tune: Tuning,
+    ) -> Self {
         let n = init.order.len();
         let mut s = Self {
             p,
@@ -562,7 +622,9 @@ impl<'a> Search<'a> {
 
     /// Wake the jobs at positions from..=to and either side, and the jobs watching them.
     fn wake_around(&mut self, from: usize, to: usize) {
-        let Some(last) = self.order.len().checked_sub(1) else { return };
+        let Some(last) = self.order.len().checked_sub(1) else {
+            return;
+        };
         let c = self.c;
         for i in from.saturating_sub(1)..=(to + 1).min(last) {
             let j = self.order[i];
@@ -588,7 +650,11 @@ impl<'a> Search<'a> {
     }
 
     fn exit_before(&self, i: usize) -> Pt {
-        if i == 0 { self.p.start } else { self.cur(self.order[i - 1]).exit }
+        if i == 0 {
+            self.p.start
+        } else {
+            self.cur(self.order[i - 1]).exit
+        }
     }
 
     /// Where the head goes down next after position i - 1: the job at i, or after the last job
@@ -607,7 +673,10 @@ impl<'a> Search<'a> {
     }
 
     fn route(&self) -> Route {
-        Route { order: self.order.clone(), ways: self.way.clone() }
+        Route {
+            order: self.order.clone(),
+            ways: self.way.clone(),
+        }
     }
 
     fn restore(&mut self, r: &Route) {
@@ -619,14 +688,7 @@ impl<'a> Search<'a> {
     }
 
     fn cost(&self) -> f64 {
-        let mut at = self.p.start;
-        let mut c = 0.0;
-        for &j in &self.order {
-            let w = self.cur(j);
-            c += self.t(at, w.entry);
-            at = w.exit;
-        }
-        c + self.p.finish(at)
+        self.p.cost_of(&self.order, &self.way)
     }
 
     /// The best way for job `j` between a way out and (maybe) a way in, and what it costs.
@@ -644,9 +706,18 @@ impl<'a> Search<'a> {
     /// No job in a..=b has to come before a job in b+1..=k.
     fn can_swap(&self, a: usize, b: usize, k: usize) -> bool {
         if b + 1 - a <= k - b {
-            self.order[a..=b].iter().all(|&x| self.p.succs[x].iter().all(|&s| !(b < self.pos[s] && self.pos[s] <= k)))
+            self.order[a..=b].iter().all(|&x| {
+                self.p.succs[x]
+                    .iter()
+                    .all(|&s| !(b < self.pos[s] && self.pos[s] <= k))
+            })
         } else {
-            self.order[b + 1..=k].iter().all(|&y| self.p.jobs[y].after.iter().all(|&q| !(a <= self.pos[q] && self.pos[q] <= b)))
+            self.order[b + 1..=k].iter().all(|&y| {
+                self.p.jobs[y]
+                    .after
+                    .iter()
+                    .all(|&q| !(a <= self.pos[q] && self.pos[q] <= b))
+            })
         }
     }
 
@@ -656,48 +727,88 @@ impl<'a> Search<'a> {
         if !(a <= b && b < k && k < self.order.len()) {
             return false;
         }
-        let (a0, al, b0, bl) = (self.order[a], self.order[b], self.order[b + 1], self.order[k]);
+        let (a0, al, b0, bl) = (
+            self.order[a],
+            self.order[b],
+            self.order[b + 1],
+            self.order[k],
+        );
         let pe = self.exit_before(a);
         let nx = self.entry_at(k + 1);
         let old = self.t(pe, self.cur(a0).entry)
             + self.t(self.cur(al).exit, self.cur(b0).entry)
             + nx.map_or(0.0, |e| self.t(self.cur(bl).exit, e));
-        let wb = if b0 == bl { self.best_way(b0, pe, Some(self.cur(a0).entry)).0 } else { self.way[b0] };
+        let wb = if b0 == bl {
+            self.best_way(b0, pe, Some(self.cur(a0).entry)).0
+        } else {
+            self.way[b0]
+        };
         let b_first = self.w(b0, wb);
-        let b_exit = if b0 == bl { b_first.exit } else { self.cur(bl).exit };
-        let wa = if a0 == al { self.best_way(a0, b_exit, nx).0 } else { self.way[a0] };
+        let b_exit = if b0 == bl {
+            b_first.exit
+        } else {
+            self.cur(bl).exit
+        };
+        let wa = if a0 == al {
+            self.best_way(a0, b_exit, nx).0
+        } else {
+            self.way[a0]
+        };
         let a_first = self.w(a0, wa);
-        let a_exit = if a0 == al { a_first.exit } else { self.cur(al).exit };
-        let new = self.t(pe, b_first.entry) + self.t(b_exit, a_first.entry) + nx.map_or(0.0, |e| self.t(a_exit, e));
+        let a_exit = if a0 == al {
+            a_first.exit
+        } else {
+            self.cur(al).exit
+        };
+        let new = self.t(pe, b_first.entry)
+            + self.t(b_exit, a_first.entry)
+            + nx.map_or(0.0, |e| self.t(a_exit, e));
         if new >= old - EPS || !self.can_swap(a, b, k) {
             return false;
         }
-        self.order[a..=k].rotate_left(b + 1 - a);
-        self.reindex(a, k);
         self.way[b0] = wb;
         self.way[a0] = wa;
+        self.swap_runs(a, b, k);
+        true
+    }
+
+    /// Runs a..=b and b+1..=k swap places; wakes the jobs at the joins.
+    fn swap_runs(&mut self, a: usize, b: usize, k: usize) {
+        self.order[a..=k].rotate_left(b + 1 - a);
+        self.reindex(a, k);
         let lb = k - b;
         self.wake_around(a, a);
         self.wake_around(a + lb - 1, a + lb);
         self.wake_around(k, k);
-        true
     }
 
     fn flipped(&self, x: usize) -> usize {
-        self.p.jobs[x].flip.as_ref().map_or(self.way[x], |f| f[self.way[x]])
+        self.p.jobs[x]
+            .flip
+            .as_ref()
+            .map_or(self.way[x], |f| f[self.way[x]])
     }
 
     /// Cut the run i..=j (straight lines only, no precedence among them) in reverse order, each
     /// line the other way round, if that shortens the route.
     fn try_reverse(&mut self, i: usize, j: usize) -> bool {
-        if i >= j || j >= self.order.len() || self.order[i..=j].iter().any(|&x| self.p.jobs[x].flip.is_none()) {
+        if i >= j
+            || j >= self.order.len()
+            || self.order[i..=j]
+                .iter()
+                .any(|&x| self.p.jobs[x].flip.is_none())
+        {
             return false;
         }
         let pe = self.exit_before(i);
         let nx = self.entry_at(j + 1);
-        let mut old = self.t(pe, self.cur(self.order[i]).entry) + nx.map_or(0.0, |e| self.t(self.cur(self.order[j]).exit, e));
+        let mut old = self.t(pe, self.cur(self.order[i]).entry)
+            + nx.map_or(0.0, |e| self.t(self.cur(self.order[j]).exit, e));
         for m in i..j {
-            old += self.t(self.cur(self.order[m]).exit, self.cur(self.order[m + 1]).entry);
+            old += self.t(
+                self.cur(self.order[m]).exit,
+                self.cur(self.order[m + 1]).entry,
+            );
         }
         let mut new = 0.0;
         let mut at = pe;
@@ -713,7 +824,12 @@ impl<'a> Search<'a> {
         if new >= old - EPS {
             return false;
         }
-        if self.order[i..=j].iter().any(|&x| self.p.jobs[x].after.iter().any(|&q| (i..=j).contains(&self.pos[q]))) {
+        if self.order[i..=j].iter().any(|&x| {
+            self.p.jobs[x]
+                .after
+                .iter()
+                .any(|&q| (i..=j).contains(&self.pos[q]))
+        }) {
             return false;
         }
         for m in i..=j {
@@ -767,20 +883,28 @@ impl<'a> Search<'a> {
             }
             for &d in &c.prev[s0] {
                 let g = self.pos[d];
-                if (g + 1 < i && self.try_exchange(g + 1, i - 1, j)) || (g > j && self.try_exchange(i, j, g)) {
+                if (g + 1 < i && self.try_exchange(g + 1, i - 1, j))
+                    || (g > j && self.try_exchange(i, j, g))
+                {
                     return true;
                 }
             }
             for &e in &c.next[sl] {
                 let h = self.pos[e];
-                if (h < i && self.try_exchange(h, i - 1, j)) || (h > j + 1 && self.try_exchange(i, j, h - 1)) {
+                if (h < i && self.try_exchange(h, i - 1, j))
+                    || (h > j + 1 && self.try_exchange(i, j, h - 1))
+                {
                     return true;
                 }
             }
         }
         // Two adjacent runs of any length swap: A from i, B after it, so that the job before
         // A is followed by a near job (B's first), and B's last by a job near A's first.
-        let firsts: &[usize] = if i == 0 { &c.first } else { &c.next[self.order[i - 1]] };
+        let firsts: &[usize] = if i == 0 {
+            &c.first
+        } else {
+            &c.next[self.order[i - 1]]
+        };
         for &b0 in firsts {
             let bp = self.pos[b0];
             if bp <= i {
@@ -867,11 +991,15 @@ impl<'a> Search<'a> {
         }
         let c = self.c;
         let seed = self.rng.below(n);
-        let size = 2 + self.rng.below(self.tune.max_ruin.saturating_sub(1).min(n / 2).max(1));
+        let size = 2 + self
+            .rng
+            .below(self.tune.max_ruin.saturating_sub(1).min(n / 2).max(1));
         let mut out = vec![false; n];
         if self.rng.unit() <= self.tune.string {
             // A stretch of the route around the seed.
-            let from = self.pos[seed].saturating_sub(self.rng.below(size)).min(n - size.min(n));
+            let from = self.pos[seed]
+                .saturating_sub(self.rng.below(size))
+                .min(n - size.min(n));
             for &x in &self.order[from..(from + size).min(n)] {
                 out[x] = true;
             }
@@ -906,8 +1034,9 @@ impl<'a> Search<'a> {
         self.order.retain(|&x| !out[x]);
         self.reindex(0, self.order.len().saturating_sub(1));
         while !left.is_empty() {
-            let ready: Vec<usize> =
-                (0..left.len()).filter(|&r| self.p.jobs[left[r]].after.iter().all(|&q| !out[q])).collect();
+            let ready: Vec<usize> = (0..left.len())
+                .filter(|&r| self.p.jobs[left[r]].after.iter().all(|&q| !out[q]))
+                .collect();
             let x = left.swap_remove(ready[self.rng.below(ready.len())]);
             self.insert_cheapest(x, &out);
             out[x] = false;
@@ -929,12 +1058,7 @@ impl<'a> Search<'a> {
             if k >= n || !self.can_swap(a, b, k) {
                 continue;
             }
-            self.order[a..=k].rotate_left(b + 1 - a);
-            self.reindex(a, k);
-            let lb = k - b;
-            self.wake_around(a, a);
-            self.wake_around(a + lb - 1, a + lb);
-            self.wake_around(k, k);
+            self.swap_runs(a, b, k);
             return true;
         }
         false
@@ -966,7 +1090,12 @@ impl<'a> Search<'a> {
     fn insert_cheapest(&mut self, x: usize, out: &[bool]) {
         let p = self.p;
         let job = &p.jobs[x];
-        let lo = job.after.iter().map(|&q| self.pos[q] + 1).max().unwrap_or(0);
+        let lo = job
+            .after
+            .iter()
+            .map(|&q| self.pos[q] + 1)
+            .max()
+            .unwrap_or(0);
         let hi = self.latest(x, out);
         let mut best = (f64::INFINITY, lo, 0);
         for at in lo..=hi {
