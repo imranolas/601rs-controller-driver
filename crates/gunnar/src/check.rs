@@ -9,10 +9,16 @@
 //! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream; no overrun at full speed; `@B` on a held stream discards it |
 //! | 7 | yes | `@S` loses the position; a limit switch arrives as an async `*03x` and shows in `@Y` (the drive towards it ends 20 mm past GMC's drivable range) |
 //!
-//! Safety rules: the head stays up (outputs `0x02`; only the spare bit `0x80` and, after
-//! asking, the clamps are switched). Moves are small and go *away* from the home switches
-//! (direction from `&D`). Nothing is saved (`#W` is never sent); the parameters a stage
-//! changes are read first and written back at the end. Ctrl-C brakes (`@B`) and exits.
+//! Safety rules:
+//! - Homing raises both heads first (`$A02`). Every other moving stage starts with the heads
+//!   up and the carriage at the park, GMC's end-of-job position at the far end of X, clear of
+//!   the board's corner and the home switches; it asks before travelling there.
+//! - Every move stays within [`REACH_MM`] of the park, into the table ([`inward`]), so it stays
+//!   inside the soft limits even when a stop under test fails. Only stage 7's limit-switch
+//!   drive leaves them, and only towards a switch the controller can see.
+//! - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.
+//! - Nothing is saved (`#W` is never sent); the parameters a stage changes are read first and
+//!   written back at the end. Ctrl-C brakes (`@B`) and exits.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -99,6 +105,8 @@ pub struct Ctx {
     /// The operator chose to stop: every prompt after that is answered "no", and the run ends
     /// once the stage in hand has wound down (parameters are still restored).
     pub quit: bool,
+    /// The operator has confirmed the park is where GMC parks (asked once per run).
+    pub park_confirmed: bool,
 }
 
 impl Ctx {
@@ -177,14 +185,120 @@ fn pos<M: ModeMarker>(c: &mut Controller<M>) -> Res<[i32; 3]> {
     ])
 }
 
-/// +1 if the axis homes towards minus (so plus moves away from the switch), −1 if it homes
-/// towards plus. A `&D` reply that says neither is an error, never a guess: a wrong direction
-/// could drive the axis into its home switch.
-fn away(p: &mut Params, axis: Axis) -> Res<i32> {
-    Ok(match p.homing_side(axis)? {
-        Side::Minus => 1,
-        Side::Plus => -1,
-    })
+/// How far any move strays from the park, mm: the longest is a 100 mm jog that a stop under
+/// test should cut short.
+pub const REACH_MM: i32 = 100;
+
+fn reach() -> i32 {
+    REACH_MM * steps_per_mm()
+}
+
+/// The way into the table from the park, X and Y: towards the middle of the envelope. On the
+/// 601 that is towards home in X (the park is at the far end) and away from it in Y.
+fn inward() -> [i32; 2] {
+    let p = profile();
+    let towards_middle = |park: i32, [lo, hi]: [f64; 2], scale: f64| {
+        if f64::from(park) > (lo + hi) / 2.0 * scale {
+            -1
+        } else {
+            1
+        }
+    };
+    [
+        towards_middle(p.park_steps[0], p.envelope_mm.x, p.scale.x_steps_per_mm),
+        towards_middle(p.park_steps[1], p.envelope_mm.y, p.scale.y_steps_per_mm),
+    ]
+}
+
+/// The profile, its park and these moves take home to be at the low end of X and Y, as GMC's
+/// coordinates show (after homing it travels to `X0`, `Y40600` [CAP g_init]). Whether the
+/// controller homes that way (`&D`); if not, nothing should move.
+fn home_at_low_ends(p: &mut Params, ctx: &mut Ctx) -> Res<bool> {
+    for axis in [Axis::X, Axis::Y] {
+        if p.homing_side(axis)? != Side::Minus {
+            ctx.r.fail(
+                "home at the low ends",
+                format!(
+                    "{axis:?} homes towards plus (&D), but the profile and its park assume                      minus: no stage will move"
+                ),
+            );
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Where every moving stage starts: both heads up, and the carriage at the park, asking
+/// before travelling there. Whether it got there; a stage that didn't must not move.
+fn to_park(p: Params, ctx: &mut Ctx) -> Res<(Params, bool)> {
+    let mut p = p;
+    if !home_at_low_ends(&mut p, ctx)? {
+        return Ok((p, false));
+    }
+    // Positions mean nothing until homed (after `@S`, say): never travel on them.
+    if !p.status()?.homed {
+        ctx.r.skip("travel to the park", "the machine is not homed");
+        return Ok((p, false));
+    }
+    let profile = profile();
+    let mut j = p.into_jog()?;
+    j.set_outputs(profile.neutral_outputs)?;
+    let [x, y, z] = pos(&mut j)?;
+    let [px, py] = profile.park_steps;
+    let p = if [x, y] == [px, py] {
+        j.into_parameters()?
+    } else {
+        let mm = |s: i32| s / steps_per_mm();
+        let prompt = format!(
+            "Heads up, and travel to the park at X {} mm, Y {} mm (from X {} mm, Y {} mm).",
+            mm(px),
+            mm(py),
+            mm(x),
+            mm(y)
+        );
+        if !ctx.go(&prompt, "travel to the park") {
+            return Ok((j.into_parameters()?, false));
+        }
+        let mut c = j.into_cutting()?;
+        c.vector(ENTRY, px, py, z)?;
+        idle(&mut c)?;
+        c.into_parameters()?
+    };
+    let here = park_is_gmcs(ctx);
+    Ok((p, here))
+}
+
+/// Once per run: is this where GMC parks? It is the profile's park, so anything but a "yes"
+/// means the profile doesn't describe this machine, and nothing more moves.
+fn park_is_gmcs(ctx: &mut Ctx) -> bool {
+    if ctx.park_confirmed {
+        return true;
+    }
+    let answer = ctx.op.ask(
+        "Is the carriage where GMC parks it: at the right, the head close to the front rail? \
+         (y/n)",
+    );
+    match answer.as_deref() {
+        None | Some("y") => {
+            ctx.park_confirmed = true;
+            ctx.r.pass(
+                "the park is GMC's",
+                answer.map_or("(simulator)".to_owned(), |a| format!("operator: {a}")),
+            );
+            true
+        }
+        Some(a) => {
+            ctx.r.fail(
+                "the park is GMC's",
+                format!(
+                    "operator: {a}. The profile does not describe this machine; the run stops \
+                     here"
+                ),
+            );
+            ctx.quit = true;
+            false
+        }
+    }
 }
 
 fn idle<M: ModeMarker>(c: &mut Controller<M>) -> Res<()> {
@@ -236,10 +350,7 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
             Err(e) => {
                 let _ = ctx.stop.brake();
                 ctx.r.fail(title, format!("aborted: {e}"));
-                println!(
-                    "\n  Braked (@B). Parameters changed by this run were NOT restored. Nothing \
-                     was saved, so power-cycling the controller (or starting GMC) restores them."
-                );
+                println!("\n  Braked (@B). {UNRESTORED}");
                 return Ok(false);
             }
         }
@@ -252,6 +363,13 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
     }
     Ok(true)
 }
+
+/// What to do about the settings a run changed and could not put back. Nothing is saved
+/// (`#W`), so a power cycle restores them all. Starting GMC does not: it never writes `#C6`,
+/// `#C7`, `#C8`, `#C19` or `#G21` (`probe.rs`'s tables of what it writes).
+pub const UNRESTORED: &str = "Parameters this run changed were NOT restored. Nothing was saved: \
+    power-cycle the controller before using it again, with GMC too (GMC does not rewrite #C6, \
+    #C7, #C8, #C19 or #G21).";
 
 /// Write every snapshotted setting back exactly as it was read. One that could not be read
 /// before the run (or read back as a valid value) is reported, never written with a substitute.
@@ -275,7 +393,7 @@ fn restore(p: &mut Params, snapshot: &[(SettingKey, Result<Setting, String>)], r
         r.fail(
             "restore",
             format!(
-                "NOT restored, power-cycle the controller (or start GMC) to reset them: {}",
+                "NOT restored, power-cycle the controller to reset them: {}",
                 failed.join("; ")
             ),
         );
@@ -284,9 +402,32 @@ fn restore(p: &mut Params, snapshot: &[(SettingKey, Result<Setting, String>)], r
 
 // ------------------------------------------------------------------ shared steps
 
-/// Home Z, then X and Y, with GMC's settings [CAP g_init]:
-/// `@@ #G10,1750 #OZ,0 $Hz` then `#G10,1750 #G11,750 #OX,300 #OY,300 $Hxy`.
+/// Home Z, then X and Y, with GMC's settings [CAP g_init]: both heads up (`$A02`), then
+/// `@@ #G10,1750 #OZ,0 $Hz` then `#G10,1750 #G11,750 #R100 #OX,300 #OY,300 $Hxy`. Not if the
+/// carriage is on a home switch, as GMC won't [GMC].
 fn home_all(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    let mut pressed = Vec::new();
+    for (input, axis) in [(235, "X"), (236, "Y")] {
+        if p.read_input(input)? {
+            pressed.push(format!("{axis} (I{input})"));
+        }
+    }
+    if !pressed.is_empty() {
+        ctx.r.fail(
+            "homing",
+            format!(
+                "not started: the carriage is on the {} home switch. Move it off (GMC's manual \
+                 mover) and run stage 3 again",
+                pressed.join(" and ")
+            ),
+        );
+        return Ok(p);
+    }
+    // GMC has the heads up from its connect on [GMC]; with the outputs at
+    // `00`, as they may be after a power-on, the bevel head is down.
+    let mut j = p.into_jog()?;
+    j.set_outputs(profile().neutral_outputs)?;
+    let mut p = j.into_parameters()?;
     p.set(Setting::Units(Units::Steps))?;
     p.set(Setting::HomingDoneSignal(true))?;
     p.set(Setting::PositionedSignal(true))?;
@@ -327,6 +468,7 @@ fn home_all(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         axis: Axis::Y,
         value: 300,
     })?;
+    p.set(Setting::RampMs(100))?; // GMC's `#R,100` for homing
     let mut j = p.into_jog()?;
     j.home(&[Axis::X, Axis::Y])?;
     idle(&mut j)?;
@@ -470,25 +612,39 @@ fn reply_order(p: &mut Params, ctx: &mut Ctx) -> Res<()> {
 fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     setup_moves(&mut p, ctx)?;
     let mut p = if ctx.go(
-        "Home Z, then X and Y, exactly as GMC does (about a minute). Clear the table.",
+        "Raise the heads, then home Z, then X and Y, exactly as GMC does (about a minute). \
+         Clear the table.",
         "homing",
     ) {
-        home_all(p, ctx)?
+        let mut p = home_all(p, ctx)?;
+        let question = "Which way did Y move while homing: f = towards you (the front rail), \
+                        b = away? About how far, in cm?";
+        if p.status()?.homed {
+            if let Some(seen) = ctx.op.ask(question) {
+                ctx.r.info(
+                    "Y while homing (operator)",
+                    format!("{seen} (from GMC's park: about 20 cm to the front, then 7.5 mm back)"),
+                );
+            }
+        }
+        p
     } else {
         p
     };
     if !require_homed(&mut p, ctx, "jogs")? {
         return Ok(p);
     }
-    let dirs = [
-        (Axis::X, away(&mut p, Axis::X)?),
-        (Axis::Y, away(&mut p, Axis::Y)?),
-    ];
+    let (p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let [ix, iy] = inward();
+    let dirs = [(Axis::X, ix), (Axis::Y, iy)];
     let mut j = p.into_jog()?;
 
     for (axis, dir) in dirs {
         if !ctx.go(
-            &format!("Jog {axis:?} 20 mm away from home and back."),
+            &format!("Jog {axis:?} 20 mm into the table and back."),
             &format!("jog {axis:?}"),
         ) {
             continue;
@@ -515,26 +671,39 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
             &format!("0x01 after jog {axis:?}"),
             "positioned signal (#C5,1)",
         );
+        // The board frame's Y (PROGRAM_FORMAT §2), which every program relies on.
+        if axis == Axis::Y && dir > 0 {
+            if let Some(a) = ctx
+                .op
+                .ask("Did the head move away from you, towards the back rail? (y/n)")
+            {
+                ctx.r.check(
+                    a == "y",
+                    "+Y is away from the operator",
+                    format!("operator: {a}. Programs assume it (PROGRAM_FORMAT §2)"),
+                );
+            }
+        }
         j.jog_steps(ENTRY, axis, JogTarget::To(start[i]))?;
         idle(&mut j)?;
     }
 
     let x_dir = dirs[0].1;
     if ctx.go(
-        "Jog X 100 mm away from home and brake (@B) after a moment.",
+        "Jog X 100 mm into the table and brake (@B) after a moment.",
         "@B during a jog",
     ) {
         let start = pos(&mut j)?;
-        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * x_dir))?;
+        j.jog_steps(ENTRY, Axis::X, JogTarget::By(reach() * x_dir))?;
         thread::sleep(ctx.t(800));
         j.brake()?;
         idle(&mut j)?;
         let end = pos(&mut j)?;
         let moved = (end[0] - start[0]) * x_dir;
         ctx.r.check(
-            moved > 0 && moved < 5 * step_20mm(),
+            moved > 0 && moved < reach(),
             "@B brakes a jog",
-            format!("stopped after {moved} of {} steps", 5 * step_20mm()),
+            format!("stopped after {moved} of {} steps", reach()),
         );
         j.jog_steps(ENTRY, Axis::X, JogTarget::To(start[0]))?;
         idle(&mut j)?;
@@ -615,10 +784,12 @@ fn stage4(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
-    let (dx, dy) = (
-        step_20mm() * away(&mut p, Axis::X)?,
-        step_20mm() * away(&mut p, Axis::Y)?,
-    );
+    let (mut p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let [ix, iy] = inward();
+    let (dx, dy) = (step_20mm() * ix, step_20mm() * iy);
     let [x0, y0, z0] = pos(&mut p)?;
     let mut c = p.into_cutting()?;
     c.outputs(0x02)?;
@@ -731,14 +902,17 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         return Ok(p);
     }
     if !ctx.go(
-        "Run v1.00 mode-2 features: short moves away from home, head up.",
+        "Run v1.00 mode-2 features: short moves into the table from the park, heads up.",
         "v1.00",
     ) {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
-    let d = step_20mm() * away(&mut p, Axis::X)?;
-    let dy = step_20mm() * away(&mut p, Axis::Y)?;
+    let (mut p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let d = step_20mm() * inward()[0];
     let [x0, y0, z0] = pos(&mut p)?;
     let mut c = p.into_cutting()?;
 
@@ -880,13 +1054,15 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     idle(&mut c)?;
 
     // (f) A compact path [SPEC1 p.33]: one absolute vector, then relative steps without the
-    //     `L20,` prefix, unchanged axes left out. Every step goes away from home, so a firmware
-    //     that read them as absolute would still stay within 20 mm of home.
+    //     `L20,` prefix, unchanged axes left out. Every step is positive, so a firmware that
+    //     read them as absolute would head for a point near home: a long way, but inside the
+    //     soft limits. From the park there is room for 20 mm of +X and +Y.
+    let up = step_20mm();
     let path = [
         [x0, y0, z0],
-        [x0 + d / 2, y0, z0],
-        [x0 + d, y0 + dy / 2, z0],
-        [x0 + d, y0 + dy, z0 + 150], // and turn the blade
+        [x0 + up / 2, y0, z0],
+        [x0 + up, y0 + up / 2, z0],
+        [x0 + up, y0 + up, z0 + 150], // and turn the blade
     ];
     c.path(ENTRY, &path)?;
     idle(&mut c)?;
@@ -969,7 +1145,7 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
 
     // (h) How wide is @N (shown as `@Nxxxx` [SPEC1 p.15])? Set it near 10 000 and run three
     //     short vectors, the kind of command it certainly counts.
-    let step = steps_per_mm() * d.signum(); // 1 mm away from home
+    let step = steps_per_mm() * d.signum(); // 1 mm into the table
     c.set_command_counter(9998)?;
     for x in [x0 + step, x0, x0 + step] {
         c.vector(ENTRY, x, y0, z0)?;
@@ -996,8 +1172,8 @@ fn stage5(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
 
 // ------------------------------------------------------------------ stage 6
 
-/// Five laps of a 15 mm-radius circle in the square away from home, as 1250 short vectors
-/// (~22 KB): ends where it starts.
+/// Five laps of a 15 mm-radius circle in the square into the table from `(x0, y0)`, as 1250
+/// short vectors (~22 KB): ends where it starts.
 fn circle(x0: i32, y0: i32, sx: i32, sy: i32) -> Vec<(i32, i32)> {
     let r = 600.0;
     let (cx, cy) = (
@@ -1032,10 +1208,13 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
-    let (sx, sy) = (away(&mut p, Axis::X)?, away(&mut p, Axis::Y)?);
+    let (mut p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let [sx, sy] = inward();
     let [x0, y0, z0] = pos(&mut p)?;
     let pts = circle(x0, y0, sx, sy);
-    p.set(Setting::HostWatchdog(ctx.watchdog(400)))?;
 
     // (a) Buffer size: fill it during a long dead time (nothing is consumed), then ask @H.
     if ctx.go(
@@ -1082,6 +1261,9 @@ fn stage6(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
          (#C19,400). Head up.",
         "flow control",
     ) {
+        let mut p = c.into_parameters()?;
+        p.set(Setting::HostWatchdog(ctx.watchdog(400)))?;
+        c = p.into_cutting()?;
         reversed = stream_with_flow_control(&mut c, ctx, &pts, start)?;
     }
     if reversed {
@@ -1307,15 +1489,19 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         return Ok(p);
     }
     setup_moves(&mut p, ctx)?;
-    let dir = away(&mut p, Axis::X)?;
+    let (mut p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let ix = inward()[0];
 
     if ctx.go(
-        "Jog X away from home and stop it with @S (no ramp: abrupt). The position is lost, so \
-         the machine re-homes afterwards.",
+        "Jog X 100 mm into the table and stop it with @S (no ramp: abrupt). The position is \
+         lost, so the machine re-homes and returns to the park afterwards.",
         "@S",
     ) {
         let mut j = p.into_jog()?;
-        j.jog_steps(ENTRY, Axis::X, JogTarget::By(5 * step_20mm() * dir))?;
+        j.jog_steps(ENTRY, Axis::X, JogTarget::By(reach() * ix))?;
         thread::sleep(ctx.t(800));
         ctx.stop.emergency_stop()?;
         thread::sleep(ctx.t(200));
@@ -1327,11 +1513,17 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         );
         p = home_all(j.into_parameters()?, ctx)?;
         setup_moves(&mut p, ctx)?;
+        let (back, at_park) = to_park(p, ctx)?;
+        p = back;
+        if !at_park {
+            return Ok(p);
+        }
     }
 
+    // The limit at the park's end of X: the near one.
     let switch = LimitSwitch {
         axis: Axis::X,
-        side: if dir > 0 { Side::Plus } else { Side::Minus },
+        side: if ix < 0 { Side::Plus } else { Side::Minus },
     };
     let (input, code) = (switch.input(), switch.error_code());
     let def = p.input_def(input)?;
@@ -1347,7 +1539,7 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     }
     // Drive no further than just past the drivable range: a mapped input is not proof of a
     // working switch, and if it never trips the move must end on its own, not at the frame.
-    let target = if dir > 0 {
+    let target = if switch.side == Side::Plus {
         x_drivable() + limit_overtravel()
     } else {
         -limit_overtravel()
@@ -1396,7 +1588,7 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         format!("{sw:?}"),
     );
     j.clear_error()?;
-    j.jog_steps(ENTRY, Axis::X, JogTarget::By(-step_20mm() * dir))?;
+    j.jog_steps(ENTRY, Axis::X, JogTarget::By(step_20mm() * ix))?; // back into the table
     idle(&mut j)?;
     let sw = j.switches()?;
     ctx.r.check(
@@ -1405,4 +1597,31 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         format!("{sw:?}"),
     );
     Ok(j.into_parameters()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every stage's moves stay within the reach of the park, into the table, and stage 5's
+    /// compact path goes 20 mm out in +X and +Y: all of it inside the soft limits.
+    #[test]
+    fn every_move_from_the_park_stays_inside_the_soft_limits() {
+        let p = profile();
+        let [px, py] = p.park_steps;
+        let [ix, iy] = inward();
+        let corners = [
+            [px, py],
+            [px + reach() * ix, py + reach() * iy],
+            [px + step_20mm(), py + step_20mm()],
+        ];
+        for steps in corners {
+            assert!(p.envelope_mm.contains(p.carriage_mm(steps)), "{steps:?}");
+        }
+        assert_eq!(
+            inward(),
+            [-1, 1],
+            "the 601's park: far end of X, near home in Y"
+        );
+    }
 }

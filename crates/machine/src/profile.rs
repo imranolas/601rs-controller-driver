@@ -19,9 +19,9 @@ pub struct Profile {
     /// where the carriage position is its steps ÷ scale.
     ///
     /// The 601's value is where GMC places the board: its straight-edge cuts in the captures
-    /// lie at X 601–602 and Y 761–762 steps (protocol reference §4.2). Which machine stop that
-    /// is, and whether board +Y is machine +Y, the first session at the machine confirms
-    /// (PROGRAM_FORMAT Q1); until then +Y is +Y.
+    /// lie at X 601–602 and Y 761–762 steps (protocol reference §4.2), in the front-left
+    /// corner by the red button, where boards register; board +Y is machine +Y, away from the
+    /// operator (protocol reference §4.1; `gunnar check` stage 3 confirms it).
     pub board_origin_mm: MachineMm,
     pub bevel: Head,
     pub straight: Head,

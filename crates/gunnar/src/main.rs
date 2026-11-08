@@ -179,10 +179,7 @@ fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
         let stop = ctl.stop_handle();
         ctrlc::set_handler(move || {
             let _ = stop.brake();
-            eprintln!(
-                "\n  Ctrl-C: braked (@B). Parameters changed by this run were not restored; \
-                 power-cycle the controller or start GMC to restore them."
-            );
+            eprintln!("\n  Ctrl-C: braked (@B). {}", check::UNRESTORED);
             std::process::exit(130);
         })?;
         let mut ctx = check::Ctx {
@@ -193,6 +190,7 @@ fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
             speed: opts.speed,
             scale: if target.is_sim() { 0.1 } else { 1.0 },
             quit: false,
+            park_confirmed: false,
         };
         let completed = check::run(ctl, &opts.stages, &mut ctx)?;
         report = ctx.r;

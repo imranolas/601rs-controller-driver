@@ -32,22 +32,26 @@ impl Operator {
     }
 
     /// Describe what is about to happen and wait for Enter. `s` skips; `q` quits the run.
-    /// End of input quits: it is never consent, because nobody is there to watch the machine.
+    /// Only Enter goes: anything else asks again, so a "no" never starts a move. End of input
+    /// quits: it is never consent, because nobody is there to watch the machine.
     pub fn confirm(&self, what: &str) -> Confirm {
         if self.is_sim() {
             return Confirm::Go;
         }
         println!("\n  >> {what}");
-        print!("     Enter = go, s = skip this step, q = stop the check: ");
-        let _ = io::stdout().flush();
-        match Self::read_line().as_deref() {
-            None => {
-                println!("\n     (no operator input: stdin is closed; stopping)");
-                Confirm::Quit
+        loop {
+            print!("     Enter = go, s = skip this step, q = stop the check: ");
+            let _ = io::stdout().flush();
+            match Self::read_line().as_deref() {
+                None => {
+                    println!("\n     (no operator input: stdin is closed; stopping)");
+                    return Confirm::Quit;
+                }
+                Some("") => return Confirm::Go,
+                Some("s") => return Confirm::Skip,
+                Some("q") => return Confirm::Quit,
+                Some(_) => {}
             }
-            Some("q") => Confirm::Quit,
-            Some("s") => Confirm::Skip,
-            Some(_) => Confirm::Go,
         }
     }
 

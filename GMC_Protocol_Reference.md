@@ -711,12 +711,48 @@ doesn't order cuts.
 | t+10 s | **XY home:** `#G10,3000`, `@@`, `#G10,1750`, `#G11,750`, `#R,100`, `#OX,300`, `#OY,300` (offsets moved after homing), `@M1`, **`$Hxy`** |
 | t+10–49 s | Homing. `@X18` (moving, homing, home not yet known) about 4 times a second for 39 s; `0x01` at t+44 and t+49, `0x04` at t+49 |
 | t+49 s | `@X04`: stopped and homed |
-| t+50–54 s | `@LX @LY @LZ`; travel in mode 2 (`L20,X0,Y40600,Z749` and back); park `L20,X58860,Y7923,Z0`; `$A02` |
+| t+50–54 s | `@LX @LY @LZ`; the V-groove adjustment in mode 2 (`L20,X0,Y40600,Z749`, `Y41800`, `Y40600`: §4.1); park `L20,X58860,Y7923,Z0`; `$A02` |
 | t+57 s → | Idle: `@I221` polling |
 
 **Driver:** `$H<axes>` → wait for `0x04` **or** poll `@X` until the first digit is `0` with flag
 4 set → read `@LX`/`@LY`. Homing uses the home switches I235–I237 [SPEC1 p.11; SYS], which are
 real inputs even though no switch has been spotted on the machine yet.
+
+**The controller homes; GMC only asks.** GMC sends speeds, the ramp and the offsets, then `$Hz`
+and `$Hxy` (`$Hy`, `$Hx` on an F1) [GMC]. It never sends a
+homing direction (`#D`), and on the 601 it does not rewrite the home-switch inputs either:
+GMC does that only for other controller versions [GMC], and `g_init` holds no
+`#I` or `#D` write. Direction and switches are the controller's own configuration; `gunnar probe`
+reads them (`&D`, `&I235`–`&I237`).
+
+**Home is the front-left corner, by the red button; the park is front-right.** GMC's machine
+frame (cm) becomes steps by an offset and a scale, `trunc((y − StartPY) × ScaleY)`, with no
+mirror anywhere, and a job reaches that frame by translations only (the one mirror is Cut
+Other End's) [GMC]. So home, the board's registration
+corner and the park share a Y edge: the board's corner is about 2 cm from home in X and Y, and
+AutoPark (140, 20) cm is (58 860, 7 923) steps, 20 cm from Y's home switch. The operator
+registers boards in the front-left corner, by the red button, and sees the head park close to
+the front rail: home is front-left, +X to the right, +Y away from the operator, as
+PROGRAM_FORMAT §2 has it. The timing of `g_init` agrees: from the park, X's homing ran 34 s
+(about 148 cm at `#G10,1750`), Y's 5 s (about 20 cm to the front, then 7.5 mm back); then GMC
+ran the head up the left side to the back rail at 900 mm/s, and parked. That run is what an
+operator remembers as homing "up". `gunnar check` stage 3 asks which way Y moved, and confirms
+the park and +Y before anything else moves.
+
+**The run up the left side resets the head's V-groove switch.** The bevel head has a mechanical
+switch for V-groove depth (GMC's "DBD"); a small stub at the back of the table toggles it when
+the head is pushed against it (operator). After every homing GMC sets it to normal cutting with
+a short routine [GMC]: on a machine whose head changes this way
+(`DBDHeadChangeKind` ≠ 0, the 601) it drives to 3 cm short of `VGChangeY` (at the current X, 0,
+the blade at 90°: `L20,X0,Y40600,Z749`), pushes on to `VGChangeY` (`Y41800`, 104.5 cm) and
+comes back, with its own soft-limit check off, then reads the Y home switch
+[GMC]. The blade's angle picks the way the switch goes: 90° for normal cutting, 270° for
+V-groove (`VGChangeZ` + 180) [GMC]. Heads switched electrically get a 250 ms pulse of `i_dd`
+instead (§2.5) [GMC]. The push goes 30 mm past the 101.5 cm the
+profile allows, so Y's travel reaches at least 104.5 cm.
+
+A driver must do the same after homing, before the bevel head cuts: a head left in V-groove
+mode by an earlier job would cut at V-groove depth. Not yet in `machine` or `runner`.
 
 ### 4.2 Head selection and the side-by-side X offset
 
