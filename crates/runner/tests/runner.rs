@@ -104,6 +104,29 @@ fn nothing_runs_on_an_unhomed_machine() {
     assert_eq!(vectors(&sim), 0);
 }
 
+/// Homing ends as GMC's does: the V-groove switch pushed to normal cutting, then the park.
+#[test]
+fn homing_resets_the_vgroove_switch_and_parks() {
+    let (mut r, sim) = ready();
+    let after_homing: Vec<String> = sim
+        .received()
+        .into_iter()
+        .skip_while(|l| !l.starts_with("$H"))
+        .filter(|l| l.starts_with('L'))
+        .collect();
+    assert_eq!(
+        after_homing,
+        [
+            "L20,X0,Y40600,Z749",
+            "L20,X0,Y41800,Z749",
+            "L20,X0,Y40600,Z749",
+            "L20,X58860,Y7923,Z0",
+        ]
+    );
+    assert!(parked(&sim));
+    assert!(!r.needs_homing().expect("reads"));
+}
+
 #[test]
 fn an_impossible_program_is_refused_before_anything_moves() {
     let (mut r, sim) = ready();
@@ -127,6 +150,7 @@ fn an_impossible_program_is_refused_before_anything_moves() {
 fn gmcs_job_runs_to_the_park() {
     let (mut r, sim) = ready();
     let program = fixture("g_multi_C10");
+    let homing = vectors(&sim);
     let (result, events) = run_with(&mut r, &program, |_, _| {});
     assert_eq!(result.expect("runs"), Outcome::Finished);
     let ops = program.ops.len();
@@ -155,7 +179,7 @@ fn gmcs_job_runs_to_the_park() {
         .commands()
         .filter(|c| matches!(c, protocol::Command::Vector { .. }))
         .count();
-    assert_eq!(vectors(&sim), sent);
+    assert_eq!(vectors(&sim) - homing, sent);
 }
 
 #[test]

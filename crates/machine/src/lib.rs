@@ -103,10 +103,11 @@ pub use estimate::{Estimate, Host, OpEstimate, estimate};
 pub use frame::{CarriageMm, MachineMm};
 pub use lower::{
     At, ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, park,
+    vgroove_reset,
 };
 pub use profile::{
     Accel, Capabilities, Clamps, ControllerConfig, DeadTime, Envelope, Head, Homing, Line, Profile,
-    RadiusSlowdown, Scale, SoftStart,
+    RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
 };
 
 #[cfg(test)]

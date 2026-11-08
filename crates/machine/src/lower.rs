@@ -246,6 +246,49 @@ pub fn park(profile: &Profile, clamps: u8) -> Vec<Step> {
     ]
 }
 
+/// How far short of the V-groove stub the push starts and ends, mm (GMC's 3 cm).
+const VGROOVE_RUN_UP_MM: f64 = 30.0;
+
+/// Set the bevel head's V-groove switch to normal cutting, as GMC does after homing
+/// ([GMC]; protocol reference §4.1): heads up, the
+/// carriage at X `x` and the blade at the switch's normal angle, travel to 3 cm short of the
+/// stub, push on to it and come back. At GMC's speeds: the travel speed throughout, the travel
+/// ramp there, and for the push and back the fast ramp its rule gives a 3 cm move (`travel`).
+/// The push goes past the envelope; nothing else here does. Empty if there is no such switch.
+pub fn vgroove_reset(profile: &Profile, clamps: u8, x: i32) -> Vec<Step> {
+    let p = profile;
+    let Some(switch) = p.vgroove_switch else {
+        return Vec::new();
+    };
+    let z = frame::blade_steps(p, &p.bevel, 0.0, switch.normal_deg);
+    let short = switch.y_steps - (VGROOVE_RUN_UP_MM * p.scale.y_steps_per_mm) as i32;
+    let ramp = |accel| Step::Send(Command::Set(Setting::RampMs(p.ramp_ms(accel))));
+    let to = |y| {
+        Step::Send(Command::Vector {
+            speed_entry: ENTRY,
+            x,
+            y,
+            z,
+        })
+    };
+    vec![
+        Step::Send(Command::SetOutputs(clamps | p.neutral_outputs)),
+        Step::Send(Command::Set(Setting::DeadTimeMs(0))),
+        ramp(p.accel.travel),
+        Step::Send(Command::Set(Setting::Speed {
+            entry: ENTRY,
+            value: p.speed(p.travel_speed_pct),
+        })),
+        to(short),
+        Step::WaitIdle,
+        ramp(p.accel.fast_turn),
+        to(switch.y_steps),
+        Step::WaitIdle,
+        to(short),
+        Step::WaitIdle,
+    ]
+}
+
 /// A speed in % that the machine can run: over 0, at most 100.
 fn is_pct(v: f64) -> bool {
     v > 0.0 && v <= 100.0

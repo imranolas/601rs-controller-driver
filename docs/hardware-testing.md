@@ -36,7 +36,7 @@ cargo build --release -p gunnar
 | Stage | Moves | What it checks |
 |-------|-------|----------------|
 | 2 | no | replies come back in the order sent (a command and a probe in one write, 20 times each for a write, `@M0` and a refusal); `#C8` heartbeat `0x05`; `#C35` green-button bytes `0x06`/`0x07` (you press the button) |
-| 3 | yes | homing exactly as GMC does it, heads up first and never on a home switch (you say which way Y moved); then the park (you confirm it is GMC's, or the run stops), and 20 mm jogs into the table and back (you say whether +Y went away from you); `@B` brakes a jog; `@Q249` follows `$A` bit 7 (spare output); outputs across a mode switch; which clamp each bit closes (you answer) |
+| 3 | yes | homing exactly as GMC does it, heads up first and never on a home switch (you say which way Y moved); GMC's V-groove switch reset at its speeds, up the left side at 900 mm/s and 3 cm on against the stub at the back (only if Y homed towards you; you say whether the switch is at normal cutting); then the park (you confirm it is GMC's, or the run stops), and 20 mm jogs into the table and back (you say whether +Y went away from you); `@B` brakes a jog; `@Q249` follows `$A` bit 7 (spare output); outputs across a mode switch; which clamp each bit closes (you answer) |
 | 4 | yes | 20 mm square in mode 2, GMC style; `@X` 15 → 14 → 04; exact return; `@B` during the square discards the rest of the path instead of resuming it (stop-now depends on this) |
 | 5 | yes | in-stream `A`/`W`/`I221`/`C`; `@N` progress (does `C` count? the command running or those finished? does it wrap after 9999?); `C1` skips the dead time; `@O50` with `C16`/`C8`; the stream waits for the green button (you press it); a compact path (relative steps without the `L20,` prefix) lands exactly; a second speed entry gives its own feed; whether in-stream `G` applies in sequence or on receipt |
 | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full" (the spec contradicts itself); a 22 KB stream with `#C7,1` and `#C19,400` completes; streaming at full speed does not overrun (else 0x03 comes too late over this link); `@B` while the stream is held discards the queued path, nothing moves afterwards, and `0x02` follows |
@@ -49,8 +49,10 @@ cargo build --release -p gunnar
   up and the carriage at the park (it asks before travelling there): GMC's end-of-job
   position, clear of the board's corner and the home switches.
 - Moves are 20–100 mm from the park, into the table, at 30 mm/s by default (`--speed` in
-  steps/s, 100–4000). They stay inside the soft limits even if a stop under test fails; only
-  stage 7's limit-switch drive leaves them, and only if the controller can see that switch.
+  steps/s, 100–4000). They stay inside the soft limits even if a stop under test fails. Two
+  moves leave them: stage 3's V-groove switch reset, GMC's own after homing and at its speeds
+  (3 cm past the soft limit, against the stub at the back), and stage 7's limit-switch drive,
+  only if the controller can see that switch.
   A controller whose homing direction (`&D`) isn't the profile's gets no moves at all.
 - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.
 - Only Enter starts a step; anything but `s` or `q` asks again.

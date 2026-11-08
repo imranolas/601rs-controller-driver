@@ -100,9 +100,12 @@ pub fn open(
                     steps(e.x[0], sc.x_steps_per_mm),
                     steps(e.x[1], sc.x_steps_per_mm),
                 ),
+                // Y travels at least as far as GMC pushes the V-groove switch, past the
+                // soft limit (protocol reference §4.1).
                 (
                     steps(e.y[0], sc.y_steps_per_mm),
-                    steps(e.y[1], sc.y_steps_per_mm),
+                    steps(e.y[1], sc.y_steps_per_mm)
+                        .max(p.vgroove_switch.map_or(0, |v| i64::from(v.y_steps))),
                 ),
             ],
             ..SimConfig::default()

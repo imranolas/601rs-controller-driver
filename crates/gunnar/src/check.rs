@@ -3,7 +3,7 @@
 //! | Stage | Moves | Answers |
 //! |-------|-------|---------|
 //! | 2 | no  | replies come back in the order sent (a command and a probe in one write), `0x05` heartbeat (`#C8`), green button edges `0x06`/`0x07` (`#C35`) |
-//! | 3 | yes | homing like GMC, `0x04`, jogs and `0x01`, `@B`, `@Q` vs `$A`, outputs across a mode switch, clamp sides |
+//! | 3 | yes | homing like GMC, the V-groove switch reset, `0x04`, jogs and `0x01`, `@B`, `@Q` vs `$A`, outputs across a mode switch, clamp sides |
 //! | 4 | yes | a mode-2 square the way GMC does it: `@X` 15 → 14 → 04, exact return; `@B` mid-path discards the rest |
 //! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16`; compact paths, a second speed entry, in-stream `G`, what `@N` counts and how wide it is |
 //! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream; no overrun at full speed; `@B` on a held stream discards it |
@@ -14,8 +14,9 @@
 //!   up and the carriage at the park, GMC's end-of-job position at the far end of X, clear of
 //!   the board's corner and the home switches; it asks before travelling there.
 //! - Every move stays within [`REACH_MM`] of the park, into the table ([`inward`]), so it stays
-//!   inside the soft limits even when a stop under test fails. Only stage 7's limit-switch
-//!   drive leaves them, and only towards a switch the controller can see.
+//!   inside the soft limits even when a stop under test fails. Two moves leave them: stage 3's
+//!   V-groove switch reset, GMC's own after homing (3 cm on against a stub at the back), and
+//!   stage 7's drive towards a limit switch the controller can see.
 //! - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.
 //! - Nothing is saved (`#W` is never sent); the parameters a stage changes are read first and
 //!   written back at the end. Ctrl-C brakes (`@B`) and exits.
@@ -29,7 +30,7 @@ use controller::{
     OverridePct, Param, Setting, SettingKey, Side, Signal, SignalAcks, SpeedOverride, StopHandle,
     StreamFlags, Units, WatchdogMs, mode,
 };
-use machine::Profile;
+use machine::{Profile, Step};
 use protocol::Command;
 
 use crate::operator::{Confirm, Operator};
@@ -479,6 +480,74 @@ fn home_all(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     Ok(j.into_parameters()?)
 }
 
+/// Set the bevel head's V-groove switch to normal cutting, as GMC does after homing and the
+/// runner does too: `machine::vgroove_reset`, at GMC's speeds. Only if Y homed towards the
+/// operator (`homed_towards`, "f"), so that +Y runs to the stub at the back.
+fn vgroove_reset(mut p: Params, ctx: &mut Ctx, homed_towards: Option<&str>) -> Res<Params> {
+    let step = "V-groove switch to normal";
+    let profile = profile();
+    let Some(switch) = profile.vgroove_switch else {
+        return Ok(p);
+    };
+    if homed_towards.is_some_and(|a| !a.starts_with('f')) {
+        ctx.r.skip(
+            step,
+            "Y did not home towards the operator, so +Y may not run to the stub",
+        );
+        return Ok(p);
+    }
+    let prompt = format!(
+        "Set the bevel head's V-groove switch to normal cutting, as GMC does after homing: at \
+         full speed ({} mm/s) up the left side to Y {} mm, 3 cm on against the stub at the back \
+         (past the soft limit), and back.",
+        profile.speed(profile.travel_speed_pct) / profile.scale.y_steps_per_mm as u32,
+        switch.y_steps / steps_per_mm() - 30,
+    );
+    if !ctx.go(&prompt, step) {
+        return Ok(p);
+    }
+    let [x, ..] = pos(&mut p)?;
+    let mut p = exec(p, &machine::vgroove_reset(&profile, 0, x))?;
+    setup_moves(&mut p, ctx)?; // the test speed and ramp again, for the moves after
+    match ctx
+        .op
+        .ask("Did the head meet the stub, and is its V-groove switch at normal cutting? (y/n)")
+    {
+        Some(a) => ctx.r.check(a == "y", step, format!("operator: {a}")),
+        None => ctx.r.pass(step, "sent (simulator)"),
+    }
+    Ok(p)
+}
+
+/// Run steps from `machine` as the runner does: settings in mode 0, outputs in mode 1, each
+/// vector in mode 2 until the controller is idle.
+fn exec(mut p: Params, steps: &[Step]) -> Res<Params> {
+    for step in steps {
+        match step {
+            Step::Send(Command::Set(s)) => p.set(*s)?,
+            Step::Send(Command::SetOutputs(bits)) => {
+                let mut j = p.into_jog()?;
+                j.set_outputs(*bits)?;
+                p = j.into_parameters()?;
+            }
+            &Step::Send(Command::Vector {
+                speed_entry,
+                x,
+                y,
+                z,
+            }) => {
+                let mut c = p.into_cutting()?;
+                c.vector(speed_entry, x, y, z)?;
+                idle(&mut c)?;
+                p = c.into_parameters()?;
+            }
+            Step::WaitIdle => {} // each vector waits
+            other => return Err(format!("not a step stage 3 runs: {other:?}").into()),
+        }
+    }
+    Ok(p)
+}
+
 fn setup_moves(p: &mut Params, ctx: &Ctx) -> Res<()> {
     p.set(Setting::Units(Units::Steps))?;
     p.set(Setting::PositionedSignal(true))?;
@@ -620,12 +689,14 @@ fn stage3(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         let question = "Which way did Y move while homing: f = towards you (the front rail), \
                         b = away? About how far, in cm?";
         if p.status()?.homed {
-            if let Some(seen) = ctx.op.ask(question) {
+            let seen = ctx.op.ask(question);
+            if let Some(seen) = &seen {
                 ctx.r.info(
                     "Y while homing (operator)",
                     format!("{seen} (from GMC's park: about 20 cm to the front, then 7.5 mm back)"),
                 );
             }
+            p = vgroove_reset(p, ctx, seen.as_deref())?;
         }
         p
     } else {

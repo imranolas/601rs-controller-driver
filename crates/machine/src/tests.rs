@@ -417,6 +417,40 @@ fn the_job_ends_parked_with_the_clamps_open() {
     assert_eq!(tail.last(), Some(&&Command::SetOutputs(0x02)));
 }
 
+/// GMC's V-groove reset after homing, as it sent it [CAP g_init]; the mode switches and the
+/// `#R250` it sends between moves (and replaces before the next) aside.
+#[test]
+fn the_vgroove_reset_is_gmcs() {
+    let p = p601();
+    let wire: Vec<String> = vgroove_reset(&p, 0, 0)
+        .iter()
+        .filter_map(|s| {
+            if let Step::Send(c) = s {
+                Some(c.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            "$A02",
+            "#C1,0",
+            "#R225",
+            "#G20,36000",
+            "L20,X0,Y40600,Z749",
+            "#R112",
+            "L20,X0,Y41800,Z749",
+            "L20,X0,Y40600,Z749",
+        ]
+    );
+    assert!(
+        !p.envelope_mm.contains(p.carriage_mm([0, 41_800])),
+        "past the soft limit"
+    );
+}
+
 #[test]
 fn targets_outside_the_machine_are_refused() {
     let p = p601();

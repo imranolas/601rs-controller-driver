@@ -13,7 +13,8 @@
 //! What it owns:
 //! - **State:** homed (from `@X` flag 4), head, clamps, the run. No motion before homing.
 //! - **Only whole cuts.** It sends what the machine model lowered, never a bare head down, and
-//!   nothing outside the envelope.
+//!   nothing outside the envelope but GMC's V-groove switch reset after homing (protocol
+//!   reference §4.1).
 //! - **Running a program:** validate (V1–V9 with `program`, V10 with the machine model) before
 //!   opening the port; require homing (offer to home) and the operator's word that the board is
 //!   loaded; push the controller configuration; run the ops in order; honour `pause` ops (the

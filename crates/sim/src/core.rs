@@ -1133,8 +1133,10 @@ impl SimCore {
             if let Some(h) = &mut self.homing {
                 if now >= h.axis_end {
                     let axis = h.axes[h.index];
-                    self.pos[axis] = self.offsets[axis];
-                    self.path_target[axis] = self.pos[axis];
+                    // Off the switch, then the offset, then the counter zeroed [SPEC1 p.30]:
+                    // GMC reads `@LX0` after homing with `#OX,300` [CAP g_init].
+                    self.pos[axis] = 0;
+                    self.path_target[axis] = 0;
                     if positioned_signal {
                         out.extend_from_slice(&[0x01, 0x01]); // seek + release [CAP g_init]
                     }

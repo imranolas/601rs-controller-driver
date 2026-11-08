@@ -745,14 +745,18 @@ the head is pushed against it (operator). After every homing GMC sets it to norm
 a short routine [GMC]: on a machine whose head changes this way
 (`DBDHeadChangeKind` ≠ 0, the 601) it drives to 3 cm short of `VGChangeY` (at the current X, 0,
 the blade at 90°: `L20,X0,Y40600,Z749`), pushes on to `VGChangeY` (`Y41800`, 104.5 cm) and
-comes back, with its own soft-limit check off, then reads the Y home switch
-[GMC]. The blade's angle picks the way the switch goes: 90° for normal cutting, 270° for
+comes back, with its own soft-limit check off, then reads the Y home switch and ignores the
+result [GMC]. Its speeds are those of any of its positioning moves: `#C1,0 #R225 #G20,36000`
+for the run there, and `#R112` for the push and back,
+the fast ramp it gives a move under `FastZMinLenXY` [GMC] [CAP g_init]. The blade's angle picks the way the switch goes: 90° for normal cutting, 270° for
 V-groove (`VGChangeZ` + 180) [GMC]. Heads switched electrically get a 250 ms pulse of `i_dd`
 instead (§2.5) [GMC]. The push goes 30 mm past the 101.5 cm the
 profile allows, so Y's travel reaches at least 104.5 cm.
 
 A driver must do the same after homing, before the bevel head cuts: a head left in V-groove
-mode by an earlier job would cut at V-groove depth. Not yet in `machine` or `runner`.
+mode by an earlier job would cut at V-groove depth. Here `machine::vgroove_reset` holds GMC's
+steps (the profile's `vgroove_switch`), the runner sends them after every homing and then
+parks, and `gunnar check` stage 3 sends them with the operator watching.
 
 ### 4.2 Head selection and the side-by-side X offset
 

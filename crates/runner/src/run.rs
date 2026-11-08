@@ -207,7 +207,8 @@ impl Runner {
         }
     }
 
-    /// Home the machine as GMC does: heads up, Z first, then X and Y (protocol reference §4.1).
+    /// Home the machine as GMC does: heads up, Z first, then X and Y; then set the bevel head's
+    /// V-groove switch to normal cutting, and park (protocol reference §4.1).
     pub fn home(&mut self) -> Result<(), Error> {
         self.busy = true;
         let r = self.homing();
@@ -266,7 +267,17 @@ impl Runner {
             self.session.set(s)?;
         }
         self.session.home(&[Axis::X, Axis::Y])?;
-        self.session.wait_until(self.config.homing_timeout, homed)
+        let s = self.session.wait_until(self.config.homing_timeout, homed)?;
+        if !s.homed {
+            return Ok(s);
+        }
+        let x = self.session.position()?[0];
+        let p = &self.profile;
+        let mut steps = machine::vgroove_reset(p, clamps, x);
+        steps.extend(machine::park(p, clamps));
+        let (_tx, rx) = mpsc::channel();
+        self.exec(&steps, None, &rx, &mut |_| {})?;
+        self.session.status()
     }
 
     /// Both heads up and travel to the park, the clamps as they are.

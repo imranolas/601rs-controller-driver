@@ -55,6 +55,9 @@ pub struct Profile {
     pub envelope_mm: Envelope,
     /// Where the carriage parks at the end of a job, steps.
     pub park_steps: [i32; 2],
+    /// The bevel head's V-groove switch, if a stub at the back of the table sets it: the
+    /// runner sets it to normal cutting after homing, as GMC does (protocol reference §4.1).
+    pub vgroove_switch: Option<VGrooveSwitch>,
     pub line: Line,
     /// The controller configuration everything here assumes.
     pub controller: ControllerConfig,
@@ -96,6 +99,20 @@ pub struct Homing {
     pub ramp_ms: u16,
     /// `#O`: how far each axis moves off its switch after homing, steps (X, Y, Z).
     pub offset_steps: [i32; 3],
+}
+
+/// Where the bevel head's V-groove switch (GMC's DBD) is set: the carriage pushes the head
+/// against a stub at the back of the table, and the blade's angle picks the way the switch goes
+/// [GCF `VGChangeY`, `VGChangeZ`; protocol reference §4.1].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VGrooveSwitch {
+    /// The carriage's Y against the stub, steps. It lies past the envelope: the one place the
+    /// carriage goes outside it.
+    pub y_steps: i32,
+    /// The blade's angle on the bevel head that sets normal cutting, degrees; 180° on from it
+    /// sets V-groove.
+    pub normal_deg: f64,
 }
 
 /// The serial line to the controller.
@@ -340,6 +357,11 @@ impl Profile {
             // [GCF] AutoParkX/Y 140 × 20 cm, the bevel blade's position: its carriage less the
             // bevel's offset, 147.15 × 19.81 cm [CAP].
             park_steps: [58_860, 7_923],
+            // [GCF] VGChangeY 104.5 cm, VGChangeZ 90°.
+            vgroove_switch: Some(VGrooveSwitch {
+                y_steps: 41_800,
+                normal_deg: 90.0,
+            }),
             controller: ControllerConfig {
                 z_steps_per_rev: 3000,
                 z_um_per_rev: 10_000,
