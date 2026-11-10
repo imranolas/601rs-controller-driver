@@ -5,7 +5,7 @@
 //! gunnar capture <g_*.txt>              decode a GMC serial capture
 //! gunnar probe <port|sim> [--log F]     read-only questions to the controller
 //! gunnar check <port|sim> [--stage S] [--speed N] [--log F]
-//!                                       staged hardware checks (S = 2..7, a range 3-5, or all)
+//!                                       staged hardware checks (S = 2..8, a range 3-5, or all)
 //! ```
 //!
 //! `sim` instead of a port runs against the simulator. Every byte is logged with timestamps
@@ -33,7 +33,7 @@ const USAGE: &str = "usage:
   gunnar ports
   gunnar capture <g_*.txt>
   gunnar probe <port|sim> [--log FILE]
-  gunnar check <port|sim> [--stage 2..7|A-B|all] [--speed STEPS_PER_S] [--log FILE]";
+  gunnar check <port|sim> [--stage 2..8|A-B|all] [--speed STEPS_PER_S] [--log FILE]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -91,7 +91,7 @@ struct Options {
 fn parse_options(rest: &[String]) -> Res<Options> {
     let mut o = Options {
         log: None,
-        stages: (2..=7).collect(),
+        stages: (2..=8).collect(),
         speed: 1200,
     };
     let mut it = rest.iter();
@@ -117,11 +117,11 @@ fn parse_options(rest: &[String]) -> Res<Options> {
     Ok(o)
 }
 
-/// `all`, one stage (`3`) or a rising range (`3-5`), within 2..7.
+/// `all`, one stage (`3`) or a rising range (`3-5`), within 2..8.
 fn parse_stages(v: &str) -> Res<Vec<u8>> {
-    const STAGES: std::ops::RangeInclusive<u8> = 2..=7;
+    const STAGES: std::ops::RangeInclusive<u8> = 2..=8;
     let bad = || {
-        format!("--stage {v}: give 2..7, a range such as 3-5, or all (stage 1 is `gunnar probe`)")
+        format!("--stage {v}: give 2..8, a range such as 3-5, or all (stage 1 is `gunnar probe`)")
     };
     let stage = |s: &str| {
         s.parse()
@@ -227,8 +227,8 @@ mod tests {
     fn stages_are_one_a_rising_range_or_all() {
         assert_eq!(parse_stages("4").ok(), Some(vec![4]));
         assert_eq!(parse_stages("3-5").ok(), Some(vec![3, 4, 5]));
-        assert_eq!(parse_stages("all").ok(), Some((2..=7).collect()));
-        for bad in ["5-3", "1", "8", "2-9", "x", "3-", ""] {
+        assert_eq!(parse_stages("all").ok(), Some((2..=8).collect()));
+        for bad in ["5-3", "1", "9", "2-9", "x", "3-", ""] {
             let e = parse_stages(bad).expect_err(bad).to_string();
             assert!(e.starts_with("--stage"), "{bad}: {e}");
         }

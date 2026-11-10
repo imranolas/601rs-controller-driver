@@ -306,7 +306,7 @@ impl Profile {
                 up: 0x02,
             },
             // GMC closes 0x40 for a board on the left half of the table and 0x20 on the right,
-            // both for a board wider than half (protocol reference §2.5); stage 3 confirms.
+            // both for a board wider than half (protocol reference §2.5); confirmed at the machine.
             clamps: Clamps {
                 left: 0x40,
                 right: 0x20,

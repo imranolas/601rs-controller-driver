@@ -9,11 +9,15 @@ publish.workspace = true
 
 [features]
 default = ["serial"]
-serial = ["dep:serialport"]
+serial = ["dep:serialport", "dep:nix"]
 
 [dependencies]
 serialport = { workspace = true, optional = true }
 thiserror.workspace = true
+
+# The speed set again through termios (serial.rs `set_speed`); the version serialport uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.26", default-features = false, features = ["term"], optional = true }
 
 [dev-dependencies]
 protocol.workspace = true

@@ -32,13 +32,20 @@ impl SerialConfig {
 
 /// Open the port and split it into independent reader and writer halves.
 pub fn open(cfg: &SerialConfig) -> serialport::Result<Link> {
-    let mut port = serialport::new(&cfg.path, cfg.baud)
+    let builder = serialport::new(&cfg.path, cfg.baud)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
         .stop_bits(StopBits::One)
         .flow_control(FlowControl::None)
-        .timeout(cfg.read_timeout)
-        .open()?;
+        .timeout(cfg.read_timeout);
+    #[cfg(target_os = "macos")]
+    let mut port: Box<dyn serialport::SerialPort> = {
+        let port = builder.open_native()?;
+        set_speed(&port, cfg.baud)?;
+        Box::new(port)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut port = builder.open()?;
     port.write_data_terminal_ready(true)?;
     port.write_request_to_send(true)?;
     let reader = port.try_clone()?;
@@ -47,6 +54,21 @@ pub fn open(cfg: &SerialConfig) -> serialport::Result<Link> {
         reader: Box::new(SerialReader(reader)),
         writer: Box::new(SerialWriter(port)),
     })
+}
+
+/// Set the speed through termios as well. On macOS serialport writes the termios with 9600 and
+/// then sets the speed with `IOSSIOSPEED`, which reads back as set but leaves the line at the
+/// old speed on some drivers: with the Prolific PL2303 adapter at the 601 the box heard nothing
+/// it could read, while a termios write at 115200 works.
+#[cfg(target_os = "macos")]
+fn set_speed(port: &serialport::TTYPort, baud: u32) -> io::Result<()> {
+    use nix::sys::termios::{SetArg, cfsetspeed, tcgetattr, tcsetattr};
+    use std::os::fd::AsRawFd;
+    let fd = port.as_raw_fd();
+    let mut t = tcgetattr(fd)?;
+    cfsetspeed(&mut t, baud)?;
+    tcsetattr(fd, SetArg::TCSANOW, &t)?;
+    Ok(())
 }
 
 /// A serial port the OS offers.

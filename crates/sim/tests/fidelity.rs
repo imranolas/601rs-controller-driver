@@ -88,6 +88,102 @@ fn homed_at_start(transfers: &[Transfer]) -> bool {
         .is_some_and(|s| s.homed)
 }
 
+/// A parameter's name in a query or a write: `C1` in `&C1` and `#C1,200`, `R` in `&R` and
+/// `#R250`, `OX` in `&OX` and `#OX,300`.
+fn parameter_key(rest: &str) -> &str {
+    match rest.chars().next() {
+        Some('R' | 'S' | 'M') => &rest[..1],
+        _ => rest.split(',').next().unwrap_or(rest),
+    }
+}
+
+/// The parameters the box had when the recording started, as writes: each one's first read
+/// (`&C1` → `&C1,100` → `#C1,100`) unless the recording wrote it first. A session run after
+/// another that ended without restoring them (stopped at a prompt, say) starts with what that
+/// one left.
+fn parameters_at_start(transfers: &[Transfer]) -> Vec<String> {
+    let (mut host, mut real) = (Decoder::new(), Decoder::new());
+    let mut last_cmd = String::new();
+    let mut written: Vec<String> = Vec::new();
+    let mut found: Vec<(String, String)> = Vec::new();
+    for t in transfers {
+        let frames = match t.direction {
+            Direction::HostToController => host.push(&t.bytes),
+            Direction::ControllerToHost => real.push(&t.bytes),
+        };
+        for frame in frames {
+            let Frame::Line(line) = frame else { continue };
+            match t.direction {
+                Direction::HostToController => {
+                    if let Some(rest) = line.strip_prefix('#') {
+                        written.push(parameter_key(rest).to_owned());
+                    }
+                    if line != "@X" {
+                        last_cmd = line;
+                    }
+                }
+                Direction::ControllerToHost => {
+                    let (Some(query), Some(reply)) =
+                        (last_cmd.strip_prefix('&'), line.strip_prefix('&'))
+                    else {
+                        continue;
+                    };
+                    let key = parameter_key(query);
+                    if !written.iter().any(|w| w == key) && !found.iter().any(|(k, _)| k == key) {
+                        found.push((key.to_owned(), format!("#{reply}")));
+                    }
+                }
+            }
+        }
+    }
+    found.into_iter().map(|(_, write)| write).collect()
+}
+
+/// Where the carriage was when the recording started: its first `@LX`, `@LY` and `@LZ` replies
+/// say (a session run after another starts where that one left it, e.g. at the park). An axis
+/// never read starts at 0.
+fn position_at_start(transfers: &[Transfer]) -> [i64; 3] {
+    let mut decoder = Decoder::new();
+    let mut pos: [Option<i64>; 3] = [None; 3];
+    for frame in transfers
+        .iter()
+        .filter(|t| t.direction == Direction::ControllerToHost)
+        .flat_map(|t| decoder.push(&t.bytes))
+    {
+        let Frame::Line(line) = frame else { continue };
+        let Some(rest) = line.strip_prefix("@L") else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let axis = match chars.next() {
+            Some('X') => 0,
+            Some('Y') => 1,
+            Some('Z') => 2,
+            _ => continue,
+        };
+        if pos[axis].is_none() {
+            pos[axis] = chars.as_str().parse().ok();
+        }
+    }
+    pos.map(|p| p.unwrap_or(0))
+}
+
+/// The speed override a recording started with, if one was set: its first `@O` reply says. A
+/// session run after another without a power-cycle starts with what that one left (a check
+/// run puts the box's `@O0` back as `@O100`).
+fn override_at_start(transfers: &[Transfer]) -> Option<u32> {
+    let mut decoder = Decoder::new();
+    transfers
+        .iter()
+        .filter(|t| t.direction == Direction::ControllerToHost)
+        .flat_map(|t| decoder.push(&t.bytes))
+        .find_map(|frame| match frame {
+            Frame::Line(line) => line.strip_prefix("@O")?.parse().ok(),
+            _ => None,
+        })
+        .filter(|&pct| pct != 0)
+}
+
 fn significant(line: &str) -> Option<String> {
     if line.starts_with("@X") {
         return None;
@@ -123,8 +219,15 @@ fn replay(transfers: &[Transfer]) -> Replay {
     let mut core = SimCore::new(SimConfig {
         instant_motion: true,
         homed_at_start: homed_at_start(transfers),
+        start_position: position_at_start(transfers),
         ..SimConfig::default()
     });
+    for write in parameters_at_start(transfers) {
+        core.handle_line(&write, Duration::ZERO);
+    }
+    if let Some(pct) = override_at_start(transfers) {
+        core.handle_line(&format!("@O{pct}"), Duration::ZERO);
+    }
 
     let (mut host, mut real_dec, mut sim_dec) = (Decoder::new(), Decoder::new(), Decoder::new());
     let mut out = Replay {

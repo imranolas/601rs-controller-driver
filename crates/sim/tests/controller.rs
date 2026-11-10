@@ -164,6 +164,7 @@ fn pacing_lets_a_long_curve_through_a_small_buffer() {
     let (mut p, sim) = start_with(
         SimConfig {
             buffer_capacity: 1000,
+            buffer_uncounted: 0,
             ..homed()
         },
         20.0,
@@ -197,6 +198,7 @@ fn on_a_real_line_0x03_alone_keeps_the_buffer_from_overflowing() {
     let (mut p, sim) = start(
         SimConfig {
             buffer_capacity: 1000,
+            buffer_uncounted: 0,
             ..homed()
         },
         20.0,
@@ -468,6 +470,7 @@ fn sim_brake_into_limit(jog: &mut Controller<mode::Jog>) {
 fn flow_pause_keeps_the_host_watchdog_fed() {
     let config = SimConfig {
         buffer_capacity: 400,
+        buffer_uncounted: 0,
         ..homed()
     };
     let (mut p, _sim) = start(config, 1.0);

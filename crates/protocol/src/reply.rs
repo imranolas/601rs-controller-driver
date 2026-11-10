@@ -124,9 +124,14 @@ pub fn parse_command_counter(line: &str) -> Option<u32> {
     line.strip_prefix("@N")?.parse().ok()
 }
 
-/// `@O120` → speed override [SPEC1 p.16]. `None` outside 10–200 %, too.
+/// `@O120` → speed override [SPEC1 p.16]. `None` outside 10–200 %, too. The 601 answers `@O0`
+/// until an override is set (at power-on; GMC never sets one) and moves at the programmed
+/// speeds then: 100 %.
 pub fn parse_override(line: &str) -> Option<OverridePct> {
-    OverridePct::new(line.strip_prefix("@O")?.parse().ok()?)
+    match line.strip_prefix("@O")?.parse().ok()? {
+        0 => Some(OverridePct::NORMAL),
+        pct => OverridePct::new(pct),
+    }
 }
 
 /// `@E23` → error code [SPEC p.13].
@@ -224,6 +229,7 @@ mod tests {
         assert_eq!(parse_command_counter("@N412"), Some(412));
         assert_eq!(parse_override("@O120"), OverridePct::new(120));
         assert_eq!(parse_override("@O5"), None, "out of range");
+        assert_eq!(parse_override("@O0"), Some(OverridePct::NORMAL), "none set");
     }
 
     #[test]

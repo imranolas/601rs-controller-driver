@@ -8,6 +8,7 @@
 //! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16`; compact paths, a second speed entry, in-stream `G`, what `@N` counts and how wide it is |
 //! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream; no overrun at full speed; `@B` on a held stream discards it |
 //! | 7 | yes | `@S` loses the position; a limit switch arrives as an async `*03x` and shows in `@Y` (the drive towards it ends 20 mm past GMC's drivable range) |
+//! | 8 | yes | the heads down with the blades out (`i_b` and the throttle, the lift, the straight head); a Z-only vector inside a stream (the corner pivot); how long after `@X04` a trailing `A` switches; a stream held at `I221` filled until a flow byte: buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it |
 //!
 //! Safety rules:
 //! - Homing raises both heads first (`$A02`). Every other moving stage starts with the heads
@@ -18,6 +19,7 @@
 //!   V-groove switch reset, GMC's own after homing (3 cm on against a stub at the back), and
 //!   stage 7's drive towards a limit switch the controller can see.
 //! - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.
+//!   Stage 8 lowers each head once the operator says both blades are out, with nothing moving.
 //! - Nothing is saved (`#W` is never sent); the parameters a stage changes are read first and
 //!   written back at the end. Ctrl-C brakes (`@B`) and exits.
 
@@ -325,6 +327,7 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
             5 => "Stage 5: v1.00 in-stream commands",
             6 => "Stage 6: buffer, flow control, watchdog",
             7 => "Stage 7: faults (@S, limit switch)",
+            8 => "Stage 8: heads down, blade turn, trailing output, held stream",
             _ => continue,
         };
         ctx.r.heading(title);
@@ -340,7 +343,8 @@ pub fn run(mut p: Params, stages: &[u8], ctx: &mut Ctx) -> Res<bool> {
             4 => stage4(p, ctx),
             5 => stage5(p, ctx),
             6 => stage6(p, ctx),
-            _ => stage7(p, ctx),
+            7 => stage7(p, ctx),
+            _ => stage8(p, ctx),
         };
         match result {
             Ok(back) if ctx.quit => {
@@ -1668,6 +1672,492 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         format!("{sw:?}"),
     );
     Ok(j.into_parameters()?)
+}
+
+// ------------------------------------------------------------------ stage 8
+
+/// Stage 8's fast entry, steps/s (100 mm/s): the top of `--speed`.
+const FAST_SPEED: u32 = 4000;
+/// How much stage 8 pours in behind a held stream before it stops.
+const HOLD_CAP_BYTES: usize = 512 * 1024;
+
+fn stage8(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    if !require_homed(&mut p, ctx, "stage 8")? {
+        return Ok(p);
+    }
+    setup_moves(&mut p, ctx)?;
+    p.set(Setting::Speed {
+        entry: TRAVEL_ENTRY,
+        value: FAST_SPEED,
+    })?;
+    let (p, at_park) = to_park(p, ctx)?;
+    if !at_park {
+        return Ok(p);
+    }
+    let p = heads_down(p, ctx)?;
+    let p = corner_turn(p, ctx)?;
+    let p = trailing_output(p, ctx)?;
+    held_stream(p, ctx)
+}
+
+/// The head outputs with the blades out, the operator watching (nothing moves; the heads come
+/// down on the table at the park). Does `i_b` (`04`) bypass the Z head's throttle, so that
+/// GMC's head-down (`05`) is fast and its slow head-down for closed curves (`01`) slow? What
+/// does GMC's lift (`00`) do? Does `0A` lower the straight head alone?
+fn heads_down(p: Params, ctx: &mut Ctx) -> Res<Params> {
+    let step = "heads down";
+    if !ctx.go(
+        "Lower each head in turn as GMC does, and raise it again. TAKE BOTH BLADES OUT FIRST: \
+         the heads come down on the table at the park.",
+        step,
+    ) {
+        return Ok(p);
+    }
+    if let Some(a) = ctx.op.ask("Are both blades out of their holders? (y/n)") {
+        if a != "y" {
+            ctx.r.skip(step, format!("operator: {a}"));
+            return Ok(p);
+        }
+    }
+    let profile = profile();
+    let (bevel, straight) = (profile.bevel, profile.straight);
+    let mut j = p.into_jog()?;
+    let mut came_down = Vec::new();
+    for (bits, what) in [
+        (bevel.down_closed.unwrap_or(bevel.down), "slow head-down"),
+        (bevel.down, "head-down"),
+    ] {
+        let name = format!("bevel ${bits:02X} ({what})");
+        if !ctx.go(
+            &format!("Bevel {what} (${bits:02X}), GMC's lift, then up. Watch the bevel head."),
+            &name,
+        ) {
+            continue;
+        }
+        let a = watch_outputs(
+            &mut j,
+            ctx,
+            bits,
+            "How did the bevel head come down? f = fast, s = slow, n = it didn't:",
+        )?;
+        ctx.r.info(&name, format!("operator: {a}"));
+        came_down.push(a);
+        if let Some(lift) = bevel.lift {
+            let a = watch_outputs(
+                &mut j,
+                ctx,
+                lift,
+                &format!("Lift (${lift:02X}): what moved? (Enter for nothing)"),
+            )?;
+            ctx.r
+                .info(&format!("bevel lift ${lift:02X} after ${bits:02X}"), a);
+        }
+        j.set_outputs(bevel.up)?;
+        thread::sleep(ctx.t(1500));
+    }
+    if let [slow, normal] = came_down.as_slice() {
+        ctx.r.info(
+            "i_b bypasses the Z head's throttle",
+            match (slow.as_str(), normal.as_str()) {
+                ("s", "f") => "yes: i_t alone comes down slowly, with i_b fast",
+                ("f", "f") | ("s", "s") => "no: both come down alike",
+                _ => "unclear (see the answers above)",
+            },
+        );
+    }
+    let name = format!("straight ${:02X}", straight.down);
+    if ctx.go(
+        &format!(
+            "Straight head down (${:02X}, the bevel held up), then up.",
+            straight.down
+        ),
+        &name,
+    ) {
+        j.set_outputs(straight.down)?;
+        thread::sleep(ctx.t(1500));
+        match ctx
+            .op
+            .ask("What came down? s = the straight head only, b = both heads, n = nothing:")
+        {
+            Some(a) => ctx.r.check(a == "s", &name, format!("operator: {a}")),
+            None => ctx.r.pass(&name, "sent (simulator)"),
+        }
+        j.set_outputs(straight.up)?;
+        thread::sleep(ctx.t(1500));
+    }
+    Ok(j.into_parameters()?)
+}
+
+/// Switch the outputs to `bits`, give the head a moment, and ask what it did.
+fn watch_outputs(
+    j: &mut Controller<mode::Jog>,
+    ctx: &mut Ctx,
+    bits: u8,
+    question: &str,
+) -> Res<String> {
+    j.set_outputs(bits)?;
+    thread::sleep(ctx.t(1500));
+    Ok(ctx
+        .op
+        .ask(question)
+        .unwrap_or_else(|| "(simulator)".to_owned()))
+}
+
+/// Z steps for a quarter turn of the blade.
+fn quarter_turn() -> i32 {
+    (profile().controller.z_steps_per_rev / 4) as i32
+}
+
+/// From a vector just streamed until the controller is idle again, polled as fast as it
+/// answers: how long the move took.
+fn motion_time(c: &mut Controller<mode::Cutting>) -> Res<Duration> {
+    let start = Instant::now();
+    let mut seen = false;
+    loop {
+        let s = c.status()?;
+        seen |= s.moving;
+        if !s.moving && (seen || start.elapsed() > Duration::from_millis(300)) {
+            return Ok(start.elapsed());
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            return Err("the move never ended".into());
+        }
+    }
+}
+
+/// A blade turn on the spot inside a stream, heads up: 20 mm along X, a vector that turns Z
+/// alone (the corner pivot the machine model leaves out until this is known), 20 mm along Y.
+/// Is it taken, does the carriage stand still while the blade turns, and how long does a
+/// quarter turn take?
+fn corner_turn(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    if !ctx.go(
+        "Turn the blade on the spot: a quarter turn of Z alone, at the test speed and at \
+         100 mm/s, then inside a stream (20 mm along X, the turn, 20 mm along Y) and back. \
+         Heads up.",
+        "corner turn",
+    ) {
+        return Ok(p);
+    }
+    let [ix, iy] = inward();
+    let (dx, dy) = (step_20mm() * ix, step_20mm() * iy);
+    let start = pos(&mut p)?;
+    let [x0, y0, z0] = start;
+    let q = quarter_turn();
+    let mut c = p.into_cutting()?;
+
+    // (a) Z alone, timed from the send (`C1`: no dead time).
+    for (entry, speed) in [(ENTRY, ctx.speed), (TRAVEL_ENTRY, FAST_SPEED)] {
+        let mut times = Vec::new();
+        for z in [z0 + q, z0] {
+            c.flags(StreamFlags {
+                no_dead_time: true,
+                ..StreamFlags::default()
+            })?;
+            c.vector(entry, x0, y0, z)?;
+            times.push(motion_time(&mut c)?.as_millis());
+        }
+        let at = pos(&mut c)?;
+        ctx.r.check(
+            at == start,
+            &format!("Z alone at {speed} steps/s"),
+            format!(
+                "a quarter turn ({q} steps) in {} ms, back in {} ms (from the send, polled); \
+                 at {at:?} after",
+                times[0], times[1]
+            ),
+        );
+    }
+
+    // (b) The turn as a corner inside a stream.
+    let corner = [x0 + dx, y0, z0];
+    let path = [corner, [x0 + dx, y0, z0 + q], [x0 + dx, y0 + dy, z0 + q]];
+    let started = Instant::now();
+    for [x, y, z] in path {
+        c.vector(ENTRY, x, y, z)?;
+    }
+    let mut samples: Vec<(Duration, [i32; 3])> = Vec::new();
+    let mut seen = false;
+    loop {
+        // One query per axis, so a sample spans a few ms. In this order Z is read after Y and
+        // X after Z, so "turning while X is not there yet" and "Y under way while the turn is
+        // not done" each hold at the later read: neither shows up just from the spread.
+        let y = c.position_steps(Axis::Y)?;
+        let z = c.position_steps(Axis::Z)?;
+        let x = c.position_steps(Axis::X)?;
+        samples.push((started.elapsed(), [x, y, z]));
+        let s = c.status()?;
+        seen |= s.moving;
+        if !s.moving && (seen || started.elapsed() > Duration::from_millis(300)) {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            return Err("the corner path never ended".into());
+        }
+    }
+    let end = pos(&mut c)?;
+    let ms = |t: Option<Duration>| t.map_or("–".to_owned(), |t| format!("{} ms", t.as_millis()));
+    let first = |f: &dyn Fn(&[i32; 3]) -> bool| samples.iter().find(|(_, p)| f(p)).map(|s| s.0);
+    let arrived = first(&|p| p[0] == corner[0]);
+    let turned = first(&|p| p[2] == z0 + q);
+    let left = first(&|p| p[1] != y0);
+    // Turning before X arrived, or moving off along Y before the turn ended: the controller
+    // blends the turn into the moves around it instead of pivoting on the spot.
+    let blended = samples
+        .iter()
+        .any(|(_, p)| (p[2] != z0 && p[0] != corner[0]) || (p[1] != y0 && p[2] != z0 + q));
+    let mid_turn = samples
+        .iter()
+        .filter(|(_, p)| p[2] != z0 && p[2] != z0 + q)
+        .count();
+    ctx.r.check(
+        end == path[2],
+        "a Z-only vector inside a stream",
+        format!("taken: ended at {end:?}"),
+    );
+    ctx.r.check(
+        !blended,
+        "the carriage stands still while the blade turns",
+        format!(
+            "X arrived by {}, the turn ended by {}, Y moved off by {} ({} of {} samples caught \
+             the turn under way)",
+            ms(arrived),
+            ms(turned),
+            ms(left),
+            mid_turn,
+            samples.len()
+        ),
+    );
+    for [x, y, z] in [[x0 + dx, y0, z0 + q], corner, start] {
+        c.vector(ENTRY, x, y, z)?;
+    }
+    idle(&mut c)?;
+    let back = pos(&mut c)?;
+    ctx.r.check(
+        back == start,
+        "back from the corner",
+        format!("at {back:?}"),
+    );
+    Ok(c.into_parameters()?)
+}
+
+/// How long after `@X04` a stream's trailing `A` switches its output (the runner raises the
+/// heads with one at the end of a cut): 20 mm then `A82`, the spare bit, polling `@X` and
+/// `@Q249` as fast as they answer. Three runs at the test speed and three at 100 mm/s.
+fn trailing_output(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    if !ctx.go(
+        "Time the trailing output: 20 mm along X, then A82 (the spare bit), polling @X and \
+         @Q249 as fast as they answer; six times. Heads up.",
+        "trailing output",
+    ) {
+        return Ok(p);
+    }
+    let d = step_20mm() * inward()[0];
+    let [x0, y0, z0] = pos(&mut p)?;
+    let mut c = p.into_cutting()?;
+    let mut lines = Vec::new();
+    let mut early = 0;
+    for (entry, speed) in [(ENTRY, ctx.speed), (TRAVEL_ENTRY, FAST_SPEED)] {
+        for _ in 0..3 {
+            c.vector(entry, x0 + d, y0, z0)?;
+            c.outputs(0x82)?;
+            let started = Instant::now();
+            let (mut seen, mut idle_at, mut on_at, mut idle_off) = (false, None, None, false);
+            while on_at.is_none() || idle_at.is_none() {
+                let s = c.status()?;
+                let t = started.elapsed();
+                let q = c.read_output(249)?;
+                seen |= s.moving;
+                if seen && !s.moving {
+                    idle_at.get_or_insert(t);
+                    idle_off |= !q; // idle, and the output read after it still off
+                }
+                if q {
+                    on_at.get_or_insert(started.elapsed());
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    return Err("the trailing output never switched".into());
+                }
+            }
+            if idle_off {
+                early += 1;
+            }
+            let (idle_at, on_at) = (idle_at.unwrap_or_default(), on_at.unwrap_or_default());
+            lines.push(format!(
+                "{speed}: @X04 at {} ms, @Q249,1 at {} ms{}",
+                idle_at.as_millis(),
+                on_at.as_millis(),
+                if idle_off { " (idle first)" } else { "" }
+            ));
+            c.outputs(0x02)?;
+            c.vector(entry, x0, y0, z0)?;
+            idle(&mut c)?;
+        }
+    }
+    ctx.r.info(
+        "trailing A after @X04",
+        format!(
+            "{early} of 6 runs read @X04 while the output was still off. {}",
+            lines.join("; ")
+        ),
+    );
+    Ok(c.into_parameters()?)
+}
+
+/// Flow bytes and controller faults among the events since the last look.
+fn collect_events(ctx: &Ctx, flow: &mut Vec<Signal>, faults: &mut Vec<String>) {
+    for e in ctx.events.try_iter() {
+        match e {
+            Event::Signal(s @ (Signal::BufferAlmostFull | Signal::BufferResume)) => flow.push(s),
+            Event::Unsolicited(line) if line.starts_with('*') => faults.push(line),
+            _ => {}
+        }
+    }
+}
+
+/// Fill the buffer behind a wait for the green button (never pressed) with 1 mm moves by the
+/// park, asking `@H` after every few: the buffer's size, which flow byte comes first and when,
+/// whether `@H` keeps the `#C19` watchdog fed while the stream is held, and whether `@B`
+/// empties a held stream (and `0x02` follows a `0x03`). Sending stops at the first flow byte,
+/// whichever it is, so it never relies on the one under test.
+fn held_stream(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
+    if !ctx.go(
+        "Fill the buffer behind a wait for the green button: up to 512 KB of 1 mm moves by \
+         the park (about a minute), with flow control (#C7,1) and the host watchdog \
+         (#C19,400), then brake (@B). DON'T PRESS THE GREEN BUTTON: the queued moves would run \
+         (Ctrl-C brakes). Heads up.",
+        "held stream",
+    ) {
+        return Ok(p);
+    }
+    p.set(Setting::FlowControl(true))?;
+    p.set(Setting::HostWatchdog(ctx.watchdog(400)))?;
+    let start = pos(&mut p)?;
+    let [x0, y0, z0] = start;
+    let near = x0 + steps_per_mm() * inward()[0];
+    let mut c = p.into_cutting()?;
+    ctx.drain();
+    c.wait_input(221, Level::High)?;
+    let (mut flow, mut faults) = (Vec::new(), Vec::new());
+    let mut levels: Vec<(usize, u8)> = Vec::new();
+    let (mut sent, mut k, mut fine) = (0usize, 0usize, false);
+    let started = Instant::now();
+    // Near full, one vector per `@H`: its reply comes after any flow byte the bytes before it
+    // caused, so the next vector never meets a hold unseen (it would block, then time out).
+    'fill: while sent < HOLD_CAP_BYTES {
+        for _ in 0..if fine { 1 } else { 16 } {
+            collect_events(ctx, &mut flow, &mut faults);
+            if !flow.is_empty() || !faults.is_empty() {
+                break 'fill;
+            }
+            let x = if k % 2 == 0 { near } else { x0 };
+            k += 1;
+            match c.vector(ENTRY, x, y0, z0) {
+                Ok(()) => sent += vector_bytes(x, y0, z0),
+                // Held by a flow byte that came in after the look above.
+                Err(ControllerError::FlowTimeout { .. }) => break 'fill,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let pct = c.buffer_level_pct()?;
+        collect_events(ctx, &mut flow, &mut faults);
+        if levels.last().is_none_or(|l| l.1 != pct) {
+            levels.push((sent, pct));
+        }
+        // 0x03 comes about 200 bytes before full [SPEC1 p.5], at about 99.7 % on the 601.
+        if !flow.is_empty() || !faults.is_empty() || pct >= 100 {
+            break;
+        }
+        fine |= pct >= 50;
+    }
+    let filled = started.elapsed();
+    let flow_at = sent;
+
+    // Held: nothing may run. Ask @H every 100 ms for 2 s: does that keep #C19 fed?
+    let hold_until = Instant::now() + ctx.t(2000);
+    while Instant::now() < hold_until {
+        c.buffer_level_pct()?;
+        thread::sleep(ctx.t(100));
+    }
+    let held = c.status()?;
+    let at = pos(&mut c)?;
+    collect_events(ctx, &mut flow, &mut faults);
+    let flow_before_brake = flow.len();
+
+    ctx.stop.brake()?;
+    c.clear_stop()?;
+    idle(&mut c)?;
+    thread::sleep(ctx.t(1500));
+    collect_events(ctx, &mut flow, &mut faults);
+    let level = c.buffer_level_pct()?;
+    let after = c.status()?;
+    let later = pos(&mut c)?;
+
+    let (first_level, last_level) = (
+        levels.iter().find(|l| l.1 > 0).copied(),
+        levels.last().copied(),
+    );
+    ctx.r.info(
+        "buffer (@H)",
+        match (first_level, last_level) {
+            (Some(f), Some(l)) => format!(
+                "{} KB read {}%, {} KB read {}%: about {} KB",
+                f.0 / 1024,
+                f.1,
+                l.0 / 1024,
+                l.1,
+                l.0 * 100 / usize::from(l.1.max(1)) / 1024
+            ),
+            _ => format!(
+                "{} KB in {:.0} s read 0% throughout: @H does not count these bytes, or the \
+                 buffer is over {} MB",
+                sent / 1024,
+                filled.as_secs_f64(),
+                sent * 100 / 1024 / 1024
+            ),
+        },
+    );
+    if flow_before_brake == 0 {
+        ctx.r
+            .info("first flow byte", format!("none in {} KB", sent / 1024));
+    } else {
+        ctx.r.check(
+            flow[0] == Signal::BufferAlmostFull,
+            "0x03 = almost full, 0x02 = room (table p.7)",
+            format!(
+                "{} first, after {} KB at @H{}",
+                flow_names(&flow[..1]),
+                flow_at / 1024,
+                last_level.map_or(0, |l| l.1)
+            ),
+        );
+    }
+    ctx.r.check(
+        at == start && held.waiting,
+        "a held stream stays held",
+        format!("{held} at {at:?}, 2 s after the last byte"),
+    );
+    ctx.r.check(
+        faults.is_empty(),
+        "@H polls keep #C19 fed while held",
+        if faults.is_empty() {
+            "no fault in 2 s of @H every 100 ms with #C19,400, nor while filling".to_owned()
+        } else {
+            faults.join(" ")
+        },
+    );
+    ctx.r.check(
+        level == 0 && !after.moving && later == start,
+        "@B empties a held stream",
+        format!("@H{level}, {after}, at {later:?} 1.5 s after the brake"),
+    );
+    if flow[..flow_before_brake].contains(&Signal::BufferAlmostFull) {
+        ctx.r.check(
+            flow.last() == Some(&Signal::BufferResume),
+            "0x02 after the brake",
+            format!("flow bytes: {}", flow_names(&flow)),
+        );
+    }
+    Ok(c.into_parameters()?)
 }
 
 #[cfg(test)]

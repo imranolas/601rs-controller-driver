@@ -28,8 +28,8 @@ cargo build --release -p gunnar
      and whether it needs GMC's licence exchange (`@M1 accepted` vs `*007`).
    - Reads back every parameter GMC writes. The line **box vs GMC at connect** says whether
      the box boots with GMC's configuration or a driver must write it at connect, as GMC does.
-5. **Stages 2–7:** `./target/release/gunnar check /dev/cu.usbserial-XXXX --stage 2`, then
-   `--stage 3`, and so on (or `--stage 2-7`). Each step says what it will do and waits for
+5. **Stages 2–8:** `./target/release/gunnar check /dev/cu.usbserial-XXXX --stage 2`, then
+   `--stage 3`, and so on (or `--stage 2-8`). Each step says what it will do and waits for
    Enter. `s` skips the step. `q` at any prompt ends the run: the stage in hand winds down
    without asking anything more, and the parameters are restored.
 
@@ -41,6 +41,7 @@ cargo build --release -p gunnar
 | 5 | yes | in-stream `A`/`W`/`I221`/`C`; `@N` progress (does `C` count? the command running or those finished? does it wrap after 9999?); `C1` skips the dead time; `@O50` with `C16`/`C8`; the stream waits for the green button (you press it); a compact path (relative steps without the `L20,` prefix) lands exactly; a second speed entry gives its own feed; whether in-stream `G` applies in sequence or on receipt |
 | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full" (the spec contradicts itself); a 22 KB stream with `#C7,1` and `#C19,400` completes; streaming at full speed does not overrun (else 0x03 comes too late over this link); `@B` while the stream is held discards the queued path, nothing moves afterwards, and `0x02` follows |
 | 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past GMC's drivable range (X 1560 mm): async `*033`, `@Y` limit bit, recovery |
+| 8 | yes | **blades out**: each head down as GMC lowers it, nothing moving (does `i_b` bypass the throttle, so `05` is fast and `01` slow? the lift `00`; the straight head `0A`: you answer); a quarter turn of Z alone, timed, and inside a stream as a corner (does the carriage stand still while the blade turns?); how long after `@X04` a trailing `A` switches; a stream held at the green-button wait filled with 1 mm moves until a flow byte (up to 512 KB): buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it (don't press the button) |
 
 ## Safety
 
@@ -55,6 +56,7 @@ cargo build --release -p gunnar
   only if the controller can see that switch.
   A controller whose homing direction (`&D`) isn't the profile's gets no moves at all.
 - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.
+  Stage 8 lowers each head, but only after you say both blades are out, and nothing moves.
 - Only Enter starts a step; anything but `s` or `q` asks again.
 - **Ctrl-C brakes (`@B`) and exits.** A stage that fails also brakes. Either way the settings
   the run changed are not restored: power-cycle the controller before using it again, with GMC

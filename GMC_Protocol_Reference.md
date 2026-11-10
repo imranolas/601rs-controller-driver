@@ -62,6 +62,10 @@ this document and cites it rather than repeating it.
     protocol uses the 0x02/0x03 bytes below instead [SPEC1 p.5].
 - **GMC's port settings:** no handshake, DTR and RTS asserted, read and write timeouts 128 ms
   [GMC].
+- **macOS with a Prolific PL2303 adapter** (the one at the 601): the `serialport` crate writes
+  the termios with 9600 and sets 115200 with `IOSSIOSPEED`, which reads back as set but leaves
+  the line unreadable to the box: nothing comes back. A termios write at 115200 works, so the
+  driver writes the speed that way as well (`link::serial`) [probe 2026-11-10].
 - **The line is the bottleneck.** Ten bits per byte gives **11,520 bytes/s**, 87 µs per byte.
   GMC's vector `L20,X15696,Y10776,Z774⏎` is 23 bytes, so the line carries at most about 500 of
   them per second. Polls, mode switches, parameters and path data all share it (§5).
@@ -155,7 +159,7 @@ GMC runs every vector and jog at entry 20 and homes with entries 10 and 11.
 | `@H` | `@H86` | Interface buffer fill in % [SPEC1 p.16]: "in mode 2, decide with it whether to send more vectors or wait". |
 | `@I<n>` | `@I<n>,b` | Read logical input 0..255; with no number, all 256 [SPEC1 p.16]. |
 | `@Q<n>` / `@Q<n>,b` | `@Q<n>,b` / CR | Read / set a logical output [SPEC1 p.16]. Q242–Q249 are aux signals 1–8, the `$A`/`A` bits 0–7, so `@Q` reads back what a streamed `A` did [SPEC1 p.11]. GMC switches the vacuum with `@Q241,1/0` [GMC] (Q241 is nominally spindle-speed output 8); not in the captures. |
-| `@O<pct>` / `@O` | CR / `@O<pct>` | Speed override 10–200 %, effective at once on all motion in all modes [SPEC1 p.16]. In mode 2 a stream can exempt rapids with `C16` and include moves again with `C8` [SPEC1 p.35]. The driver's `OverridePct` cannot hold a value outside 10–200. |
+| `@O<pct>` / `@O` | CR / `@O<pct>` | Speed override 10–200 %, effective at once on all motion in all modes [SPEC1 p.16]. In mode 2 a stream can exempt rapids with `C16` and include moves again with `C8` [SPEC1 p.35]. The driver's `OverridePct` cannot hold a value outside 10–200. The 601 answers `@O0` until one is set (at power-on; GMC never sends `@O`) and moves at the programmed speeds: the driver reads it as 100 % [probe 2026-11-10]. **`@O50` has no effect on the 601**: accepted and read back, but mode-2 moves keep their speed after `C8` or `C16` alike, at 30 mm/s (40 mm in 1465 and 1470 ms) and at 100 mm/s, above `#S2501` (551 and 538 ms) [stage 5, 2026-11-10]. A speed knob would have to change the speed entries instead. |
 | `@D<hh>` | CR | Set internal flags; `@D01` marks the machine homed without homing [SPEC1 p.15]. Never sent: the machine must really home. |
 | `@R` | none | Restart the control program; rereads the parameters [SPEC1 p.15]. Never sent. |
 | `@@` | CR | *Not in the spec.* GMC sends it before homing and after mode-2 errors [GMC; CAP g_init]; it probably clears the error state. The driver's `clear_error` sends it. |
@@ -219,7 +223,7 @@ register: once at **connect** [CAP g_init], before each **use** (a move, a cut, 
 | C4 | Controller screen output: 0 everything, 2 nothing ("recommended" with no monitor), 3 states only. Display costs controller time | 22–23 | — | never |
 | C5 | Send `0x01` when a move ends | 23 | `1` | connect |
 | C6 | Send `0x04` after homing (and the CR at once) | 23 | — | never; on at boot |
-| C7 | `0x02`/`0x03` flow control | 23 | — | never |
+| C7 | `0x02`/`0x03` flow control | 23 | — | never; on at boot (`&C7,1` [probe 2026-11-10]) |
 | C8 | `0x05` keep-alive interval (ms) | 23 | — | never |
 | C9 | Ramp profile: 0 linear computed, 1 linear table, 2 sinusoidal, 3 exponential, 4 user table `RAMPE.DAT` | 23–24 | — | never |
 | C11 | Units: 0 steps and steps/s, 1 µm and µm/s | 24 | `0` | connect |
@@ -286,9 +290,16 @@ open (stage 5).
 **A whole cut can be one stream.** `A`, `W` and `I` sit in the buffer and run in order with the
 vectors, so a cut (head down, settle, path, head up) needs no mode switch and no round trip, and
 `@N` reports progress through it. While a `W` or an `I` holds the stream, `@X` reads `15`
-(running and waiting), as during the dead time [SPEC1 p.13]. Each executed vector, `A`, `W`
-and `I` advances `@N`; `C` is a modifier and does not *(sim assumption)*. An in-stream `G`
-takes effect when received, not when reached *(sim assumption)*; stage 5 checks both.
+(running and waiting), as during the dead time [SPEC1 p.13]. Each executed vector, `A`, `W`,
+`I` and `C` advances `@N`, which numbers the command running (2 during the `W` of `A`, `W`),
+and counts past 9999 without wrapping (`@N9998`, three vectors, `@N10001`). `@X04` can come a
+few ms before a trailing `A` runs: in 3 of 6 runs of `L`, `A82` (30 and 100 mm/s) `@Q249`
+still read 0 after `@X04`, and switched 3–9 ms later (stage 8, 2026-11-10). So after a stream
+whose last command is an `A`, `@X04` does not yet mean the outputs are set: read them back
+(`@Q`) before relying on them. The driver never ends on one: a head moved in the stream is
+`A` then its settling `W` (`machine::lower`), and `@X04` comes after the dwell. An in-stream `G`
+takes effect in sequence, when reached [stage 5, 2026-11-10]. The simulator still counts
+without `C` and applies `G` on receipt.
 
 ### 2.4.1 Path speed control (what the controller does with the buffer)
 
@@ -392,10 +403,9 @@ What GMC writes [CAP g_init, g_motions, g_regular_mount]:
 
 GMC sleeps `HeadUpDown` ms (200–500 by profile, §8) after switching a head [GMC]. Separately, it switches the vacuum through `@Q241` (§2.1).
 
-> ⚠️ **Clamp sides.** The capture notes label `42` the *left* clamp and `22` the *right*, but the
-> `.gcf` names put bit 6 (`40`) on `i_pr` (right) and bit 5 (`20`) on `i_pl` (left). Either the
-> `p` in the names does not mean the side or the wiring is mirrored. Stage 3 asks the operator
-> which clamp each bit closes.
+**Clamp sides, confirmed at the machine** (stage 3, 2026-11-10): `40` closes the **left** clamp
+and `20` the **right**, as the capture notes label `42` and `22`. The `.gcf` names (`i_pr` on
+`40`, `i_pl` on `20`) do not name the side.
 
 ### 2.6 Inputs, outputs and errors
 
@@ -1039,21 +1049,21 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Does `@B` in mode 2 discard the rest of the path, or resume it? | discard | stages 4 and 6 |
 | Compact follow-on vectors on 2.00; after `G`, `A`, `W`? | accepted | stage 5 |
 | Does a second speed entry give its own feed? | yes | stage 5 |
-| In-stream `G`: in sequence or on receipt? | on receipt (sim) | stage 5 |
-| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` does not count | stage 5 |
-| Which of `0x02`/`0x03` means "full"? | `0x03` (byte table) | stage 6 |
-| Buffer size | unknown (simulator placeholder) | stage 6 (`@H` while streaming) |
+| In-stream `G`: in sequence or on receipt? | in sequence (stage 5, 2026-11-10); the sim still applies it on receipt | stage 5 |
+| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` counts; the running command; no wrap (10001 after 9998) (stage 5, 2026-11-10); the sim still leaves `C` out | stage 5 |
+| Which of `0x02`/`0x03` means "full"? | **`0x03`**, as the byte table says: filling a held stream, `0x03` came at 72,340 bytes (`@H98`, about 1 KB before full, not the prose's ~200 bytes) and nothing before it (stage 8, 2026-11-10). The simulator still warns 200 bytes before full | stage 8 |
+| Buffer size | **about 73 KB**: behind a held `I221`, `@H` reads 0 until about 8 KB are in, then rises 1 % per ~650 bytes (1 % at 8.6 KB, 50 % at 40.6 KB, 95 % at 70 KB), so it counts the last ~65 KB (stage 8, 2026-11-10; stage 6's 2200 bytes read `@H0` for this reason). The simulator models both parts | stage 8 |
 | Does `0x03` come in time through a USB adapter (no overrun at full speed)? | yes | stage 6 |
-| After `@B` on a held stream: is the queue gone, and does `0x02` follow? | yes | stage 6 |
+| After `@B` on a held stream: is the queue gone, and does `0x02` follow? | **yes, both**: 72 KB held at `I221` after `0x03`, `@B`, `0x02` 36 ms later, then `@H0`, `@X04`, nothing moved (stage 8, 2026-11-10) | stage 8 |
 | What `*022` means | buffer overrun | stage 6 |
-| `#C19` with a held stream | fed by `@H` | stage 6 |
+| `#C19` with a held stream | fed by `@H`: no fault in 2 s of `@H` every 100 ms with `#C19,400` (stage 8, 2026-11-10) | stage 8 |
 | `@S` loses the position | yes (spec) | stage 7 |
 | Limit fault: async `*03x`, `@Y` bit, recovery | spec | stage 7 (only if a limit input is mapped) |
 | Does a master command ever overtake the reply to the command before it? Settling a `*NNN` (§2.6) and every resync rely on it not doing so | no: replies come in order | stage 2: a command and a probe in one write, 20 times each for a mode-0 write, `@M0` and `&C52` (refused like GMC's `#C52,800` [CAP g_init]); `ControllerError::Overtaken` if the probe is answered first |
-| No `0x01` after mode-2 paths? | none (captures) | any session log |
-| A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | untested; the machine model splits a cut at its corners until then (head up, turn, head down) | a stage-5 check, not yet written |
+| No `0x01` after mode-2 paths? | none: not one in 18 mode-2 runs with `#C5,1`; all 19 came after mode-1 moves (session logs, 2026-11-10) | any session log |
+| A Z-only vector inside a stream (the driver's corner pivot): does the carriage stop, and how fast does the blade turn? | **taken, on the spot**: X arrived, the blade turned a quarter (750 steps) with X and Y still, then Y moved off. Z runs at the entry's speed in steps/s: a quarter turn in 651 ms at 1200 steps/s, 216 ms at 4000 (from the send, ramp included) (stage 8, 2026-11-10, heads up). Whether a pivot in the board cuts clean is for test cuts; the machine model still splits a cut at its corners | stage 8 |
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
-| Does `i_b` bypass the Z head's throttle (§2.5: `01` is the throttled, delayed blade entry for curves)? | yes | stage 3, switching each with the operator watching |
+| Does `i_b` bypass the Z head's throttle (§2.5: `01` is the throttled, delayed blade entry for curves)? | **yes**: blades out, `$01` brought the bevel head down slowly and `$05` fast; the lift `$00` after `$05` raised the blade with the head still down; `$0A` lowered the straight head alone (stage 8, 2026-11-10, operator watching) | stage 8 |
 | The right trim per material on this machine and blade (it corrects hooked corners, §3.2) | GMC's per-profile trims (§8) | GMC's procedure: a test rectangle per profile, the corners checked [HELP CA 3800] |
 | The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: `#S4000` against `#S400`, with and without a slow lead-in, trim 0 against the profile's |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |

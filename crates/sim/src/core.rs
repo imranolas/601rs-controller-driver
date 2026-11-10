@@ -34,8 +34,12 @@ pub struct SimConfig {
     pub envelope: [(i64, i64); 2],
     /// Simulated duration of homing one axis.
     pub homing_time_per_axis: Duration,
-    /// Mode-2 input buffer in bytes (unknown on the real controller).
+    /// Mode-2 input buffer in bytes, as `@H` counts it: 100 % (65 KB on the 601: 1 % per
+    /// ~650 bytes [gunnar-check-1794323197.log]).
     pub buffer_capacity: usize,
+    /// Bytes the controller takes in ahead of what `@H` counts: the 601 reads `@H0` until about
+    /// 8 KB are queued. The buffer holds this plus `buffer_capacity`.
+    pub buffer_uncounted: usize,
     /// Speed (steps/s) for speed-table entries never set with `#G`.
     pub default_speed: u32,
     /// Motions and dead times complete instantly (used for protocol replay).
@@ -51,6 +55,8 @@ pub struct SimConfig {
     /// like the 601 as far as the captures show (`&I240,000h,0,0` [CAP g_init]). Limit errors
     /// come from the envelope either way.
     pub input_defs: Vec<(u8, String)>,
+    /// Parameter writes applied at power-on, as mode-0 commands (`#C1,200`).
+    pub parameters: Vec<String>,
 }
 
 impl Default for SimConfig {
@@ -61,13 +67,68 @@ impl Default for SimConfig {
             start_position: [0, 0, 0],
             envelope: [(0, 60_000), (0, 43_000)],
             homing_time_per_axis: Duration::from_secs(3),
-            buffer_capacity: 4096,
+            buffer_capacity: 65_360,
+            buffer_uncounted: 7_990,
             default_speed: 10_000,
             instant_motion: false,
             homing_done_signal: true,
             steps_per_mm: 40.0,
             start_counter_exhausted: false,
-            input_defs: Vec::new(),
+            // The 601's own, as `gunnar probe` read them at power-on
+            // (testdata/sessions/gunnar-probe-1794320094.log).
+            input_defs: [
+                (235, "379h,6,1"),
+                (236, "379h,7,0"),
+                (237, "379h,4,0"),
+                (255, "279h,7,1"),
+            ]
+            .map(|(n, d)| (n, d.to_owned()))
+            .into(),
+            parameters: [
+                "#C1,200",
+                "#C2,0",
+                "#C4,2",
+                "#C5,1",
+                "#C7,1",
+                "#C8,0",
+                "#C11,0",
+                "#C12,1",
+                "#C13,1",
+                "#C14,13",
+                "#C16,4",
+                "#C19,0",
+                "#C20,400",
+                "#C21,12000",
+                "#C24,30",
+                "#C25,100",
+                "#C26,5",
+                "#C27,5",
+                "#C28,1",
+                "#C31,105",
+                "#C32,109",
+                "#C33,113",
+                "#C34,123",
+                "#C35,1",
+                "#C37,1",
+                "#ZZ,3000",
+                "#NZ,10000",
+                "#M36000",
+                "#G20,21600",
+                "#G10,2000",
+                "#G11,15000",
+                "#G21,18589",
+                "#B20,30",
+                "#R380",
+                "#S2501",
+                "#OX,300",
+                "#OY,300",
+                "#OZ,0",
+                "#DX,0,10,10,10",
+                "#DY,0,10,10,10",
+                "#DZ,0,10,10,10",
+            ]
+            .map(str::to_owned)
+            .into(),
         }
     }
 }
@@ -159,6 +220,7 @@ pub struct SimCore {
     axis_params: BTreeMap<String, String>,
     counters: BTreeMap<u8, i64>,
     error: u16,
+    /// 0 until `@O` sets one, as the 601 answers: the programmed speeds.
     override_pct: u32,
     command_counter: i64,
     last_host: SimTime,
@@ -239,7 +301,8 @@ impl SimCore {
         let mut c = BTreeMap::new();
         c.insert(6, i64::from(cfg.homing_done_signal));
         let input_defs = cfg.input_defs.iter().cloned().collect();
-        Self {
+        let parameters = cfg.parameters.clone();
+        let mut sim = Self {
             homed: cfg.homed_at_start,
             pos: cfg.start_position,
             path_target: cfg.start_position,
@@ -265,7 +328,7 @@ impl SimCore {
             axis_params: BTreeMap::new(),
             counters: BTreeMap::new(),
             error: 0,
-            override_pct: 100,
+            override_pct: 0,
             command_counter: 0,
             last_host: Duration::ZERO,
             free_at: Duration::ZERO,
@@ -278,7 +341,13 @@ impl SimCore {
             last_tx: Duration::ZERO,
             pending_home_ack: false,
             received: Vec::new(),
+        };
+        for line in &parameters {
+            let mut reply = Vec::new();
+            sim.mode0(line, &mut reply);
+            debug_assert_eq!(reply, b"\r", "power-on parameter {line}");
         }
+        sim
     }
 
     fn c_on(&self, reg: u16) -> bool {
@@ -499,7 +568,8 @@ impl SimCore {
                 Err(_) => push_err(out, 3),
             },
             ('H', "") => {
-                let pct = self.queued_bytes * 100 / self.cfg.buffer_capacity.max(1);
+                let counted = self.queued_bytes.saturating_sub(self.cfg.buffer_uncounted);
+                let pct = counted * 100 / self.cfg.buffer_capacity.max(1);
                 push_line(out, &format!("@H{pct}"));
             }
             ('I', n) => match n.parse::<u8>() {
@@ -767,6 +837,9 @@ impl SimCore {
                 Err(_) => return push_err(out, 3),
             },
             Some('I') => match arg.parse::<u8>() {
+                // The 601 refuses to show input 221's (the green button's) definition, why
+                // is not known [gunnar-probe-1794320094.log].
+                Ok(221) => return push_err(out, 1),
                 Ok(n) => format!(
                     "&I{n},{}",
                     self.input_defs.get(&n).map_or("000h,0,0", String::as_str)
@@ -982,7 +1055,8 @@ impl SimCore {
             _ => return push_err(out, 31),
         };
         let bytes = line.len() + 1;
-        if self.queued_bytes + bytes > self.cfg.buffer_capacity {
+        let room = self.cfg.buffer_uncounted + self.cfg.buffer_capacity;
+        if self.queued_bytes + bytes > room {
             return push_err(out, 22); // buffer overrun: "Speicher zu klein"
         }
         if let Item::Vector { target, .. } = &item {
@@ -990,7 +1064,7 @@ impl SimCore {
         }
         self.queue.push_back(Queued { item, bytes });
         self.queued_bytes += bytes;
-        if self.c_on(7) && !self.flow_paused && self.cfg.buffer_capacity - self.queued_bytes < 200 {
+        if self.c_on(7) && !self.flow_paused && room - self.queued_bytes < 200 {
             self.flow_paused = true;
             out.push(0x03); // ~200 chars before full [SPEC p.5]
         }
@@ -1073,7 +1147,7 @@ impl SimCore {
                 .copied()
                 .unwrap_or(self.cfg.default_speed)
                 .max(1),
-        ) * f64::from(if self.override_active {
+        ) * f64::from(if self.override_active && self.override_pct != 0 {
             self.override_pct
         } else {
             100
@@ -1272,7 +1346,8 @@ impl SimCore {
         if self.motion.is_none() && self.queue.is_empty() {
             self.dead_until = None; // the path has ended; the next one waits #C1 again
         }
-        if self.flow_paused && self.queued_bytes <= self.cfg.buffer_capacity / 2 {
+        let room = self.cfg.buffer_uncounted + self.cfg.buffer_capacity;
+        if self.flow_paused && self.queued_bytes <= room / 2 {
             self.flow_paused = false;
             out.push(0x02);
         }
@@ -1342,10 +1417,18 @@ mod tests {
         text(&core.handle_line(line, ms(t)))
     }
 
+    /// Without the 601's power-on parameters: each test sets what it relies on.
+    fn bare() -> SimConfig {
+        SimConfig {
+            parameters: Vec::new(),
+            ..SimConfig::default()
+        }
+    }
+
     fn homed() -> SimCore {
         SimCore::new(SimConfig {
             homed_at_start: true,
-            ..SimConfig::default()
+            ..bare()
         })
     }
 
@@ -1378,7 +1461,7 @@ mod tests {
     #[test]
     fn homing_reports_18_then_signals() {
         // [CAP g_init]: $Hz → CR; @X18 while homing; then 0x01 0x01 0x04.
-        let mut c = SimCore::new(SimConfig::default());
+        let mut c = SimCore::new(bare());
         send(&mut c, "#C5,1", 0);
         send(&mut c, "@M1", 0);
         assert_eq!(send(&mut c, "$Hz", 0), "<0d>");
@@ -1389,7 +1472,7 @@ mod tests {
 
     #[test]
     fn rules_from_spec_and_captures() {
-        let mut c = SimCore::new(SimConfig::default());
+        let mut c = SimCore::new(bare());
         assert_eq!(send(&mut c, "#C52,800", 0), "*021<0d>", "[CAP g_init]");
         assert_eq!(send(&mut c, "#C35,1", 0), "<0d>", "[CAP g_init]");
         assert_eq!(send(&mut c, "#R,100", 0), "<0d>", "[CAP g_init]");
@@ -1462,7 +1545,8 @@ mod tests {
         let cfg = SimConfig {
             homed_at_start: true,
             buffer_capacity: 400,
-            ..SimConfig::default()
+            buffer_uncounted: 0,
+            ..bare()
         };
         // Without #C7: no warning, overrun is *022.
         let mut c = SimCore::new(cfg.clone());
@@ -1732,7 +1816,7 @@ mod tests {
     fn c6_off_withholds_the_home_ack() {
         let mut c = SimCore::new(SimConfig {
             homing_done_signal: false,
-            ..SimConfig::default()
+            ..bare()
         });
         send(&mut c, "@M1", 0);
         assert_eq!(send(&mut c, "$Hz", 0), "", "no ack while homing");
@@ -1743,7 +1827,7 @@ mod tests {
     fn exhausted_start_counter_refuses_mode_switch() {
         let mut c = SimCore::new(SimConfig {
             start_counter_exhausted: true,
-            ..SimConfig::default()
+            ..bare()
         });
         assert_eq!(send(&mut c, "@M1", 0), "*007<0d>");
         assert_eq!(send(&mut c, "@M0", 0), "<0d>", "staying in mode 0 is fine");

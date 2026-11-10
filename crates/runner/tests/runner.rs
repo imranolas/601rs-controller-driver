@@ -89,7 +89,7 @@ fn configure_writes_what_differs_and_then_nothing() {
     let written = r.configure().expect("configures");
     assert!(
         !written.is_empty(),
-        "a fresh simulator has none of GMC's configuration"
+        "the 601 boots without some of the profile's configuration"
     );
     assert_eq!(r.configure().expect("configures again"), Vec::new());
 }
@@ -391,7 +391,10 @@ fn one_stream_per_cut_runs_and_pauses() {
     assert!(events.contains(&Event::Paused { next: 5 }));
     assert!(parked(&sim), "{:?}", sim.snapshot());
     let received = sim.received();
-    assert!(received.iter().any(|l| l == "#C7,1"), "flow control on");
+    assert!(
+        !received.iter().any(|l| l == "#C7,0"),
+        "flow control left on (the 601 boots with it on)"
+    );
     assert!(
         received.iter().any(|l| l.starts_with("L21,")),
         "travel on its own entry"
