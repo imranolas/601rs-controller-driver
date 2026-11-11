@@ -1,0 +1,24 @@
+# Calibration 1 (testdata/calibration/calibration_1.json), cut 2026-11-10 with the straight head
+# at (6.57, 1.86) and the bevel at (-71.50, 1.90). Calipers on the top face as cut; right and back
+# are left + width and front + height. B2's walls slope inward going down, so calipers in it
+# touch the bottom face: its readings are the underside's.
+B1.left 29.65
+B1.right 60.62
+B1.front 79.72
+B1.back 110.56
+B2.left 82.11
+B2.right 107.81
+B2.front 82.30
+B2.back 107.95
+S1.left 29.96
+S1.right 59.85
+S1.front 30.07
+S1.back 59.77
+S2.left 79.68
+S2.right 109.86
+S2.front 30.03
+S2.back 60.20
+B1.fr.below 3.4
+B1.fr.beside 6.27
+S1.fr.below 1.90
+S1.fr.beside 5.07

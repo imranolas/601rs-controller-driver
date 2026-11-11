@@ -1,128 +1,200 @@
-//! `gunnar`: command-line tool.
+//! `gunnar`: drive, check and calibrate the Gunnar 601 from the terminal. `gunnar --help` and
+//! `gunnar <command> --help` say how.
 //!
-//! ```text
-//! gunnar ports                          list serial ports
-//! gunnar capture <g_*.txt>              decode a GMC serial capture
-//! gunnar probe <port|sim> [--log F]     read-only questions to the controller
-//! gunnar check <port|sim> [--stage S] [--speed N] [--log F]
-//!                                       staged hardware checks (S = 2..8, a range 3-5, or all)
-//! ```
-//!
-//! `sim` instead of a port runs against the simulator. Every byte is logged with timestamps
-//! (default `gunnar-<cmd>-<time>.log`).
+//! Every command that talks to the machine (or to the simulator, with `--sim`) is a session: a
+//! dated folder under the data folder with its log of every byte, copies of the programs, and
+//! any readings and fits (`session`). The port comes from `--port`, else the remembered one
+//! (`gunnar config`), else the only USB-serial port plugged in (`config`).
 
+mod calibrate;
 mod check;
+mod config;
+mod cut;
 mod operator;
 mod probe;
 mod report;
+mod session;
+mod style;
 mod target;
 
 use std::io::{self, IsTerminal};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use clap::{ArgAction, Args, Parser, Subcommand};
 use link::Direction;
 use link::capture;
-use link::serial::PortInfo;
 use link::tap::printable;
 
+use crate::config::{Config, tidy};
 use crate::operator::{Confirm, Operator};
 use crate::report::Report;
+use crate::session::Session;
+use crate::style::{BAD, DIM, GOOD, WARN, paint};
 use crate::target::Res;
 
-const USAGE: &str = "usage:
-  gunnar ports
-  gunnar capture <g_*.txt>
-  gunnar probe <port|sim> [--log FILE]
-  gunnar check <port|sim> [--stage 2..8|A-B|all] [--speed STEPS_PER_S] [--log FILE]";
-
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("ports") => ports(),
-        Some("capture") if args.len() == 2 => decode_capture(&args[1]),
-        Some(cmd @ ("probe" | "check")) if args.len() >= 2 => run(cmd, &args[1], &args[2..]),
-        _ => {
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        }
-    };
-    match result {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+#[derive(Parser)]
+#[command(
+    name = "gunnar",
+    version,
+    about = "Drive, check and calibrate the Gunnar 601 mat cutter",
+    after_help = "Each session that talks to the machine gets its own folder (log, programs, readings) \
+                  under the data folder: `gunnar logs` lists them. The port comes from --port, else \
+                  `gunnar config`, else the only USB-serial port plugged in."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn ports() -> Res<bool> {
-    let all = link::serial::available().map_err(|e| format!("cannot list serial ports: {e}"))?;
-    let shown = visible_ports(&all);
-    if shown.is_empty() {
-        println!("no serial ports found");
-    }
-    for p in shown {
-        let hint = if p.usb { "  ← USB-serial" } else { "" };
-        println!("{}{hint}", p.name);
-    }
-    Ok(true)
+#[derive(Subcommand)]
+enum Command {
+    /// Cut programs, asking before each
+    #[command(
+        after_help = "Examples:\n  gunnar run job.json\n  gunnar run job.json --sim          \
+                            a dry run on the simulator\n  gunnar run calibration_2.json      a \
+                            calibration sheet: cut raw, then its readings"
+    )]
+    Run(RunArgs),
+    /// Calibrate the heads: cut the sheet, take its readings, fit them
+    #[command(subcommand)]
+    Calibrate(CalibrateCommand),
+    /// List recent sessions
+    Logs(LogsArgs),
+    /// Ask the controller read-only questions; nothing moves (stage 1)
+    Probe(MachineArgs),
+    /// Staged hardware checks, asking before every step (stages 2 to 8)
+    #[command(after_help = "Examples:\n  gunnar check --stage 3\n  gunnar check --stage 2-8 --sim")]
+    Check(CheckArgs),
+    /// List the serial ports
+    Ports,
+    /// Show or change the remembered port and data folder
+    #[command(
+        after_help = "Examples:\n  gunnar config\n  gunnar config --port /dev/cu.usbserial-2110\n  \
+                            gunnar config --data-dir ~/Gunnar"
+    )]
+    Config(ConfigArgs),
+    /// Print a GMC serial capture as host and controller lines
+    Capture {
+        /// The capture, a port-monitor export (`g_*.txt`)
+        file: PathBuf,
+    },
 }
 
-/// The ports worth offering. macOS lists every serial device twice: `/dev/cu.X` (call-out,
-/// the one a host opens) and `/dev/tty.X` (dial-in, which waits for carrier detect). Only that
-/// `tty.` twin is hidden; every other name (`/dev/ttyUSB0`, `/dev/ttyACM0`, `COM4`, …) is shown.
-fn visible_ports(all: &[PortInfo]) -> Vec<&PortInfo> {
-    let has_callout_twin = |name: &str| {
-        name.strip_prefix("/dev/tty.").is_some_and(|dev| {
-            all.iter()
-                .any(|p| p.name.strip_prefix("/dev/cu.") == Some(dev))
-        })
-    };
-    all.iter().filter(|p| !has_callout_twin(&p.name)).collect()
+#[derive(Args, Clone)]
+struct MachineArgs {
+    /// Serial port [default: the remembered one, else the only USB-serial port]
+    #[arg(long, short, value_name = "PORT")]
+    port: Option<String>,
+    /// Use the simulator instead of the machine
+    #[arg(long, conflicts_with = "port")]
+    sim: bool,
+    /// Write the log to FILE instead of the session folder
+    #[arg(long, value_name = "FILE")]
+    log: Option<PathBuf>,
 }
 
-struct Options {
-    log: Option<String>,
-    stages: Vec<u8>,
+#[derive(Args)]
+struct RunArgs {
+    /// The programs, cut one after another
+    #[arg(required = true, value_name = "PROGRAM")]
+    programs: Vec<PathBuf>,
+    #[command(flatten)]
+    machine: MachineArgs,
+    /// Send each cut as GMC does (settings, head and path as separate steps)
+    #[arg(long)]
+    gmc: bool,
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    #[command(flatten)]
+    machine: MachineArgs,
+    /// Stages: one (3), a range (3-5) or all
+    #[arg(long, default_value = "all", value_parser = parse_stages)]
+    stage: Stages,
+    /// Test move speed, steps/s (100 to 4000: 2.5 to 100 mm/s)
+    #[arg(long, default_value_t = 1200, value_parser = clap::value_parser!(u32).range(100..=4000))]
     speed: u32,
+    /// The simulator with its limit switches mapped (stage 7 drives into one)
+    #[arg(long, conflicts_with = "port")]
+    sim_limits: bool,
 }
 
-fn parse_options(rest: &[String]) -> Res<Options> {
-    let mut o = Options {
-        log: None,
-        stages: (2..=8).collect(),
-        speed: 1200,
-    };
-    let mut it = rest.iter();
-    while let Some(flag) = it.next() {
-        let value = it
-            .next()
-            .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
-        match flag.as_str() {
-            "--log" => o.log = Some(value.clone()),
-            "--speed" => {
-                o.speed = value
-                    .parse()
-                    .ok()
-                    .filter(|s| (100..=4000).contains(s))
-                    .ok_or_else(|| {
-                        format!("--speed {value}: give 100..4000 steps/s (2.5–100 mm/s)")
-                    })?;
-            }
-            "--stage" => o.stages = parse_stages(value)?,
-            _ => return Err(format!("unknown option {flag}\n{USAGE}").into()),
-        }
-    }
-    Ok(o)
+#[derive(Subcommand)]
+enum CalibrateCommand {
+    /// Cut the machine-and-head sheet raw, take its readings and fit them
+    #[command(
+        after_help = "The sheet needs a 1.5 mm offcut of at least 140 × 105 mm in the front-left \
+                            corner. What to measure: testdata/calibration/calibration_2.html"
+    )]
+    Cut(MachineArgs),
+    /// Take a calibration session's readings, then fit them [default: the latest session]
+    Read {
+        /// The session folder
+        session: Option<PathBuf>,
+    },
+    /// Fit calibration sessions together
+    #[command(
+        after_help = "Examples:\n  gunnar calibrate fit --all\n  gunnar calibrate fit \
+                            \"~/Documents/Gunnar/sessions/2026-11-10 14.32.05 calibrate calibration_2\"\n  \
+                            gunnar calibrate fit --sheet calibration_1.json calibration_1.run.log \
+                            calibration_1.readings.txt"
+    )]
+    Fit(FitArgs),
+    /// Write the sheet's program to a file, to look at or cut with `gunnar run`
+    Sheet {
+        /// Where to write it
+        out: PathBuf,
+    },
 }
+
+#[derive(Args)]
+struct FitArgs {
+    /// Calibration session folders
+    sessions: Vec<PathBuf>,
+    /// Every calibration session in the data folder that has readings
+    #[arg(long)]
+    all: bool,
+    /// A sheet kept elsewhere: its program, run log and readings
+    #[arg(long, num_args = 3, value_names = ["PROGRAM", "LOG", "READINGS"], action = ArgAction::Append)]
+    sheet: Vec<PathBuf>,
+    /// Also write a profile with the fitted head offsets to FILE
+    #[arg(long, value_name = "FILE")]
+    profile: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LogsArgs {
+    /// How many to list
+    #[arg(short = 'n', default_value_t = 20)]
+    count: usize,
+    /// Print only the latest session's folder (`open "$(gunnar logs --last)"`)
+    #[arg(long)]
+    last: bool,
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    /// Remember this port
+    #[arg(long, value_name = "PORT")]
+    port: Option<String>,
+    /// Forget the remembered port (use the only USB-serial port again)
+    #[arg(long, conflicts_with = "port")]
+    forget_port: bool,
+    /// Keep sessions in DIR
+    #[arg(long, value_name = "DIR")]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct Stages(Vec<u8>);
 
 /// `all`, one stage (`3`) or a rising range (`3-5`), within 2..8.
-fn parse_stages(v: &str) -> Res<Vec<u8>> {
+fn parse_stages(v: &str) -> Result<Stages, String> {
     const STAGES: std::ops::RangeInclusive<u8> = 2..=8;
-    let bad = || {
-        format!("--stage {v}: give 2..8, a range such as 3-5, or all (stage 1 is `gunnar probe`)")
-    };
+    let bad =
+        || format!("give 2..8, a range such as 3-5, or all (stage 1 is `gunnar probe`), not {v:?}");
     let stage = |s: &str| {
         s.parse()
             .ok()
@@ -137,28 +209,269 @@ fn parse_stages(v: &str) -> Res<Vec<u8>> {
         },
     };
     if stages.is_empty() {
-        return Err(bad().into());
+        return Err(bad());
     }
-    Ok(stages)
+    Ok(Stages(stages))
 }
 
-fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
-    let opts = parse_options(rest)?;
-    // Every step that moves waits for the operator. Without a terminal there is nobody to
-    // answer, and piped input (`yes '' | gunnar check …`) would answer "go" for them.
-    if cmd == "check" && !target::is_sim_port(port) && !io::stdin().is_terminal() {
-        return Err(
-            "`gunnar check` drives the machine and asks the operator before every \
-                    step; run it from a terminal (stdin is not a TTY)"
-                .into(),
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Run(a) => run(a),
+        Command::Calibrate(c) => calibrate_command(c),
+        Command::Logs(a) => logs(a),
+        Command::Probe(m) => machine_check("probe", &m, false, &[], 0),
+        Command::Check(a) => machine_check("check", &a.machine, a.sim_limits, &a.stage.0, a.speed),
+        Command::Ports => ports(),
+        Command::Config(a) => config(a),
+        Command::Capture { file } => decode_capture(&file),
+    };
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            anstream::eprintln!("{} {e}", paint(BAD, "error:"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The port to use and a new session for `cmd`, announced in one line.
+fn open_session(
+    cmd: &str,
+    what: &str,
+    m: &MachineArgs,
+    sim_limits: bool,
+) -> Res<(String, Session)> {
+    let cfg = Config::load()?;
+    let ports = link::serial::available().unwrap_or_default();
+    let (port, why) = config::resolve_port(m.port.as_deref(), m.sim, sim_limits, &cfg, &ports)?;
+    let session = Session::create(&cfg.data_dir(), cmd, what, &port, m.log.as_deref())?;
+    let on = if target::is_sim_port(&port) {
+        why
+    } else {
+        format!("{port} ({why})")
+    };
+    anstream::println!(
+        "{} on {on}  {}",
+        paint(style::BOLD, cmd),
+        paint(DIM, format!("· session {}", tidy(&session.dir)))
+    );
+    Ok((port, session))
+}
+
+/// Someone must be there to answer before anything moves: piped input would say "go" for them.
+fn require_terminal(port: &str, cmd: &str) -> Res<()> {
+    if !target::is_sim_port(port) && !io::stdin().is_terminal() {
+        return Err(format!(
+            "`gunnar {cmd}` drives the machine and asks before it moves: run it from a terminal \
+             (stdin is not one)"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn run(a: RunArgs) -> Res<bool> {
+    let what: Vec<String> = a
+        .programs
+        .iter()
+        .map(|p| {
+            p.file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+        })
+        .collect();
+    let (port, session) = open_session("run", &what.join(" "), &a.machine, false)?;
+    require_terminal(&port, "run")?;
+    finish(&session, cut::run(&port, &a.programs, &session, a.gmc))
+}
+
+/// Record how a session ended, and pass the result on.
+fn finish(session: &Session, r: Res<bool>) -> Res<bool> {
+    session.finish(match &r {
+        Ok(true) => "finished",
+        Ok(false) => "stopped or failed",
+        Err(_) => "failed",
+    });
+    r
+}
+
+fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
+    match c {
+        CalibrateCommand::Cut(m) => {
+            let (port, session) = open_session("calibrate", "calibration_2", &m, false)?;
+            require_terminal(&port, "calibrate cut")?;
+            finish(&session, calibrate::cut(&port, &session))
+        }
+        CalibrateCommand::Read { session } => {
+            let data = Config::load()?.data_dir();
+            let dir = match session {
+                Some(d) => d,
+                None => calibrate::latest_session(&data)?,
+            };
+            calibrate::read(&dir, &Operator::new(None))
+        }
+        CalibrateCommand::Fit(f) => {
+            let data = Config::load()?.data_dir();
+            let mut dirs = f.sessions;
+            if f.all {
+                dirs.extend(calibrate::sessions_with_readings(&data));
+            }
+            let triples: Vec<[PathBuf; 3]> = f
+                .sheet
+                .chunks(3)
+                .map(|c| [c[0].clone(), c[1].clone(), c[2].clone()])
+                .collect();
+            if dirs.is_empty() && triples.is_empty() {
+                return Err(
+                    "nothing to fit: give session folders, --all, or --sheet PROGRAM LOG READINGS"
+                        .into(),
+                );
+            }
+            calibrate::fit(&dirs, &triples, f.profile.as_deref())
+        }
+        CalibrateCommand::Sheet { out } => calibrate::sheet(&out),
+    }
+}
+
+fn logs(a: LogsArgs) -> Res<bool> {
+    let data = Config::load()?.data_dir();
+    let all = session::list(&data);
+    if a.last {
+        let last = all.first().ok_or("no sessions yet")?;
+        println!("{}", last.dir.display());
+        return Ok(true);
+    }
+    if all.is_empty() {
+        println!("no sessions yet in {}", tidy(&data.join("sessions")));
+        return Ok(true);
+    }
+    for s in all.iter().take(a.count) {
+        let name = s
+            .dir
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let when: String = name.chars().take(19).collect();
+        let outcome = match s.outcome.as_str() {
+            "finished" => paint(GOOD, &s.outcome),
+            "failed" | "stopped or failed" => paint(BAD, &s.outcome),
+            o if o.contains(" fail") && !o.contains(" 0 fail") => paint(BAD, o),
+            "ended early" => paint(WARN, &s.outcome),
+            o => o.to_owned(),
+        };
+        anstream::println!(
+            "  {}  {:10} {:28} {outcome}  {}",
+            paint(DIM, when),
+            s.cmd,
+            s.what,
+            paint(DIM, &s.port)
         );
     }
-    let (ctl, version, target) =
-        target::open(port, opts.log.as_deref(), cmd, target::tool_config())?;
-    println!("connected to {port}: {version}");
-    println!("log: {}", target.log_path.display());
-    let mut report = Report::new(target.log.clone());
+    anstream::println!(
+        "{}",
+        paint(DIM, format!("folders: {}", tidy(&data.join("sessions"))))
+    );
+    Ok(true)
+}
 
+fn config(a: ConfigArgs) -> Res<bool> {
+    let mut cfg = Config::load()?;
+    let changed = a.port.is_some() || a.forget_port || a.data_dir.is_some();
+    if let Some(p) = a.port {
+        cfg.port = Some(p);
+    }
+    if a.forget_port {
+        cfg.port = None;
+    }
+    if let Some(d) = a.data_dir {
+        cfg.data_dir = Some(d);
+    }
+    if changed {
+        cfg.save()?;
+    }
+    anstream::println!(
+        "{}",
+        paint(DIM, format!("config: {}", tidy(&config::path())))
+    );
+    println!(
+        "port: {}",
+        cfg.port
+            .as_deref()
+            .unwrap_or("not set: the only USB-serial port plugged in")
+    );
+    let env = if std::env::var_os("GUNNAR_DATA").is_some() {
+        "  (from $GUNNAR_DATA)"
+    } else {
+        ""
+    };
+    println!("data folder: {}{env}", tidy(&cfg.data_dir()));
+    Ok(true)
+}
+
+fn ports() -> Res<bool> {
+    let all = link::serial::available().map_err(|e| format!("cannot list serial ports: {e}"))?;
+    let shown = config::visible_ports(&all);
+    if shown.is_empty() {
+        println!("no serial ports found");
+    }
+    let remembered = Config::load()?.port;
+    for p in shown {
+        let mut notes = Vec::new();
+        if p.usb {
+            notes.push("USB-serial");
+        }
+        if remembered.as_deref() == Some(p.name.as_str()) {
+            notes.push("remembered");
+        }
+        let note = if notes.is_empty() {
+            String::new()
+        } else {
+            paint(DIM, format!("  ← {}", notes.join(", ")))
+        };
+        anstream::println!("{}{note}", p.name);
+    }
+    Ok(true)
+}
+
+/// `gunnar probe` and `gunnar check`.
+fn machine_check(
+    cmd: &str,
+    m: &MachineArgs,
+    sim_limits: bool,
+    stages: &[u8],
+    speed: u32,
+) -> Res<bool> {
+    let what = if cmd == "check" {
+        match stages {
+            [one] => format!("stage {one}"),
+            [a, .., b] => format!("stages {a}-{b}"),
+            [] => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    let (port, session) = open_session(cmd, &what, m, sim_limits)?;
+    if cmd == "check" {
+        require_terminal(&port, "check")?;
+    }
+    let r = probe_or_check(cmd, &port, &session, stages, speed);
+    session.finish(&match &r {
+        Ok((_, tally)) => tally.clone(),
+        Err(_) => "failed".to_owned(),
+    });
+    r.map(|(ok, _)| ok)
+}
+
+fn probe_or_check(
+    cmd: &str,
+    port: &str,
+    session: &Session,
+    stages: &[u8],
+    speed: u32,
+) -> Res<(bool, String)> {
+    let (ctl, version, target) = target::open(port, &session.log_path, cmd, target::tool_config())?;
+    println!("connected: {version}");
+    let mut report = Report::new(target.log.clone());
     let completed = if cmd == "probe" {
         probe::run(ctl, &version, &mut report)?;
         true
@@ -173,7 +486,7 @@ fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
                  Each step says what it will do and waits for Enter. Ctrl-C brakes (@B) and exits."
             );
             if op.confirm("Ready?") != Confirm::Go {
-                return Ok(true);
+                return Ok((true, "not started".to_owned()));
             }
         }
         let stop = ctl.stop_handle();
@@ -187,27 +500,30 @@ fn run(cmd: &str, port: &str, rest: &[String]) -> Res<bool> {
             stop: ctl.stop_handle(),
             r: report,
             op,
-            speed: opts.speed,
+            speed,
             scale: if target.is_sim() { 0.1 } else { 1.0 },
             quit: false,
             park_confirmed: false,
         };
-        let completed = check::run(ctl, &opts.stages, &mut ctx)?;
+        let completed = check::run(ctl, stages, &mut ctx)?;
         report = ctx.r;
         completed
     };
     let ok = report.summary();
-    println!("log: {}", target.log_path.display());
+    anstream::println!("{}", paint(DIM, format!("log: {}", tidy(&target.log_path))));
     // The transcript is what comes back from the machine; one with gaps must not pass.
     if let Some(e) = target.log.write_error() {
-        eprintln!("error: writing the log failed ({e}); the transcript is incomplete");
-        return Ok(false);
+        anstream::eprintln!(
+            "{} writing the log failed ({e}); the transcript is incomplete",
+            paint(BAD, "error:")
+        );
+        return Ok((false, "log incomplete".to_owned()));
     }
-    Ok(ok && completed)
+    Ok((ok && completed, report.tally()))
 }
 
-fn decode_capture(file: &str) -> Res<bool> {
-    let transfers = capture::read_file(file).map_err(|e| format!("{file}: {e}"))?;
+fn decode_capture(file: &Path) -> Res<bool> {
+    let transfers = capture::read_file(file).map_err(|e| format!("{}: {e}", file.display()))?;
     for t in transfers {
         let arrow = match t.direction {
             Direction::HostToController => '>',
@@ -222,48 +538,51 @@ fn decode_capture(file: &str) -> Res<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        Cli::command().debug_assert();
+    }
 
     #[test]
     fn stages_are_one_a_rising_range_or_all() {
-        assert_eq!(parse_stages("4").ok(), Some(vec![4]));
-        assert_eq!(parse_stages("3-5").ok(), Some(vec![3, 4, 5]));
-        assert_eq!(parse_stages("all").ok(), Some((2..=8).collect()));
+        assert_eq!(parse_stages("4").map(|s| s.0), Ok(vec![4]));
+        assert_eq!(parse_stages("3-5").map(|s| s.0), Ok(vec![3, 4, 5]));
+        assert_eq!(parse_stages("all").map(|s| s.0), Ok((2..=8).collect()));
         for bad in ["5-3", "1", "9", "2-9", "x", "3-", ""] {
-            let e = parse_stages(bad).expect_err(bad).to_string();
-            assert!(e.starts_with("--stage"), "{bad}: {e}");
+            assert!(parse_stages(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
-    fn port_list_hides_only_the_macos_dialin_twin() {
-        let all: Vec<PortInfo> = [
-            "/dev/cu.usbserial-1420",
-            "/dev/tty.usbserial-1420", // twin of the cu. device: hidden
-            "/dev/ttyUSB0",            // Linux USB-serial
-            "/dev/ttyACM0",
-            "/dev/ttyS0",
-            "COM4",
-            "/dev/tty.debug-console", // no cu. twin: shown
-        ]
-        .map(|name| PortInfo {
-            name: name.to_owned(),
-            usb: false,
-        })
-        .into();
-        let shown: Vec<&str> = visible_ports(&all)
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                "/dev/cu.usbserial-1420",
-                "/dev/ttyUSB0",
-                "/dev/ttyACM0",
-                "/dev/ttyS0",
-                "COM4",
-                "/dev/tty.debug-console",
-            ]
+    fn a_run_takes_programs_and_the_simulator() {
+        let cli =
+            Cli::try_parse_from(["gunnar", "run", "a.json", "b.json", "--sim"]).expect("parses");
+        let Command::Run(a) = cli.command else {
+            panic!("not run")
+        };
+        assert_eq!(a.programs.len(), 2);
+        assert!(a.machine.sim);
+        assert!(
+            Cli::try_parse_from(["gunnar", "run", "--sim"]).is_err(),
+            "a program is required"
         );
+        assert!(Cli::try_parse_from(["gunnar", "run", "a.json", "--sim", "--port", "x"]).is_err());
+        let cli = Cli::try_parse_from([
+            "gunnar",
+            "calibrate",
+            "fit",
+            "--sheet",
+            "p",
+            "l",
+            "r",
+            "--all",
+        ])
+        .expect("parses");
+        let Command::Calibrate(CalibrateCommand::Fit(f)) = cli.command else {
+            panic!("not fit")
+        };
+        assert_eq!((f.sheet.len(), f.all), (3, true));
     }
 }

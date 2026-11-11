@@ -4,6 +4,8 @@ use std::fmt;
 
 use link::tap::Log;
 
+use crate::style::{BAD, BOLD, DIM, GOOD, WARN, paint};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// Behaves as the driver expects.
@@ -50,7 +52,13 @@ impl Report {
     pub fn add(&mut self, outcome: Outcome, name: &str, detail: impl Into<String>) {
         let detail = detail.into();
         let line = format!("{outcome}  {name}: {detail}");
-        println!("  {line}");
+        let tag = match outcome {
+            Outcome::Pass => paint(GOOD, outcome),
+            Outcome::Fail => paint(BAD, outcome),
+            Outcome::Info => paint(DIM, outcome),
+            Outcome::Skip => paint(WARN, outcome),
+        };
+        anstream::println!("  {tag}  {name}: {detail}");
         self.log.note(&line);
         self.findings.push(Finding {
             outcome,
@@ -77,8 +85,18 @@ impl Report {
     }
 
     pub fn heading(&self, text: &str) {
-        println!("\n== {text}");
+        anstream::println!("\n{}", paint(BOLD, format!("== {text}")));
         self.log.note(&format!("== {text}"));
+    }
+
+    /// The counts, for a session's summary: `12 pass, 0 fail`.
+    pub fn tally(&self) -> String {
+        let count = |o| self.findings.iter().filter(|f| f.outcome == o).count();
+        format!(
+            "{} pass, {} fail",
+            count(Outcome::Pass),
+            count(Outcome::Fail)
+        )
     }
 
     /// Print the summary; true if nothing failed.
@@ -90,9 +108,18 @@ impl Report {
             count(Outcome::Info),
             count(Outcome::Skip),
         );
-        println!("\n== Summary: {p} pass, {f} fail, {i} info, {s} skipped");
+        let tally = format!("{p} pass, {f} fail, {i} info, {s} skipped");
+        anstream::println!(
+            "\n{} {}",
+            paint(BOLD, "== Summary:"),
+            if f == 0 {
+                paint(GOOD, &tally)
+            } else {
+                paint(BAD, &tally)
+            }
+        );
         for x in self.findings.iter().filter(|x| x.outcome == Outcome::Fail) {
-            println!("  FAIL  {}: {}", x.name, x.detail);
+            anstream::println!("  {}  {}: {}", paint(BAD, "FAIL"), x.name, x.detail);
         }
         self.log.note(&format!(
             "summary: {p} pass, {f} fail, {i} info, {s} skipped"

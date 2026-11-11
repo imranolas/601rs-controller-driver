@@ -1,0 +1,84 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "window_40",
+  "meta": {
+    "source": "A 40 mm bevel window 30 mm in from the stops, each line, lead-in and overcut as GMC placed them on g_regular_mount (MSK_1.5). No straight cuts: the registered edges stay as references for measuring."
+  },
+  "board": {
+    "width_mm": 100.0,
+    "height_mm": 100.0,
+    "thickness_mm": 1.5
+  },
+  "material": {
+    "name": "MSK_1.5",
+    "speed_pct": 95.0,
+    "head_settle_ms": 250,
+    "blade_angle_offset_deg": {
+      "straight": 0.0,
+      "bevel": 3.0
+    }
+  },
+  "ops": [
+    {
+      "op": "clamp",
+      "side": "left"
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          69.65,
+          70.55
+        ],
+        [
+          69.65,
+          26.55
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          70.05,
+          30.35
+        ],
+        [
+          26.05,
+          30.35
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          29.85,
+          29.95
+        ],
+        [
+          29.85,
+          73.95
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "head": "bevel",
+      "path_mm": [
+        [
+          29.45,
+          70.15
+        ],
+        [
+          73.45,
+          70.15
+        ]
+      ]
+    }
+  ]
+}

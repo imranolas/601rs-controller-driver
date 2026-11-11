@@ -40,7 +40,8 @@ sim         controller simulator behind an in-memory link (tests, dry runs); che
             against every GMC capture and session log by the fidelity test
 
 program     the Program format: types, parsing, validation (used by runner and apps)
-gunnar      CLI: ports, capture (decode GMC captures), probe, check (staged hardware checks)
+gunnar      CLI: run (cut programs), calibrate, check (staged hardware checks), probe, logs,
+            config, ports, capture (decode GMC captures)
 ```
 
 **Invariant:** commands that must never be sent from this software (mode 9 file transfer,

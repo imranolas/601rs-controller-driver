@@ -1,9 +1,9 @@
 //! Open the machine (a serial port) or the simulator, with every byte logged.
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use controller::{Config, Controller, ControllerError, connect, mode};
 use link::tap::{self, Log};
@@ -56,14 +56,6 @@ fn connect_hint(e: &ControllerError) -> &'static str {
     }
 }
 
-/// Default log file: `gunnar-<cmd>-<unix seconds>.log` in the current directory.
-fn default_log(cmd: &str) -> PathBuf {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    PathBuf::from(format!("gunnar-{cmd}-{secs}.log"))
-}
-
 /// Session timing for the hardware tools: faster polling than the default so timings
 /// (dead time, override) can be measured to ~20 ms.
 pub fn tool_config() -> Config {
@@ -75,15 +67,15 @@ pub fn tool_config() -> Config {
     }
 }
 
-/// Open `port` (or the simulator for `sim`), log to `log_path`, connect.
+/// Open `port` (or the simulator for `sim`), log every byte to `log_path`, connect.
 pub fn open(
     port: &str,
-    log_path: Option<&str>,
+    log_path: &Path,
     cmd: &str,
     cfg: Config,
 ) -> Res<(Controller<mode::Parameters>, String, Target)> {
-    let log_path = log_path.map_or_else(|| default_log(cmd), PathBuf::from);
-    let log = Log::new(File::create(&log_path)?);
+    let log = Log::new(File::create(log_path).map_err(|e| format!("{}: {e}", log_path.display()))?);
+    let log_path = log_path.to_path_buf();
     log.note(&format!("gunnar {cmd} {port}"));
 
     let (link, sim) = if is_sim_port(port) {

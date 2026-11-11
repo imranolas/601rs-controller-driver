@@ -1,0 +1,894 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "calibration_2",
+  "meta": {
+    "calibration": {
+      "frame": "carriage",
+      "readings": [
+        {
+          "about": 10.0,
+          "axis": "x",
+          "edges": [
+            {
+              "cut": "S.A",
+              "face": "any",
+              "kept": "left"
+            },
+            {
+              "cut": "S.B",
+              "face": "any",
+              "kept": "left"
+            }
+          ],
+          "kind": "width",
+          "name": "SL.width",
+          "what": "straight strip SL, across"
+        },
+        {
+          "about": 10.0,
+          "axis": "x",
+          "edges": [
+            {
+              "cut": "S.B",
+              "face": "any",
+              "kept": "right"
+            },
+            {
+              "cut": "S.C",
+              "face": "any",
+              "kept": "right"
+            }
+          ],
+          "kind": "width",
+          "name": "SR.width",
+          "what": "straight strip SR, across"
+        },
+        {
+          "about": 25.0,
+          "axis": "y",
+          "edges": [
+            {
+              "cut": "S.F",
+              "face": "any",
+              "kept": "left"
+            },
+            {
+              "cut": "S.K",
+              "face": "any",
+              "kept": "left"
+            }
+          ],
+          "kind": "width",
+          "name": "SL.length",
+          "what": "straight strip SL, end to end"
+        },
+        {
+          "about": 28.0,
+          "axis": "x",
+          "edge": {
+            "cut": "S.A",
+            "face": "any",
+            "kept": "right"
+          },
+          "kind": "position",
+          "name": "S.left",
+          "what": "left edge to the straight hole's left edge"
+        },
+        {
+          "about": 28.0,
+          "axis": "y",
+          "edge": {
+            "cut": "S.F",
+            "face": "any",
+            "kept": "right"
+          },
+          "kind": "position",
+          "name": "S.front",
+          "what": "front edge to the straight hole's front edge"
+        },
+        {
+          "about": 67.55,
+          "axis": "x",
+          "edge": {
+            "cut": "W.left",
+            "face": "back",
+            "kept": "left"
+          },
+          "kind": "position",
+          "name": "W.left",
+          "what": "left edge to the window's left edge, on the back"
+        },
+        {
+          "about": 25.9,
+          "axis": "x",
+          "edges": [
+            {
+              "cut": "W.left",
+              "face": "back",
+              "kept": "left"
+            },
+            {
+              "cut": "W.right",
+              "face": "back",
+              "kept": "left"
+            }
+          ],
+          "kind": "width",
+          "name": "W.width",
+          "what": "the window, left to right, on the back"
+        },
+        {
+          "about": 27.55,
+          "axis": "y",
+          "edge": {
+            "cut": "W.front",
+            "face": "back",
+            "kept": "left"
+          },
+          "kind": "position",
+          "name": "W.front",
+          "what": "front edge to the window's front edge, on the back"
+        },
+        {
+          "about": 25.9,
+          "axis": "y",
+          "edges": [
+            {
+              "cut": "W.front",
+              "face": "back",
+              "kept": "left"
+            },
+            {
+              "cut": "W.back",
+              "face": "back",
+              "kept": "left"
+            }
+          ],
+          "kind": "width",
+          "name": "W.height",
+          "what": "the window, front to back, on the back"
+        },
+        {
+          "about": 29.32,
+          "axis": "x",
+          "edges": [
+            {
+              "cut": "W.left",
+              "face": "face",
+              "kept": "right"
+            },
+            {
+              "cut": "W.right",
+              "face": "face",
+              "kept": "right"
+            }
+          ],
+          "kind": "width",
+          "name": "D.width",
+          "what": "the loose drop-out across, face up"
+        },
+        {
+          "about": 29.32,
+          "axis": "y",
+          "edges": [
+            {
+              "cut": "W.front",
+              "face": "face",
+              "kept": "right"
+            },
+            {
+              "cut": "W.back",
+              "face": "face",
+              "kept": "right"
+            }
+          ],
+          "kind": "width",
+          "name": "D.height",
+          "what": "the loose drop-out the other way, face up"
+        },
+        {
+          "at": "end",
+          "head": "straight",
+          "kind": "comb",
+          "name": "S.end",
+          "values": [
+            0.6,
+            0.9,
+            1.2,
+            1.5,
+            1.8,
+            2.1,
+            2.4
+          ],
+          "what": "straight end comb: the first tooth whose slit reaches the reference, on the face"
+        },
+        {
+          "at": "start",
+          "head": "straight",
+          "kind": "comb",
+          "name": "S.start",
+          "values": [
+            -2.7,
+            -2.4,
+            -2.1,
+            -1.8,
+            -1.5,
+            -1.2,
+            -0.9
+          ],
+          "what": "straight start comb: the first tooth whose slit reaches the reference, on the face"
+        },
+        {
+          "at": "end",
+          "head": "bevel",
+          "kind": "comb",
+          "name": "B.end",
+          "values": [
+            1.6,
+            1.9,
+            2.2,
+            2.5,
+            2.8,
+            3.1,
+            3.4
+          ],
+          "what": "bevel end comb: the first tooth whose slit reaches the reference, on the face"
+        },
+        {
+          "at": "start",
+          "head": "bevel",
+          "kind": "comb",
+          "name": "B.start",
+          "values": [
+            -0.9,
+            -0.6,
+            -0.3,
+            0.0,
+            0.3,
+            0.6,
+            0.9
+          ],
+          "what": "bevel start comb: the first tooth whose slit reaches the reference, on the face"
+        }
+      ],
+      "version": 2
+    },
+    "source": "gunnar calibrate sheet: the machine-and-head calibration sheet, in carriage millimetres (cut raw). Features sit roughly where drawn in testdata/calibration/calibration_2.html, placed with the profile's head offsets; the fit reads the exact steps from the run log."
+  },
+  "board": {
+    "width_mm": 140.0,
+    "height_mm": 105.0,
+    "thickness_mm": 1.5
+  },
+  "material": {
+    "name": "MSK_1.5",
+    "speed_pct": 95.0,
+    "head_settle_ms": 250,
+    "blade_angle_offset_deg": {
+      "straight": 0.0,
+      "bevel": 0.0
+    }
+  },
+  "ops": [
+    {
+      "op": "clamp",
+      "side": "left"
+    },
+    {
+      "op": "cut",
+      "id": "W.right",
+      "head": "bevel",
+      "path_mm": [
+        [
+          164.675,
+          55.195
+        ],
+        [
+          164.675,
+          21.195
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "W.front",
+      "head": "bevel",
+      "path_mm": [
+        [
+          169.175,
+          25.695
+        ],
+        [
+          135.175,
+          25.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "W.left",
+      "head": "bevel",
+      "path_mm": [
+        [
+          139.675,
+          21.195
+        ],
+        [
+          139.675,
+          55.195
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "W.back",
+      "head": "bevel",
+      "path_mm": [
+        [
+          135.175,
+          50.695
+        ],
+        [
+          169.175,
+          50.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.ref",
+      "head": "bevel",
+      "path_mm": [
+        [
+          177.675,
+          63.695
+        ],
+        [
+          141.675,
+          63.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.1",
+      "head": "bevel",
+      "path_mm": [
+        [
+          145.675,
+          73.695
+        ],
+        [
+          145.675,
+          62.095
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.2",
+      "head": "bevel",
+      "path_mm": [
+        [
+          150.675,
+          73.695
+        ],
+        [
+          150.675,
+          61.795
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.3",
+      "head": "bevel",
+      "path_mm": [
+        [
+          155.675,
+          73.695
+        ],
+        [
+          155.675,
+          61.495
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.4",
+      "head": "bevel",
+      "path_mm": [
+        [
+          160.675,
+          73.695
+        ],
+        [
+          160.675,
+          61.195
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.5",
+      "head": "bevel",
+      "path_mm": [
+        [
+          165.675,
+          73.695
+        ],
+        [
+          165.675,
+          60.895
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.6",
+      "head": "bevel",
+      "path_mm": [
+        [
+          170.675,
+          73.695
+        ],
+        [
+          170.675,
+          60.595
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BE.7",
+      "head": "bevel",
+      "path_mm": [
+        [
+          175.675,
+          73.695
+        ],
+        [
+          175.675,
+          60.295
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.ref",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.675,
+          93.695
+        ],
+        [
+          199.675,
+          63.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.1",
+      "head": "bevel",
+      "path_mm": [
+        [
+          198.775,
+          67.695
+        ],
+        [
+          190.775,
+          67.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.2",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.075,
+          71.695
+        ],
+        [
+          191.075,
+          71.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.3",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.375,
+          75.695
+        ],
+        [
+          191.375,
+          75.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.4",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.675,
+          79.695
+        ],
+        [
+          191.675,
+          79.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.5",
+      "head": "bevel",
+      "path_mm": [
+        [
+          199.975,
+          83.695
+        ],
+        [
+          191.975,
+          83.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.6",
+      "head": "bevel",
+      "path_mm": [
+        [
+          200.275,
+          87.695
+        ],
+        [
+          192.275,
+          87.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "BS.7",
+      "head": "bevel",
+      "path_mm": [
+        [
+          200.575,
+          91.695
+        ],
+        [
+          192.575,
+          91.695
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S.A",
+      "head": "straight",
+      "path_mm": [
+        [
+          21.815,
+          53.845
+        ],
+        [
+          21.815,
+          22.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S.B",
+      "head": "straight",
+      "path_mm": [
+        [
+          31.815,
+          22.845
+        ],
+        [
+          31.815,
+          53.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S.C",
+      "head": "straight",
+      "path_mm": [
+        [
+          41.815,
+          53.845
+        ],
+        [
+          41.815,
+          22.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S.F",
+      "head": "straight",
+      "path_mm": [
+        [
+          18.815,
+          25.845
+        ],
+        [
+          44.815,
+          25.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S.K",
+      "head": "straight",
+      "path_mm": [
+        [
+          44.815,
+          50.845
+        ],
+        [
+          18.815,
+          50.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.ref",
+      "head": "straight",
+      "path_mm": [
+        [
+          55.815,
+          63.845
+        ],
+        [
+          19.815,
+          63.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.1",
+      "head": "straight",
+      "path_mm": [
+        [
+          23.815,
+          73.845
+        ],
+        [
+          23.815,
+          63.245
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.2",
+      "head": "straight",
+      "path_mm": [
+        [
+          28.815,
+          73.845
+        ],
+        [
+          28.815,
+          62.945
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.3",
+      "head": "straight",
+      "path_mm": [
+        [
+          33.815,
+          73.845
+        ],
+        [
+          33.815,
+          62.645
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.4",
+      "head": "straight",
+      "path_mm": [
+        [
+          38.815,
+          73.845
+        ],
+        [
+          38.815,
+          62.345
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.5",
+      "head": "straight",
+      "path_mm": [
+        [
+          43.815,
+          73.845
+        ],
+        [
+          43.815,
+          62.045
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.6",
+      "head": "straight",
+      "path_mm": [
+        [
+          48.815,
+          73.845
+        ],
+        [
+          48.815,
+          61.745
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SE.7",
+      "head": "straight",
+      "path_mm": [
+        [
+          53.815,
+          73.845
+        ],
+        [
+          53.815,
+          61.445
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.ref",
+      "head": "straight",
+      "path_mm": [
+        [
+          121.815,
+          53.845
+        ],
+        [
+          121.815,
+          23.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.1",
+      "head": "straight",
+      "path_mm": [
+        [
+          119.115,
+          27.845
+        ],
+        [
+          111.115,
+          27.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.2",
+      "head": "straight",
+      "path_mm": [
+        [
+          119.415,
+          31.845
+        ],
+        [
+          111.415,
+          31.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.3",
+      "head": "straight",
+      "path_mm": [
+        [
+          119.715,
+          35.845
+        ],
+        [
+          111.715,
+          35.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.4",
+      "head": "straight",
+      "path_mm": [
+        [
+          120.015,
+          39.845
+        ],
+        [
+          112.015,
+          39.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.5",
+      "head": "straight",
+      "path_mm": [
+        [
+          120.315,
+          43.845
+        ],
+        [
+          112.315,
+          43.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.6",
+      "head": "straight",
+      "path_mm": [
+        [
+          120.615,
+          47.845
+        ],
+        [
+          112.615,
+          47.845
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "SS.7",
+      "head": "straight",
+      "path_mm": [
+        [
+          120.915,
+          51.845
+        ],
+        [
+          112.915,
+          51.845
+        ]
+      ]
+    }
+  ]
+}

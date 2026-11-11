@@ -1,0 +1,457 @@
+{
+  "format": "gunnar-program",
+  "version": 1,
+  "id": "calibration_1",
+  "meta": {
+    "source": "Calibration pattern 1: per head a 30 mm square cut clockwise and one anticlockwise, plain lines on the design positions with overcuts long enough to free every corner. The readings listed under calibration are what `gunnar calibrate` fits: each head's offset, where each side of its slit lands, and its drag. Faces: B1 and the overruns were read on the back; B2's walls slope inward, so calipers in it found its sharp face edge.",
+    "calibration": {
+      "version": 1,
+      "measurements": [
+        {
+          "name": "B1.left",
+          "kind": "edge",
+          "cut": 3,
+          "axis": "x",
+          "kept": "left",
+          "what": "X of the hole's left edge, from the left stop",
+          "face": "back"
+        },
+        {
+          "name": "B1.right",
+          "kind": "edge",
+          "cut": 1,
+          "axis": "x",
+          "kept": "left",
+          "what": "X of the hole's right edge, from the left stop",
+          "face": "back"
+        },
+        {
+          "name": "B1.front",
+          "kind": "edge",
+          "cut": 2,
+          "axis": "y",
+          "kept": "left",
+          "what": "Y of the hole's front edge, from the front stop",
+          "face": "back"
+        },
+        {
+          "name": "B1.back",
+          "kind": "edge",
+          "cut": 4,
+          "axis": "y",
+          "kept": "left",
+          "what": "Y of the hole's back edge, from the front stop",
+          "face": "back"
+        },
+        {
+          "name": "B2.left",
+          "kind": "edge",
+          "cut": 7,
+          "axis": "x",
+          "kept": "right",
+          "what": "X of the hole's left edge, from the left stop",
+          "face": "face"
+        },
+        {
+          "name": "B2.right",
+          "kind": "edge",
+          "cut": 5,
+          "axis": "x",
+          "kept": "right",
+          "what": "X of the hole's right edge, from the left stop",
+          "face": "face"
+        },
+        {
+          "name": "B2.front",
+          "kind": "edge",
+          "cut": 8,
+          "axis": "y",
+          "kept": "right",
+          "what": "Y of the hole's front edge, from the front stop",
+          "face": "face"
+        },
+        {
+          "name": "B2.back",
+          "kind": "edge",
+          "cut": 6,
+          "axis": "y",
+          "kept": "right",
+          "what": "Y of the hole's back edge, from the front stop",
+          "face": "face"
+        },
+        {
+          "name": "S1.left",
+          "kind": "edge",
+          "cut": 11,
+          "axis": "x",
+          "kept": "left",
+          "what": "X of the hole's left edge, from the left stop",
+          "face": "any"
+        },
+        {
+          "name": "S1.right",
+          "kind": "edge",
+          "cut": 9,
+          "axis": "x",
+          "kept": "left",
+          "what": "X of the hole's right edge, from the left stop",
+          "face": "any"
+        },
+        {
+          "name": "S1.front",
+          "kind": "edge",
+          "cut": 10,
+          "axis": "y",
+          "kept": "left",
+          "what": "Y of the hole's front edge, from the front stop",
+          "face": "any"
+        },
+        {
+          "name": "S1.back",
+          "kind": "edge",
+          "cut": 12,
+          "axis": "y",
+          "kept": "left",
+          "what": "Y of the hole's back edge, from the front stop",
+          "face": "any"
+        },
+        {
+          "name": "S2.left",
+          "kind": "edge",
+          "cut": 15,
+          "axis": "x",
+          "kept": "right",
+          "what": "X of the hole's left edge, from the left stop",
+          "face": "any"
+        },
+        {
+          "name": "S2.right",
+          "kind": "edge",
+          "cut": 13,
+          "axis": "x",
+          "kept": "right",
+          "what": "X of the hole's right edge, from the left stop",
+          "face": "any"
+        },
+        {
+          "name": "S2.front",
+          "kind": "edge",
+          "cut": 16,
+          "axis": "y",
+          "kept": "right",
+          "what": "Y of the hole's front edge, from the front stop",
+          "face": "any"
+        },
+        {
+          "name": "S2.back",
+          "kind": "edge",
+          "cut": 14,
+          "axis": "y",
+          "kept": "right",
+          "what": "Y of the hole's back edge, from the front stop",
+          "face": "any"
+        },
+        {
+          "name": "B1.fr.below",
+          "kind": "overrun",
+          "cut": 1,
+          "end": "end",
+          "crossing": 2,
+          "kept": "left",
+          "what": "how far the right side's slit runs in front of the hole's front edge",
+          "face": "back"
+        },
+        {
+          "name": "B1.fr.beside",
+          "kind": "overrun",
+          "cut": 2,
+          "end": "start",
+          "crossing": 1,
+          "kept": "left",
+          "what": "how far the front side's slit runs right of the hole's right edge",
+          "face": "back"
+        },
+        {
+          "name": "S1.fr.below",
+          "kind": "overrun",
+          "cut": 9,
+          "end": "end",
+          "crossing": 10,
+          "kept": "left",
+          "what": "how far the right side's slit runs in front of the hole's front edge",
+          "face": "any"
+        },
+        {
+          "name": "S1.fr.beside",
+          "kind": "overrun",
+          "cut": 10,
+          "end": "start",
+          "crossing": 9,
+          "kept": "left",
+          "what": "how far the front side's slit runs right of the hole's right edge",
+          "face": "any"
+        }
+      ]
+    }
+  },
+  "board": {
+    "width_mm": 150.0,
+    "height_mm": 150.0,
+    "thickness_mm": 1.5
+  },
+  "material": {
+    "name": "MSK_1.5",
+    "speed_pct": 95.0,
+    "head_settle_ms": 250,
+    "blade_angle_offset_deg": {
+      "straight": 0.0,
+      "bevel": 3.0
+    }
+  },
+  "ops": [
+    {
+      "op": "clamp",
+      "side": "left"
+    },
+    {
+      "op": "cut",
+      "id": "B1.right",
+      "head": "bevel",
+      "path_mm": [
+        [
+          60,
+          114.5
+        ],
+        [
+          60,
+          75.5
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B1.front",
+      "head": "bevel",
+      "path_mm": [
+        [
+          64.5,
+          80
+        ],
+        [
+          25.5,
+          80
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B1.left",
+      "head": "bevel",
+      "path_mm": [
+        [
+          30,
+          75.5
+        ],
+        [
+          30,
+          114.5
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B1.back",
+      "head": "bevel",
+      "path_mm": [
+        [
+          25.5,
+          110
+        ],
+        [
+          64.5,
+          110
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B2.right",
+      "head": "bevel",
+      "path_mm": [
+        [
+          110,
+          75.5
+        ],
+        [
+          110,
+          114.5
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B2.back",
+      "head": "bevel",
+      "path_mm": [
+        [
+          114.5,
+          110
+        ],
+        [
+          75.5,
+          110
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B2.left",
+      "head": "bevel",
+      "path_mm": [
+        [
+          80,
+          114.5
+        ],
+        [
+          80,
+          75.5
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "B2.front",
+      "head": "bevel",
+      "path_mm": [
+        [
+          75.5,
+          80
+        ],
+        [
+          114.5,
+          80
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S1.right",
+      "head": "straight",
+      "path_mm": [
+        [
+          60,
+          63.0
+        ],
+        [
+          60,
+          27.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S1.front",
+      "head": "straight",
+      "path_mm": [
+        [
+          63.0,
+          30
+        ],
+        [
+          27.0,
+          30
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S1.left",
+      "head": "straight",
+      "path_mm": [
+        [
+          30,
+          27.0
+        ],
+        [
+          30,
+          63.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S1.back",
+      "head": "straight",
+      "path_mm": [
+        [
+          27.0,
+          60
+        ],
+        [
+          63.0,
+          60
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S2.right",
+      "head": "straight",
+      "path_mm": [
+        [
+          110,
+          27.0
+        ],
+        [
+          110,
+          63.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S2.back",
+      "head": "straight",
+      "path_mm": [
+        [
+          113.0,
+          60
+        ],
+        [
+          77.0,
+          60
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S2.left",
+      "head": "straight",
+      "path_mm": [
+        [
+          80,
+          63.0
+        ],
+        [
+          80,
+          27.0
+        ]
+      ]
+    },
+    {
+      "op": "cut",
+      "id": "S2.front",
+      "head": "straight",
+      "path_mm": [
+        [
+          77.0,
+          30
+        ],
+        [
+          113.0,
+          30
+        ]
+      ]
+    }
+  ]
+}

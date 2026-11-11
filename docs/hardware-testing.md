@@ -1,25 +1,30 @@
 # Testing against the machine
 
-Two commands, both from the workspace root. Every byte in both directions is written to a
-timestamped log (`gunnar-<cmd>-<time>.log`, or `--log FILE`). Bring the logs back and put
-them in `testdata/sessions/`: `cargo test` replays each one against the simulator and points
-at every reply where the simulator differs from the box (see the README there).
+Every command that talks to the machine is a session: a dated folder under the data folder
+(`~/Documents/Gunnar/sessions/` unless `gunnar config --data-dir` says otherwise) with the log of
+every byte in both directions, copies of the programs, and any readings and fits.
+`gunnar logs` lists them; `open "$(gunnar logs --last)"` opens the latest. Copy the logs worth
+keeping into `testdata/sessions/`: `cargo test` replays each one against the simulator and
+points at every reply where the simulator differs from the box (see the README there).
+
+`gunnar --help` and `gunnar <command> --help` list every option.
 
 ## Before you go
 
 ```sh
-cargo build --release -p gunnar
-./target/release/gunnar probe sim            # dry run, read-only
-./target/release/gunnar check sim            # dry run of every stage (~45 s)
-./target/release/gunnar check sim-limits     # same, with limit inputs mapped (stage 7 path)
+cargo install --path crates/gunnar      # puts `gunnar` on the PATH (~/.cargo/bin)
+gunnar probe --sim                      # dry run, read-only
+gunnar check --sim                      # dry run of every stage (~45 s)
+gunnar check --sim-limits               # same, with limit inputs mapped (stage 7 path)
 ```
 
 ## At the machine
 
 1. **Close GMC.** Only one program can hold the port.
 2. Connect a USB-serial adapter and the null-modem cable to the controller box.
-3. Find the port: `./target/release/gunnar ports` (look for `/dev/cu.usbserial-…`).
-4. **Stage 1, read-only:** `./target/release/gunnar probe /dev/cu.usbserial-XXXX`
+3. The port: with one USB-serial adapter plugged in, `gunnar` uses it. Otherwise `gunnar ports`
+   lists them; give one with `--port`, or remember it with `gunnar config --port PORT`.
+4. **Stage 1, read-only:** `gunnar probe`
    - No motion, no parameter writes; one `@M1`/`@M0` mode switch.
    - If it cannot connect, the error says whether nothing came back (cable, power), bytes
      but no reply (line settings), or replies that were not the driver's `@I100` probe.
@@ -28,7 +33,7 @@ cargo build --release -p gunnar
      and whether it needs GMC's licence exchange (`@M1 accepted` vs `*007`).
    - Reads back every parameter GMC writes. The line **box vs GMC at connect** says whether
      the box boots with GMC's configuration or a driver must write it at connect, as GMC does.
-5. **Stages 2–8:** `./target/release/gunnar check /dev/cu.usbserial-XXXX --stage 2`, then
+5. **Stages 2–8:** `gunnar check --stage 2`, then
    `--stage 3`, and so on (or `--stage 2-8`). Each step says what it will do and waits for
    Enter. `s` skips the step. `q` at any prompt ends the run: the stage in hand winds down
    without asking anything more, and the parameters are restored.
@@ -68,3 +73,28 @@ cargo build --release -p gunnar
   GMC restores them.
 - Stage 7 only drives into a limit switch if the controller can see it (`&I243`/`&I239`
   mapped). The captures show `&I240,000h` (Y− not mapped), so expect a SKIP.
+
+## Calibrating the heads
+
+Once per blade or holder change, cut the machine-and-head sheet raw: no profile, offset or trim
+is applied, so nothing it measures inherits an earlier estimate. The layout and what to measure
+are in `testdata/calibration/calibration_2.html`.
+
+```sh
+gunnar calibrate cut          # write the sheet, cut it raw, then take its readings and fit them
+gunnar calibrate read         # take (or correct) the latest session's readings later
+gunnar calibrate fit --all    # fit every calibration session that has readings, together
+```
+
+- Offcut 140 × 105 mm or larger, 1.5 mm, in the front-left corner against the left clamp.
+- After the cut, `gunnar` asks for each reading in turn: what to measure, on which face, and
+  roughly what to expect. A value far from that is questioned before it is kept. Comb answers
+  are tooth numbers (0 if none reached). Each value is saved as it is typed, so stopping early
+  loses nothing; `calibrate read` shows the saved values and Enter keeps them.
+- The fit reads each cut's exact carriage steps from the run log, so the profile current at the
+  time doesn't matter. Its report and a profile with the fitted head offsets
+  (`fit.txt`, `profile.json`) go into the session. Change the profile only where the fit says
+  a value has moved (more than twice its uncertainty).
+- A sheet kept outside the data folder fits too: `gunnar calibrate fit --sheet PROGRAM LOG
+  READINGS` (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`,
+  `.readings.txt`), alone or with sessions.

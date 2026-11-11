@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use sim::Sim;
 
+use crate::style::{BOLD, DIM, paint};
+
 pub struct Operator {
     sim: Option<Arc<Sim>>,
 }
@@ -38,9 +40,12 @@ impl Operator {
         if self.is_sim() {
             return Confirm::Go;
         }
-        println!("\n  >> {what}");
+        anstream::println!("\n  {}", paint(BOLD, format!(">> {what}")));
         loop {
-            print!("     Enter = go, s = skip this step, q = stop the check: ");
+            anstream::print!(
+                "     {} ",
+                paint(DIM, "Enter = go, s = skip this step, q = stop:")
+            );
             let _ = io::stdout().flush();
             match Self::read_line().as_deref() {
                 None => {
@@ -60,7 +65,7 @@ impl Operator {
         if self.is_sim() {
             return None;
         }
-        print!("  ?? {question} ");
+        anstream::print!("  {} {question} ", paint(BOLD, "??"));
         let _ = io::stdout().flush();
         Some(Self::read_line().unwrap_or_else(|| "(no answer: stdin is closed)".to_owned()))
     }
@@ -76,7 +81,10 @@ impl Operator {
                     sim.press_start_button();
                 });
             }
-            None => println!("  >> Press and release the GREEN start button now."),
+            None => anstream::println!(
+                "  {}",
+                paint(BOLD, ">> Press and release the GREEN start button now.")
+            ),
         }
     }
 }

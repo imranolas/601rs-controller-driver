@@ -12,8 +12,16 @@ link.workspace = true
 protocol.workspace = true
 controller.workspace = true
 machine.workspace = true
+program.workspace = true
+runner.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sim.workspace = true
 ctrlc.workspace = true
+clap = { version = "4", features = ["derive"] }
+anstream = "1"
+anstyle = "1"
+chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 
 [lints]
 workspace = true
