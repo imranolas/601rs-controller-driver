@@ -142,10 +142,6 @@ impl Session {
         Ok(any!(self.ctl()?, c => c.read_input(input))?)
     }
 
-    pub(crate) fn brake(&mut self) -> R<()> {
-        Ok(any!(self.ctl()?, c => c.brake())?)
-    }
-
     pub(crate) fn clear_stop(&mut self) -> R<Status> {
         Ok(any!(self.ctl()?, c => c.clear_stop())?)
     }

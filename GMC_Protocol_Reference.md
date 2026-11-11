@@ -1119,8 +1119,9 @@ SVG/DXF in  →  layers → tools (bevel / straight / score, by the cut-type con
             →  check the byte budget: bytes/s at the feed must stay well inside 11,520 (§5)
             →  per cut, one mode-2 stream: C1 + travel at entry 21, A head down, W settle,
                the path at entry 20 (#G20 = 360 × Speed%), A head up; #R per §3.1
-            →  the driver streams with #C7 flow control and sends the next cut when @N shows
-               this one under way
+            →  the driver streams with #C7 flow control, and lets each cut end before it
+               sends the next (so a cut is reported done when it is; following @N could
+               send the next while this one runs)
 ```
 
 The machine controls **XY position and blade rotation** only. Depth is set by hand.

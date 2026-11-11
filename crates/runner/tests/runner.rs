@@ -306,6 +306,44 @@ fn stop_now_makes_the_machine_safe_and_wants_homing() {
     assert!(parked(&sim));
 }
 
+/// A failure that is not a stop still brakes through the stop lane, which waits for no reply:
+/// here the controller stops answering mid-cut, so a brake sent as a request never went out.
+#[test]
+fn a_failure_brakes_without_waiting_for_replies() {
+    let (mut r, sim) = ready();
+    let mut sent_before = 0;
+    let (result, _) = run_with(&mut r, &fixture("g_multi_C10"), |e, _| {
+        if matches!(e, Event::Op { index: 3, .. }) {
+            sent_before = sim.received().len();
+            sim.set_reply_delay(Duration::from_secs(5));
+        }
+    });
+    assert!(
+        matches!(result, Err(Error::Failed { op: Some(3), .. })),
+        "{result:?}"
+    );
+    assert!(
+        sim.received()[sent_before..].iter().any(|l| l == "@B"),
+        "braked"
+    );
+}
+
+/// A stop made while nothing runs (Ctrl-C at a prompt) latches the session: the machine
+/// wants homing, which clears it, rather than every request failing as stopped.
+#[test]
+fn a_stop_while_idle_wants_homing() {
+    let (mut r, sim) = ready();
+    r.stop_handle().brake().expect("brakes");
+    assert!(r.needs_homing().expect("reads"));
+    let (refused, _) = run_with(&mut r, &fixture("g_regular_mount"), |_, _| {});
+    assert!(matches!(refused, Err(Error::NotHomed)), "{refused:?}");
+    r.home().expect("homes");
+    assert!(!r.needs_homing().expect("reads"));
+    let (after, _) = run_with(&mut r, &fixture("g_regular_mount"), |_, _| {});
+    assert_eq!(after.expect("runs"), Outcome::Finished);
+    assert!(parked(&sim));
+}
+
 #[test]
 fn a_fault_during_a_cut_makes_the_machine_safe() {
     let (mut r, sim) = ready();
@@ -373,8 +411,8 @@ fn gmcs_oval_runs_as_one_motion() {
 }
 
 /// The one-stream form, with every capability the simulator has: the controller's flow
-/// control on, cuts with the same settings streamed one after another, and a pause still
-/// waiting for the cut in hand to end.
+/// control on, and cuts with the same settings streamed one after another. A cut is reported
+/// done once it has ended, and a pause after it sends nothing of the next.
 #[test]
 fn one_stream_per_cut_runs_and_pauses() {
     let profile = Profile {
@@ -382,9 +420,17 @@ fn one_stream_per_cut_runs_and_pauses() {
         ..Profile::gunnar_601()
     };
     let (mut r, sim) = ready_with(profile);
+    let mut sent_at_done = None;
     let (result, events) = run_with(&mut r, &fixture("g_multi_C10"), |e, tx| match e {
-        Event::OpDone { index: 4 } => tx.send(Request::Pause).expect("sends"),
-        Event::Paused { .. } => tx.send(Request::Resume).expect("sends"),
+        Event::OpDone { index: 4 } => {
+            assert!(!sim.snapshot().moving, "cut 4 is over when reported done");
+            sent_at_done = Some(vectors(&sim));
+            tx.send(Request::Pause).expect("sends");
+        }
+        Event::Paused { .. } => {
+            assert_eq!(Some(vectors(&sim)), sent_at_done, "nothing of cut 5 yet");
+            tx.send(Request::Resume).expect("sends");
+        }
         _ => {}
     });
     assert_eq!(result.expect("runs"), Outcome::Finished);

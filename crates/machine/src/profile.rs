@@ -442,8 +442,8 @@ impl Profile {
                 input2: false,
             }),
             // The buffer's 0x03/0x02 flow control: GMC never enables it and doesn't expect it,
-            // so GMC's form keeps it off; one stream per cut sends the next cut while the last
-            // one runs, and needs it (gunnar check stage 6).
+            // so GMC's form keeps it off; the one-stream form sends a cut's travel, head moves
+            // and path in one go, and needs it (gunnar check stage 6).
             Setting::FlowControl(self.capabilities.streams()),
         ]
     }

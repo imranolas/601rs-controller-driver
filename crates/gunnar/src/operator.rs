@@ -14,6 +14,10 @@ pub struct Operator {
     sim: Option<Arc<Sim>>,
 }
 
+/// What [`Operator::ask`] answers once stdin has closed: it goes into the log as the answer,
+/// and a caller that asks again until it gets a good one must stop on it.
+pub const NO_ANSWER: &str = "(no answer: stdin is closed)";
+
 impl Operator {
     pub fn new(sim: Option<Arc<Sim>>) -> Self {
         Self { sim }
@@ -60,14 +64,18 @@ impl Operator {
         }
     }
 
-    /// Ask the operator what they saw. `None` on the simulator.
+    /// Ask the operator what they saw. `None` on the simulator; [`NO_ANSWER`] if stdin has
+    /// closed.
     pub fn ask(&self, question: &str) -> Option<String> {
         if self.is_sim() {
             return None;
         }
         anstream::print!("  {} {question} ", paint(BOLD, "??"));
         let _ = io::stdout().flush();
-        Some(Self::read_line().unwrap_or_else(|| "(no answer: stdin is closed)".to_owned()))
+        Some(Self::read_line().unwrap_or_else(|| {
+            println!(); // the prompt's line, never ended by the operator's Enter
+            NO_ANSWER.to_owned()
+        }))
     }
 
     /// Ask the operator to press and release the green start button. On the simulator the

@@ -171,11 +171,15 @@ impl Runner {
         &self.profile
     }
 
-    /// Whether the machine must be homed before it moves: after a stop or a failure, or if the
-    /// controller doesn't know its position.
+    /// Whether the machine must be homed before it moves: after a stop (even one made while
+    /// nothing ran) or a failure, or if the controller doesn't know its position.
     pub fn needs_homing(&mut self) -> Result<bool, Error> {
+        // A stop latches the session, so asking the controller would only report the stop.
+        if self.needs_homing || self.stop.is_stopped() {
+            return Ok(true);
+        }
         let s = self.session.status()?;
-        Ok(self.needs_homing || !s.homed)
+        Ok(!s.homed)
     }
 
     /// Where the carriage is, steps (X, Y, Z).
@@ -368,15 +372,12 @@ impl Runner {
     ) -> Result<Outcome, Failure> {
         self.exec(&job.setup, None, requests, events)?;
         let outcome = self.ops(program, job, requests, events)?;
-        if outcome != Outcome::Finished {
-            // The last cut may still be running in a stream: let it end first.
-            self.session.wait_idle(self.config.idle_timeout)?;
-        }
         self.exec(&job.finish, None, requests, events)?;
         Ok(outcome)
     }
 
-    /// The program's ops in order, with the requests between them.
+    /// The program's ops in order, with the requests between them. Each ends with the machine
+    /// still: a pause, a cancel or the end then finds nothing running.
     fn ops(
         &mut self,
         program: &Program,
@@ -403,6 +404,14 @@ impl Runner {
                 == Flow::Cancel
             {
                 return Ok(Outcome::Cancelled { next: index + 1 });
+            }
+            // GMC's form ends each op still. A stream runs on after its commands are sent:
+            // let the cut end, so that it is done when reported done, and a fault in it is
+            // laid on it rather than on the next.
+            if self.profile.capabilities.streams() {
+                self.session
+                    .wait_idle(self.config.idle_timeout)
+                    .map_err(at)?;
             }
             events(Event::OpDone { index });
         }
@@ -524,15 +533,14 @@ impl Runner {
         self.make_safe()
     }
 
-    /// After a stop or a failure (PROGRAM_FORMAT §5): brake (the stop handle may already have),
-    /// re-establish reply pairing and release the stop latch (a reply abandoned by the stop is
-    /// discarded, not paired), clear any error (`@@`, as GMC does after errors: a controller in
-    /// an error state refuses mode switches), wait for standstill, then heads up and clamps
-    /// released. Whether that last step worked.
+    /// After a stop or a failure (PROGRAM_FORMAT §5): brake through the stop lane, which
+    /// waits for no reply and so goes out even when the controller has stopped answering (a
+    /// second `@B` after a stop is harmless), re-establish reply pairing and release the stop
+    /// latch (a reply abandoned by the stop is discarded, not paired), clear any error (`@@`,
+    /// as GMC does after errors: a controller in an error state refuses mode switches), wait
+    /// for standstill, then heads up and clamps released. Whether that last step worked.
     fn make_safe(&mut self) -> bool {
-        if !self.stop.is_stopped() {
-            let _ = self.session.brake();
-        }
+        let _ = self.stop.brake();
         let _ = self.session.clear_stop();
         let _ = self.session.clear_error();
         let _ = self.session.wait_idle(Duration::from_secs(30));

@@ -207,8 +207,9 @@ fn one_stream_per_cut_runs_on_the_simulator() {
     }
 }
 
-/// With every capability on, a run of cuts with the same settings is one stream: no wait
-/// until idle between them, so the runner can send each cut while the last one runs.
+/// With every capability on, a run of cuts with the same settings is one stream: the job
+/// has no wait until idle between them. (The runner still lets each cut end before sending
+/// the next, so that it reports cuts as they end.)
 #[test]
 fn cuts_with_the_same_settings_share_a_stream() {
     let profile = Profile {

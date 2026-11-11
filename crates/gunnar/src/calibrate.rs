@@ -33,7 +33,7 @@ use program::{BladeOffsets, Board, Clamp, ClampSide, Cut, Head, Material, Op, Pr
 use serde_json::{Value, json};
 
 use crate::config::tidy;
-use crate::operator::Operator;
+use crate::operator::{NO_ANSWER, Operator};
 use crate::session::Session;
 use crate::style::{DIM, GOOD, WARN, paint};
 use crate::target::Res;
@@ -1011,7 +1011,7 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 break 'readings;
             };
             let answer = answer.trim();
-            if answer == "q" {
+            if answer == "q" || answer == NO_ANSWER {
                 break 'readings;
             }
             if answer.is_empty() {

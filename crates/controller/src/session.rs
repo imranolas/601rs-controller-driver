@@ -313,8 +313,8 @@ impl Session {
         }
     }
 
-    /// Host-side pacing: the 0x03 warning alone cannot stop a fast host in time (the OS serial
-    /// buffer alone can hold more than its 200-byte margin). So after every
+    /// Host-side pacing, a second guard behind the 0x03 warning (which comes ~1 KB before the
+    /// buffer is full, and once lagged a port that held ~11 KB unsent): after every
     /// `stream_window_bytes` streamed, ask `@H` (a master command, answered even when the
     /// buffer is full) and wait while the buffer is above `stream_high_water_pct`.
     fn pace_by_buffer_level(&mut self, next: usize) -> Result<()> {

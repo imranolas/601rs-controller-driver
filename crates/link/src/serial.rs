@@ -8,9 +8,18 @@ use std::time::Duration;
 
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
-use crate::{Link, Reader, Writer};
+use crate::{Link, Paced, Reader, Writer};
 
 pub const DEFAULT_BAUD: u32 = 115_200;
+
+/// How many bytes a write may leave waiting to be sent: ~5.6 ms at 115200 baud, a few
+/// vectors, so a stop written next goes out at once.
+const LEAD_BYTES: usize = 64;
+
+/// The pace writes are held to, as a share of the line's nominal rate (8-N-1 sends ten bits a
+/// byte). A little under the line, so that a slow clock or gaps between bytes never let the
+/// bytes the model thinks are sent pile up in the adapter.
+const PACE_SHARE: f64 = 0.97;
 
 #[derive(Debug, Clone)]
 pub struct SerialConfig {
@@ -52,7 +61,11 @@ pub fn open(cfg: &SerialConfig) -> serialport::Result<Link> {
     Ok(Link {
         name: cfg.path.clone(),
         reader: Box::new(SerialReader(reader)),
-        writer: Box::new(SerialWriter(port)),
+        writer: Box::new(Paced::new(
+            SerialWriter(port),
+            f64::from(cfg.baud) / 10.0 * PACE_SHARE,
+            LEAD_BYTES,
+        )),
     })
 }
 
@@ -106,6 +119,8 @@ impl Reader for SerialReader {
 struct SerialWriter(Box<dyn serialport::SerialPort>);
 
 impl Writer for SerialWriter {
+    /// `flush` asks the OS to drain (`tcdrain`), yet with the PL2303 adapter at the 601 a stop
+    /// written after a burst still crossed the line ~1 s later. [`Paced`] keeps the real pace.
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.0.write_all(bytes)?;
         self.0.flush()

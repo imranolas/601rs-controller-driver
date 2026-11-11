@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{Link, Reader, Writer};
+use crate::{Line, Link, Reader, Writer};
 
 /// Create a connected pair. `read_timeout` bounds each host-side `read`, like a serial port's.
 /// Writes are instant, so the host can get any number of bytes ahead of the remote side.
@@ -21,16 +21,10 @@ pub fn pair(read_timeout: Duration) -> (Link, Remote) {
 /// The host then cannot get ahead of the line, so flow control and a path that needs more
 /// bytes than the line carries behave as they do on the machine.
 pub fn paced_pair(read_timeout: Duration, bytes_per_sec: f64) -> (Link, Remote) {
-    make(
-        read_timeout,
-        Some(Pace {
-            bytes_per_sec,
-            free_at: Instant::now(),
-        }),
-    )
+    make(read_timeout, Some(Line::new(bytes_per_sec)))
 }
 
-fn make(read_timeout: Duration, pace: Option<Pace>) -> (Link, Remote) {
+fn make(read_timeout: Duration, pace: Option<Line>) -> (Link, Remote) {
     let (host_tx, remote_rx) = mpsc::channel::<Vec<u8>>();
     let (remote_tx, host_rx) = mpsc::channel::<Vec<u8>>();
     let link = Link {
@@ -80,26 +74,17 @@ impl Reader for MemReader {
     }
 }
 
-/// A line that sends one byte after another at a fixed rate.
-struct Pace {
-    bytes_per_sec: f64,
-    /// When the line has sent everything written so far.
-    free_at: Instant,
-}
-
 struct MemWriter {
     tx: Sender<Vec<u8>>,
-    pace: Option<Pace>,
+    pace: Option<Line>,
 }
 
 impl Writer for MemWriter {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if let Some(pace) = &mut self.pace {
-            let now = Instant::now();
-            let wire_time = Duration::from_secs_f64(bytes.len() as f64 / pace.bytes_per_sec);
-            pace.free_at = pace.free_at.max(now) + wire_time;
+        if let Some(line) = &mut self.pace {
+            let sent = line.queue(bytes.len());
             // The far end has the bytes once they have crossed the line, and not before.
-            thread::sleep(pace.free_at.saturating_duration_since(now));
+            thread::sleep(sent.saturating_duration_since(Instant::now()));
         }
         self.tx
             .send(bytes.to_vec())
