@@ -36,8 +36,8 @@
 //!   tests (`tests/golden.rs`) hold it to GMC's own jobs: every motion of the `g_multi`
 //!   captures (three boards, five speeds) and `g_regular_mount` runs with the same vectors and
 //!   the same controller settings and outputs, with two deliberate differences, both described
-//!   there. That also fixes where GMC places the board ([`Profile::board_origin_mm`]). The oval
-//!   comes with curves.
+//!   there. That also fixes where GMC lays its layouts, 21 mm in from the corner where boards
+//!   register ([`Profile::board_origin_mm`]). The oval comes with curves.
 //! - **One stream per cut,** the controller timing the head, the settle and the start (the
 //!   runner's "Who does what"). It needs firmware 2.00 to honour the v1.00 spec, so each part
 //!   is a capability in the profile, switched on once `gunnar check` has shown it on the box.

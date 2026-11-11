@@ -18,11 +18,18 @@ pub struct Profile {
     /// in machine millimetres. A head's blade is at machine position `carriage + head offset`,
     /// where the carriage position is its steps ÷ scale.
     ///
-    /// The 601's value is where GMC places the board: its straight-edge cuts in the captures
-    /// lie at X 601–602 and Y 761–762 steps (protocol reference §4.2), in the front-left
-    /// corner by the red button, where boards register; board +Y is machine +Y, away from the
-    /// operator (protocol reference §4.1; `gunnar check` stage 3 confirms it).
+    /// The 601's value is the front-left corner by the red button, where boards register
+    /// against the stops; board +Y is machine +Y, away from the operator (protocol reference
+    /// §4.1; `gunnar check` stage 3 confirms it). GMC lays every new layout 2.1 cm in from the
+    /// clamping system ([GCF] `MatLayX`/`MatLayY`): the straight edges of its layouts in the
+    /// captures lie at X 601–602 and Y 761–762 steps (protocol reference §4.2), so the corner is
+    /// 21 mm short of them. A window cut there landed where this puts it, to 0.2 mm (calipers,
+    /// 2026-11-10).
     pub board_origin_mm: MachineMm,
+    /// The nearest a cut may come to the board's left and front edges, mm, so the heads clear
+    /// the clamps: GMC's minimum borders ([GCF] `SysBx`/`SysBy`, 2.1 cm). GMC's cut-to-edge mode,
+    /// with clamps swivelled out of the way, isn't supported yet.
+    pub clamp_border_mm: [f64; 2],
     pub bevel: Head,
     pub straight: Head,
     pub clamps: Clamps,
@@ -287,10 +294,14 @@ impl Profile {
                 y_steps_per_mm: 40.0,
                 z_steps_per_deg: 8.3333,
             },
-            board_origin_mm: MachineMm([21.225, 20.725]),
-            // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP].
+            // GMC's layout corner, (21.225, 20.725), less its 21 mm layout inset.
+            board_origin_mm: MachineMm([0.225, -0.275]),
+            clamp_border_mm: [21.0, 21.0],
+            // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP]. The
+            // offsets are fitted to testdata/calibration/calibration_1 (`gunnar calibrate`,
+            // 2026-11-10, ±0.06 mm): GMC's were (-71.5, 1.9) and (6.2, 1.7).
             bevel: Head {
-                offset_mm: [-71.5, 1.9],
+                offset_mm: [-71.45, 2.03],
                 blade_mount_deg: 0.0,
                 down: 0x05,
                 down_closed: Some(0x01),
@@ -298,7 +309,7 @@ impl Profile {
                 up: 0x02,
             },
             straight: Head {
-                offset_mm: [6.2, 1.7],
+                offset_mm: [6.41, 1.88],
                 blade_mount_deg: 180.0,
                 down: 0x0A,
                 down_closed: None,
@@ -453,5 +464,18 @@ impl Profile {
             (x * s.x_steps_per_mm).round() as i32,
             (y * s.y_steps_per_mm).round() as i32,
         ]
+    }
+
+    /// This machine with none of its calibration: no board origin, no head offsets and no
+    /// clamp border, so a program's points are where the carriage goes, in mm. For a
+    /// calibration sheet cut raw (`gunnar calibrate`): what it measures then can't inherit an
+    /// earlier estimate. Everything else (scales, outputs, speeds, soft limits, park) stays.
+    pub fn raw(&self) -> Profile {
+        let mut p = self.clone();
+        p.board_origin_mm = MachineMm([0.0, 0.0]);
+        p.bevel.offset_mm = [0.0, 0.0];
+        p.straight.offset_mm = [0.0, 0.0];
+        p.clamp_border_mm = [f64::NEG_INFINITY; 2];
+        p
     }
 }

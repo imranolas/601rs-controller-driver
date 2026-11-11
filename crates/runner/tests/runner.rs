@@ -223,7 +223,7 @@ fn with_a_hold(resume: Resume) -> Program {
             id: None,
             label: None,
             head: Head::Straight,
-            path_mm: vec![[0.0, 0.0], [200.0, 0.0]],
+            path_mm: vec![[21.0, 21.0], [221.0, 21.0]], // GMC's front edge, 21 mm in
             speed_pct: None,
         }),
     ];

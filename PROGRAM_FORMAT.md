@@ -51,9 +51,14 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 - **Angles** are in degrees. Field names carry their unit as a suffix: `_mm`, `_deg`, `_pct`, `_ms`.
 
 > **Registration:** the board's bottom-left corner sits in the machine's front-left corner, by
-> the red button, about 2 cm from home in X and Y, and machine +Y is away from the operator, as
-> here (operator's account, GMC's code and captures: protocol reference §4.1). `gunnar check`
-> stage 3 confirms it on the first session. The exact offset comes from the golden tests (Q1).
+> the red button, against the stops, and machine +Y is away from the operator, as here
+> (operator's account, GMC's code and captures: protocol reference §4.1; `gunnar check` stage 3
+> confirmed it). The corner is at machine (0.225, −0.275) mm (Q1).
+>
+> **Clamps:** no cut may come within **21 mm of the left or front edge**, where the clamps hold
+> the board (GMC's minimum borders `SysBx`/`SysBy`, 2.1 cm; `Profile::clamp_border_mm`). GMC
+> lays every new layout that far in (`MatLayX`/`MatLayY`). Its cut-to-edge mode, with clamps
+> swivelled out of the way, isn't supported yet.
 
 ---
 
@@ -313,7 +318,7 @@ Keeping this separate is what makes programs portable across recalibrations and 
 
 | # | Question | Settled by |
 |---|----------|-----------|
-| Q1 | Board registration and Y direction (board frame → machine steps) | GMC's placement is settled by the golden tests (`crates/machine/tests/golden.rs`): the board's corner at machine (21.225, 20.725) mm, its straight edges at X 601–602, Y 761–762 steps, +Y as +Y. The stop is the front-left corner by the red button and +Y is away from the operator (operator; protocol reference §4.1); `gunnar check` stage 3 confirms it |
+| Q1 | Board registration and Y direction (board frame → machine steps) | **Settled.** GMC's layouts sit 21 mm in from the corner (`MatLayX`/`MatLayY` 2.1 cm): the golden tests (`crates/machine/tests/golden.rs`) put their corner at machine (21.225, 20.725) mm, straight edges at X 601–602, Y 761–762 steps, so the registered corner is at machine (0.225, −0.275) mm. A 40 mm window cut 30 mm in from the stops (`testdata/calibration/window_40.json`) landed there to 0.2 mm, and cut again in this frame it came out exactly 21.00 mm nearer the stops than in the old one (calipers, 2026-11-10). The stop is the front-left corner by the red button and +Y is away from the operator (`gunnar check` stage 3) |
 | Q2 | Bevel-side convention: left or right of travel? Does GMC cut openings clockwise? | Path direction in `g_regular_mount` / `g_multi_*` |
 | Q3 | Where exactly GMC applies the Front/Back Begin/End overcut trims | Test cuts, one trim at a time |
 | ~~Q4~~ | Blade-angle formula | **Settled.** In machine steps, Z = 8.333 × (direction of travel, clockwise from +X − head's `blade_mount_deg` + trim), truncated toward zero. Checked against `g_regular_mount`: a bevel edge travelling −Y gives (90 + 3) → 774; a straight edge travelling +X gives (0 − 180 + 0) → −1499 (protocol reference §3.2) |

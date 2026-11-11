@@ -38,9 +38,10 @@ fn headings_are_clockwise_from_plus_x() {
 #[test]
 fn board_points_and_steps_agree_for_both_heads() {
     let p = p601();
-    // GMC's straight edges on g_regular_mount: the board's left edge and its bottom edge.
-    assert_eq!(steps(&p, &p.straight, [0.0, 0.0]), [601, 761]);
-    assert_eq!(steps(&p, &p.straight, [200.0, 310.0]), [8601, 13161]);
+    // GMC's straight edges on g_regular_mount, its layout 21 mm in from the registered
+    // corner, where they physically land: GMC's own offset put them 0.21 and 0.18 mm short.
+    assert_eq!(steps(&p, &p.straight, [21.21, 21.18]), [601, 761]);
+    assert_eq!(steps(&p, &p.straight, [221.21, 331.18]), [8601, 13161]);
     for head in [p.bevel, p.straight] {
         for s in [[601, 761], [9695, 2615], [58_860, 7923], [-3, 0]] {
             assert_eq!(steps(&p, &head, board_point(&p, &head, s)), s);
@@ -124,14 +125,48 @@ fn program(thickness_mm: f64, ops: Vec<Op>) -> Program {
     }
 }
 
+/// Where GMC lays a layout, board mm: 21 mm in from the corner where boards register, clear of
+/// the clamps ([GCF] `MatLayX`/`MatLayY`). These tests describe their cuts from that corner.
+const LAYOUT: [f64; 2] = [21.0, 21.0];
+
+/// A cut along `path`, given from GMC's layout corner ([`LAYOUT`]).
 fn cut(head: HeadKind, path: &[[f64; 2]]) -> Op {
     Op::Cut(Cut {
         id: None,
         label: None,
         head,
-        path_mm: path.to_vec(),
+        path_mm: path
+            .iter()
+            .map(|&[x, y]| [x + LAYOUT[0], y + LAYOUT[1]])
+            .collect(),
         speed_pct: None,
     })
+}
+
+#[test]
+fn cuts_keep_clear_of_the_clamps() {
+    let p = p601();
+    // GMC's own layouts cut exactly on its 21 mm border.
+    let edge = [[0.0, 0.0], [200.0, 0.0]];
+    lower(
+        &program(1.5, vec![clamp(), cut(HeadKind::Straight, &edge)]),
+        &p,
+    )
+    .expect("on the border");
+    for near in [[[-0.5, 50.0], [-0.5, 150.0]], [[50.0, -1.0], [150.0, -1.0]]] {
+        let err = lower(&program(1.5, vec![cut(HeadKind::Bevel, &near)]), &p).expect_err("near");
+        assert!(
+            matches!(
+                err,
+                Error::NearClamps {
+                    op: 0,
+                    point: 0,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
 }
 
 fn clamp() -> Op {
@@ -481,8 +516,9 @@ fn points_carry_their_frame() {
     assert_eq!(p.carriage_steps(carriage), [400, -80]);
     assert_eq!(carriage.to_string(), "(10.0, -2.0) mm");
     assert_eq!(carriage.distance(CarriageMm([13.0, 2.0])), 5.0);
-    // The bevel head's blade is 71.5 mm to the carriage's left.
-    assert_eq!(p.bevel.blade(carriage).0[0], -61.5);
+    // The bevel head's blade is 71.45 mm to the carriage's left.
+    assert_eq!(p.bevel.blade(carriage).0[0], 10.0 + p.bevel.offset_mm[0]);
+    assert!((p.bevel.blade(carriage).0[0] + 61.45).abs() < 1e-9);
 }
 
 #[test]

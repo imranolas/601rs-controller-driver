@@ -134,6 +134,20 @@ pub enum Error {
     /// The carriage would leave the machine's soft limits (V10).
     #[error("{at}: the carriage would reach {carriage_mm}, outside the machine's limits")]
     OutsideEnvelope { at: At, carriage_mm: CarriageMm },
+    /// A cut comes nearer the board's left or front edge than the clamps allow
+    /// ([`Profile::clamp_border_mm`]): the head would hit them.
+    #[error(
+        "op {op}: point {point} at {x:.2}, {y:.2} mm is within {border_x} mm of the left edge or \
+         {border_y} mm of the front edge, where the head would hit the clamps"
+    )]
+    NearClamps {
+        op: usize,
+        point: usize,
+        x: f64,
+        y: f64,
+        border_x: f64,
+        border_y: f64,
+    },
 }
 
 /// Lower a program for a machine. The carriage is taken to start at the park.
@@ -443,6 +457,23 @@ impl Lowering<'_> {
         let speed = cut.speed_pct.unwrap_or(m.speed_pct);
         if !is_pct(speed) {
             return Err(Error::BadNumber { at: At::Op(op) });
+        }
+        let [bx, by] = p.clamp_border_mm;
+        // A hair of slack: GMC's own layouts cut exactly on the border.
+        if let Some((point, &[x, y])) = cut
+            .path_mm
+            .iter()
+            .enumerate()
+            .find(|&(_, &[x, y])| x < bx - 1e-6 || y < by - 1e-6)
+        {
+            return Err(Error::NearClamps {
+                op,
+                point,
+                x,
+                y,
+                border_x: bx,
+                border_y: by,
+            });
         }
         let strokes = strokes(op, &cut.path_mm, p.break_angle_deg)?;
         let closed = strokes.len() == 1 && {
