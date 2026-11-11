@@ -1,6 +1,6 @@
 [package]
-name = "gunnar"
-description = "Command-line tool for the Gunnar 601rs driver."
+name = "mc601"
+description = "mc601: run, check and calibrate a Gunnar 601 mat cutter from the command line."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

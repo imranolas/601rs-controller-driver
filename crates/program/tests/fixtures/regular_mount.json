@@ -1,5 +1,5 @@
 {
-  "format": "gunnar-program",
+  "format": "601rs-program",
   "version": 1,
   "id": "example-regular-mount",
   "meta": { "source": "reconstruction of g_regular_mount capture" },

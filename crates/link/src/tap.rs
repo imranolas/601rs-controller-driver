@@ -4,7 +4,7 @@
 //! log is plain text, one transfer per line, readable by people and by [`parse_line`]:
 //!
 //! ```text
-//! # gunnar probe /dev/cu.usbserial-1420
+//! # mc601 probe /dev/cu.usbserial-1420
 //!    0.003 > @V⏎
 //!    0.011 < @V2.00/55W 19.10.10 2807001⏎
 //!    1.204 < <01>

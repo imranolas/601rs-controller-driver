@@ -1,8 +1,8 @@
 //! Fidelity: replay what a host sent into the simulator and require the replies the real
 //! controller gave. Two sources:
 //! - every GMC capture in `testdata/captures/` (`g_*.txt`, port-monitor exports), and
-//! - every `gunnar` session log in `testdata/sessions/` (`*.log`, the `link::tap` transcripts
-//!   that `gunnar probe` and `gunnar check` write at the machine; see the README there).
+//! - every `mc601` session log in `testdata/sessions/` (`*.log`, the `link::tap` transcripts
+//!   that `mc601 probe` and `mc601 check` write at the machine; see the README there).
 //!
 //! Compared: every reply line except
 //! - `@X` status (timing-dependent; GMC's piled-up polls make pairing meaningless anyway),
@@ -371,9 +371,9 @@ fn simulator_answers_like_the_box_in_every_session_log() {
     );
 }
 
-/// A session log as `gunnar` writes it: connect, a couple of queries, a rejected parameter.
+/// A session log as `mc601` writes it: connect, a couple of queries, a rejected parameter.
 const SESSION: &str = "\
-# gunnar probe /dev/cu.usbserial-1420
+# mc601 probe /dev/cu.usbserial-1420
     0.001 > @I100⏎
     0.004 < @I100,0⏎
     0.005 > @V⏎

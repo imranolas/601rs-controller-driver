@@ -1,5 +1,5 @@
 {
-  "format": "gunnar-program",
+  "format": "601rs-program",
   "version": 1,
   "id": "calibration_2",
   "meta": {
@@ -254,7 +254,7 @@
       ],
       "version": 2
     },
-    "source": "gunnar calibrate sheet: the machine-and-head calibration sheet, in carriage millimetres (cut raw). Features sit roughly where drawn in testdata/calibration/calibration_2.html, placed with the profile's head offsets; the fit reads the exact steps from the run log."
+    "source": "mc601 calibrate sheet: the machine-and-head calibration sheet, in carriage millimetres (cut raw). Features sit roughly where drawn in testdata/calibration/calibration_2.html, placed with the profile's head offsets; the fit reads the exact steps from the run log."
   },
   "board": {
     "width_mm": 140.0,

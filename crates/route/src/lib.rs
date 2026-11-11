@@ -7,8 +7,8 @@
 //! before the opening, openings before outer edges, the clamp rule. So this is a sequential
 //! ordering problem with a choice of entry per job.
 //!
-//! The search is iterated local search, built from the parts of LKH that matter at this size
-//! (tens of cuts, not thousands):
+//! The search is iterated local search, using the ideas from LKH (K. Helsgaun's Lin–Kernighan
+//! heuristic) that matter at this size (tens of cuts, not thousands):
 //! - candidate lists: for each job, the jobs whose way in lies nearest its way out, and the
 //!   other way round;
 //! - moves that keep every cut's direction: carry a short run of cuts next to a near neighbour,

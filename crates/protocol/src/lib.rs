@@ -3,7 +3,7 @@
 //! Pure: no I/O, no clock, no threads. Everything here can be tested with byte slices.
 //! Built to the protocol description v1.00/00b (B. Lewetz, 20 Jul 2000), cited as
 //! [SPEC1 p.N]; behaviour proven by the GMC captures is cited as [CAP]. Semantics and
-//! citations: `GMC_Protocol_Reference.md` at the workspace root.
+//! citations: `PROTOCOL_REFERENCE.md` at the workspace root.
 
 pub mod command;
 pub mod decode;

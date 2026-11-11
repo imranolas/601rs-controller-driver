@@ -5,7 +5,7 @@
 //!   `$A` in mode 1 and a host wait while it settles, the path in mode 2, and a wait until the
 //!   controller is idle before anything else (protocol reference §4). The captures show it
 //!   working on this firmware; the golden tests (`tests/golden.rs`) hold it to them.
-//! - **One stream per cut** (the capabilities `gunnar check` stage 5 shows): the travel, the
+//! - **One stream per cut** (the capabilities `mc601 check` stage 5 shows): the travel, the
 //!   head down, the settle, the path and the head up as one mode-2 stream, the path sent
 //!   compactly. Settings change in mode 0 only when they must, so cuts with the same settings
 //!   follow one another in one stream; the runner decides how far ahead to send them (just in

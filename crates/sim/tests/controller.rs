@@ -192,7 +192,7 @@ fn pacing_lets_a_long_curve_through_a_small_buffer() {
 ///
 /// What this cannot show: a USB-serial adapter buffers bytes the host has already "sent" and
 /// holds back the controller's 0x03 (its latency timer, often 16 ms). Whether 0x03 is still in
-/// time with those is measured on the machine, by `gunnar check` stage 6.
+/// time with those is measured on the machine, by `mc601 check` stage 6.
 #[test]
 fn on_a_real_line_0x03_alone_keeps_the_buffer_from_overflowing() {
     let (mut p, sim) = start(

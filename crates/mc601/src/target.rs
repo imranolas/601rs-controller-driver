@@ -76,7 +76,7 @@ pub fn open(
 ) -> Res<(Controller<mode::Parameters>, String, Target)> {
     let log = Log::new(File::create(log_path).map_err(|e| format!("{}: {e}", log_path.display()))?);
     let log_path = log_path.to_path_buf();
-    log.note(&format!("gunnar {cmd} {port}"));
+    log.note(&format!("mc601 {cmd} {port}"));
 
     let (link, sim) = if is_sim_port(port) {
         // The machine as its profile describes it (SimConfig::default() is the placeholder

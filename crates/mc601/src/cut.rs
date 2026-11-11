@@ -1,4 +1,4 @@
-//! `gunnar run`: cut programs (PROGRAM_FORMAT.md) on the machine through the runner, one after
+//! `mc601 run`: cut programs (PROGRAM_FORMAT.md) on the machine through the runner, one after
 //! another, asking before each: GMC's own jobs (`testdata/programs`) and calibration sheets.
 //!
 //! Programs run streamed (the capabilities stages 5, 6 and 8 confirmed on the 601: compact
@@ -6,7 +6,7 @@
 //! settle, path and head up in mode 2, cut after cut, the stream breaking only where a setting
 //! must change in mode 0 (the start speed `#S` between the heads). `--gmc` runs GMC's form.
 //!
-//! A calibration sheet (`meta.calibration.frame` = `carriage`, from `gunnar calibrate sheet`)
+//! A calibration sheet (`meta.calibration.frame` = `carriage`, from `mc601 calibrate sheet`)
 //! is cut raw, with [`Profile::raw`]: its points are carriage positions, and no offset, trim or
 //! clamp border of the profile is applied. It is first checked against the profile's clamp
 //! border and soft limits all the same, placed where the profile thinks the heads are.
@@ -365,7 +365,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
                 log.note(&format!("finished {}", p.id));
                 if has_readings(p) && !op.is_sim() {
                     if op.confirm(
-                        "Take this sheet's readings now? (s = later, with `gunnar calibrate read`)",
+                        "Take this sheet's readings now? (s = later, with `mc601 calibrate read`)",
                     ) == Confirm::Go
                     {
                         crate::calibrate::read(&session.dir, &op)?;

@@ -1,4 +1,4 @@
-//! `gunnar probe`: read-only questions to the controller. Nothing moves and no parameter is
+//! `mc601 probe`: read-only questions to the controller. Nothing moves and no parameter is
 //! written. The one state change is a mode switch to 1 and straight back to 0, which answers
 //! whether the controller accepts mode changes without GMC's licence exchange.
 

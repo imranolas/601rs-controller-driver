@@ -1,6 +1,6 @@
-# Gunnar 601rs — Diagnostic & Calibration Tool Spec
+# 601rs — Diagnostic & Calibration Tool Spec
 
-**Companion to:** `GMC_Protocol_Reference.md` (the reference says *what the machine
+**Companion to:** `PROTOCOL_REFERENCE.md` (the reference says *what the machine
 does*; this says *how to methodically measure the rest and keep it calibrated*).
 
 **Purpose:** A single tool that (1) fills the remaining protocol/calibration unknowns

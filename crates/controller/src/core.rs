@@ -33,7 +33,7 @@ use crate::{ControllerError, Event, Result, StopKind};
 
 /// Inputs read as resync probes (`@I<n>`), in rotation. `@I` reads any logical input 0..255
 /// [SPEC p.15]; nothing on the 601 uses these (GMC reads 221; the machine maps 229–247
-/// [SPEC p.10; SYS]), so a stale reply can never look like the probe's. `gunnar probe` checks
+/// [SPEC p.10; SYS]), so a stale reply can never look like the probe's. `mc601 probe` checks
 /// that the firmware answers every one of them.
 pub const RESYNC_PROBE_INPUTS: std::ops::Range<u8> = 100..120;
 
@@ -226,7 +226,7 @@ impl HostCore {
     }
 
     /// Submit `command` with a probe right behind it, in one write, without waiting for its
-    /// reply: the reply-order check (`gunnar check`). Settling a `*NNN` and every resync rely
+    /// reply: the reply-order check (`mc601 check`). Settling a `*NNN` and every resync rely
     /// on the controller answering in the order it is sent. It completes like
     /// [`Self::request`], unless the probe's answer comes first: then with
     /// [`ControllerError::Overtaken`], and pairing is re-established before the next request.

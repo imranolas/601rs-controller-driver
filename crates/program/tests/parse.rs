@@ -59,3 +59,14 @@ fn rejects_wrong_version() {
         Err(ProgramError::UnsupportedVersion(2))
     ));
 }
+
+#[test]
+fn reads_the_formats_old_name_and_no_other() {
+    let old = REGULAR_MOUNT.replacen("601rs-program", "gunnar-program", 1);
+    assert!(Program::from_json(&old).is_ok());
+    let other = REGULAR_MOUNT.replacen("601rs-program", "some-program", 1);
+    assert!(matches!(
+        Program::from_json(&other),
+        Err(ProgramError::WrongFormat(_))
+    ));
+}

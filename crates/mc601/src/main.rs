@@ -1,10 +1,10 @@
-//! `gunnar`: drive, check and calibrate the Gunnar 601 from the terminal. `gunnar --help` and
-//! `gunnar <command> --help` say how.
+//! `mc601`: drive, check and calibrate the Gunnar 601 from the terminal. `mc601 --help` and
+//! `mc601 <command> --help` say how.
 //!
 //! Every command that talks to the machine (or to the simulator, with `--sim`) is a session: a
 //! dated folder under the data folder with its log of every byte, copies of the programs, and
 //! any readings and fits (`session`). The port comes from `--port`, else the remembered one
-//! (`gunnar config`), else the only USB-serial port plugged in (`config`).
+//! (`mc601 config`), else the only USB-serial port plugged in (`config`).
 
 mod calibrate;
 mod check;
@@ -35,12 +35,12 @@ use crate::target::Res;
 
 #[derive(Parser)]
 #[command(
-    name = "gunnar",
+    name = "mc601",
     version,
     about = "Drive, check and calibrate the Gunnar 601 mat cutter",
     after_help = "Each session that talks to the machine gets its own folder (log, programs, readings) \
-                  under the data folder: `gunnar logs` lists them. The port comes from --port, else \
-                  `gunnar config`, else the only USB-serial port plugged in."
+                  under the data folder: `mc601 logs` lists them. The port comes from --port, else \
+                  `mc601 config`, else the only USB-serial port plugged in."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -51,8 +51,8 @@ struct Cli {
 enum Command {
     /// Cut programs, asking before each
     #[command(
-        after_help = "Examples:\n  gunnar run job.json\n  gunnar run job.json --sim          \
-                            a dry run on the simulator\n  gunnar run calibration_2.json      a \
+        after_help = "Examples:\n  mc601 run job.json\n  mc601 run job.json --sim          \
+                            a dry run on the simulator\n  mc601 run calibration_2.json      a \
                             calibration sheet: cut raw, then its readings"
     )]
     Run(RunArgs),
@@ -64,14 +64,14 @@ enum Command {
     /// Ask the controller read-only questions; nothing moves (stage 1)
     Probe(MachineArgs),
     /// Staged hardware checks, asking before every step (stages 2 to 8)
-    #[command(after_help = "Examples:\n  gunnar check --stage 3\n  gunnar check --stage 2-8 --sim")]
+    #[command(after_help = "Examples:\n  mc601 check --stage 3\n  mc601 check --stage 2-8 --sim")]
     Check(CheckArgs),
     /// List the serial ports
     Ports,
     /// Show or change the remembered port and data folder
     #[command(
-        after_help = "Examples:\n  gunnar config\n  gunnar config --port /dev/cu.usbserial-2110\n  \
-                            gunnar config --data-dir ~/Gunnar"
+        after_help = "Examples:\n  mc601 config\n  mc601 config --port /dev/cu.usbserial-2110\n  \
+                            mc601 config --data-dir ~/mc601"
     )]
     Config(ConfigArgs),
     /// Print a GMC serial capture as host and controller lines
@@ -136,13 +136,13 @@ enum CalibrateCommand {
     },
     /// Fit calibration sessions together
     #[command(
-        after_help = "Examples:\n  gunnar calibrate fit --all\n  gunnar calibrate fit \
-                            \"~/Documents/Gunnar/sessions/2026-11-10 14.32.05 calibrate calibration_2\"\n  \
-                            gunnar calibrate fit --sheet calibration_1.json calibration_1.run.log \
+        after_help = "Examples:\n  mc601 calibrate fit --all\n  mc601 calibrate fit \
+                            \"~/Documents/mc601/sessions/2026-11-10 14.32.05 calibrate calibration_2\"\n  \
+                            mc601 calibrate fit --sheet calibration_1.json calibration_1.run.log \
                             calibration_1.readings.txt"
     )]
     Fit(FitArgs),
-    /// Write the sheet's program to a file, to look at or cut with `gunnar run`
+    /// Write the sheet's program to a file, to look at or cut with `mc601 run`
     Sheet {
         /// Where to write it
         out: PathBuf,
@@ -169,7 +169,7 @@ struct LogsArgs {
     /// How many to list
     #[arg(short = 'n', default_value_t = 20)]
     count: usize,
-    /// Print only the latest session's folder (`open "$(gunnar logs --last)"`)
+    /// Print only the latest session's folder (`open "$(mc601 logs --last)"`)
     #[arg(long)]
     last: bool,
 }
@@ -194,7 +194,7 @@ struct Stages(Vec<u8>);
 fn parse_stages(v: &str) -> Result<Stages, String> {
     const STAGES: std::ops::RangeInclusive<u8> = 2..=8;
     let bad =
-        || format!("give 2..8, a range such as 3-5, or all (stage 1 is `gunnar probe`), not {v:?}");
+        || format!("give 2..8, a range such as 3-5, or all (stage 1 is `mc601 probe`), not {v:?}");
     let stage = |s: &str| {
         s.parse()
             .ok()
@@ -264,7 +264,7 @@ fn open_session(
 fn require_terminal(port: &str, cmd: &str) -> Res<()> {
     if !target::is_sim_port(port) && !io::stdin().is_terminal() {
         return Err(format!(
-            "`gunnar {cmd}` drives the machine and asks before it moves: run it from a terminal \
+            "`mc601 {cmd}` drives the machine and asks before it moves: run it from a terminal \
              (stdin is not one)"
         )
         .into());
@@ -399,8 +399,8 @@ fn config(a: ConfigArgs) -> Res<bool> {
             .as_deref()
             .unwrap_or("not set: the only USB-serial port plugged in")
     );
-    let env = if std::env::var_os("GUNNAR_DATA").is_some() {
-        "  (from $GUNNAR_DATA)"
+    let env = if std::env::var_os("MC601_DATA").is_some() {
+        "  (from $MC601_DATA)"
     } else {
         ""
     };
@@ -433,7 +433,7 @@ fn ports() -> Res<bool> {
     Ok(true)
 }
 
-/// `gunnar probe` and `gunnar check`.
+/// `mc601 probe` and `mc601 check`.
 fn machine_check(
     cmd: &str,
     m: &MachineArgs,
@@ -558,19 +558,19 @@ mod tests {
     #[test]
     fn a_run_takes_programs_and_the_simulator() {
         let cli =
-            Cli::try_parse_from(["gunnar", "run", "a.json", "b.json", "--sim"]).expect("parses");
+            Cli::try_parse_from(["mc601", "run", "a.json", "b.json", "--sim"]).expect("parses");
         let Command::Run(a) = cli.command else {
             panic!("not run")
         };
         assert_eq!(a.programs.len(), 2);
         assert!(a.machine.sim);
         assert!(
-            Cli::try_parse_from(["gunnar", "run", "--sim"]).is_err(),
+            Cli::try_parse_from(["mc601", "run", "--sim"]).is_err(),
             "a program is required"
         );
-        assert!(Cli::try_parse_from(["gunnar", "run", "a.json", "--sim", "--port", "x"]).is_err());
+        assert!(Cli::try_parse_from(["mc601", "run", "a.json", "--sim", "--port", "x"]).is_err());
         let cli = Cli::try_parse_from([
-            "gunnar",
+            "mc601",
             "calibrate",
             "fit",
             "--sheet",

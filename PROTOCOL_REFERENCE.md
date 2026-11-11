@@ -11,9 +11,9 @@ this document and cites it rather than repeating it.
   from how GMC does things [GMC] and from its parameter file [GCF].
 - *(unverified)* marks a claim nothing backs yet. *(sim assumption)* marks behaviour the
   simulator assumes until a session on the machine settles it.
-- This driver has not yet run on the machine. §10 lists each open question with the
-  `gunnar probe` or `gunnar check` stage that answers it. Session logs from the machine go in
-  `testdata/sessions/` [SESSION], and this document is updated from them.
+- §10 lists each open question with the `mc601 probe` or `mc601 check` stage that answers it.
+  Session logs from the machine go in `testdata/sessions/` [SESSION], and this document is
+  updated from them.
 
 ### Citation key
 
@@ -23,8 +23,8 @@ this document and cites it rather than repeating it.
 | **[SPEC p.N]** | The same manual at v0.99/69, 18 Apr 2000, a draft. Cited only where it differs from SPEC1. |
 | **[RADIUS]** | A flowchart of the controller's radius slowdown ("Tangentialverzögerung, Steuerung Weissenberger") that comes with the manual. |
 | **[GMC]** | How GMC, Gunnar's own software for the 601, does it: learned from studying GMC 4.0 and 5.0, and not reproduced here. The captures were made with GMC 4.0.502.683. |
-| **[CAP name]** | GMC serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 export of a software port monitor, 1-second timestamps, no line settings). `gunnar capture <file>` decodes them. |
-| **[SESSION name]** | Logs written by `gunnar probe` / `gunnar check` at the machine, in `testdata/sessions/`. None yet. |
+| **[CAP name]** | GMC serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 export of a software port monitor, 1-second timestamps, no line settings). `mc601 capture <file>` decodes them. |
+| **[SESSION name]** | Logs written by `mc601` at the machine, in `testdata/sessions/` and `testdata/calibration/`. |
 | **[GCF]** | GMC's machine and tool parameters for the 601 (its `.gcf` file; not included). |
 | **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included). |
 | **[HELP …]** | GMC's user documentation: [HELP RN] its release notes, and **[HELP CA n]** page n of its Configuration Assistant (calibration of borders, overcuts, trims, the throttle, COE). |
@@ -44,7 +44,7 @@ this document and cites it rather than repeating it.
 
 - **Link:** RS-232 null-modem cable to the controller, a compact DOS PC running "CNC-Control"
   [SPEC1 p.5]. GMC used COM4 [GCF `LastSuccessfullyUsedComPort`]; on macOS or Linux, a USB-serial
-  adapter (`gunnar ports` lists them).
+  adapter (`mc601 ports` lists them).
 - **Encoding:** ASCII. Every command and reply ends with CR (0x0D); fields are separated by
   commas [SPEC1 p.6]. Distances and positions are signed 32-bit integers in µm or steps
   [SPEC1 p.7].
@@ -96,7 +96,7 @@ between replies or inside one: `⏎@X18⏎<01><01><04>` [SPEC1 p.7, p.23, p.28; 
 - **0x02/0x03 contradiction.** SPEC1's prose says 0x02 comes "about 200 characters before the
   usual XOFF" and 0x03 when there is room again [SPEC1 p.5]. Its own byte table [SPEC1 p.7], the
   v0.99 table [SPEC p.7] and GMC's USB code all say the opposite: **0x03 = almost full, 0x02 =
-  room again**. The driver follows the table; `gunnar check` stage 6 settles it.
+  room again**. The driver follows the table; `mc601 check` stage 6 settles it.
 - **Why the controller has its own XON/XOFF.** With a real XOFF, a Windows serial driver can send
   nothing, not even an abort, until XON comes. With these bytes the host itself holds back path
   data and can still send master commands such as `@B` [SPEC1 p.5, p.7].
@@ -213,7 +213,7 @@ driver ever saves.
 
 **`#C` registers** [SPEC1 p.18 overview, p.22–28 detail]. "When" says when GMC writes the
 register: once at **connect** [CAP g_init], before each **use** (a move, a cut, homing), or
-**never**. For the "never" ones the 601 runs on its own boot values, which `gunnar probe` reads.
+**never**. For the "never" ones the 601 runs on its own boot values, which `mc601 probe` reads.
 
 | Reg | Meaning | Page | GMC | When |
 |-----|---------|------|-----|------|
@@ -732,7 +732,7 @@ real inputs even though no switch has been spotted on the machine yet.
 and `$Hxy` (`$Hy`, `$Hx` on an F1) [GMC]. It never sends a
 homing direction (`#D`), and on the 601 it does not rewrite the home-switch inputs either:
 GMC does that only for other controller versions [GMC], and `g_init` holds no
-`#I` or `#D` write. Direction and switches are the controller's own configuration; `gunnar probe`
+`#I` or `#D` write. Direction and switches are the controller's own configuration; `mc601 probe`
 reads them (`&D`, `&I235`–`&I237`).
 
 **Home is the front-left corner, by the red button; the park is front-right.** GMC's machine
@@ -746,7 +746,7 @@ the front rail: home is front-left, +X to the right, +Y away from the operator, 
 PROGRAM_FORMAT §2 has it. The timing of `g_init` agrees: from the park, X's homing ran 34 s
 (about 148 cm at `#G10,1750`), Y's 5 s (about 20 cm to the front, then 7.5 mm back); then GMC
 ran the head up the left side to the back rail at 900 mm/s, and parked. That run is what an
-operator remembers as homing "up". `gunnar check` stage 3 asks which way Y moved, and confirms
+operator remembers as homing "up". `mc601 check` stage 3 asks which way Y moved, and confirms
 the park and +Y before anything else moves.
 
 **The run up the left side resets the head's V-groove switch.** The bevel head has a mechanical
@@ -766,7 +766,7 @@ profile allows, so Y's travel reaches at least 104.5 cm.
 A driver must do the same after homing, before the bevel head cuts: a head left in V-groove
 mode by an earlier job would cut at V-groove depth. Here `machine::vgroove_reset` holds GMC's
 steps (the profile's `vgroove_switch`), the runner sends them after every homing and then
-parks, and `gunnar check` stage 3 sends them with the operator watching.
+parks, and `mc601 check` stage 3 sends them with the operator watching.
 
 ### 4.2 Head selection and the side-by-side X offset
 
@@ -1083,10 +1083,10 @@ A Rust workspace in `crates/`, layered so each layer can be tested without the o
 | `controller` | A session with the controller. `HostCore` is a pure state machine (bytes in, outputs and deadlines out) that decides what is a reply (a `*NNN` while a command waits is settled by a probe, §2.6), tracks sync, mode, flow control, unreported faults and the stop latch. A driver runs it with a reader thread and two locks, writer before state. `Controller<M>` only offers the commands mode `M` accepts; `StopHandle` brakes from any thread. |
 | `sim` | `SimCore` speaks the whole protocol GMC uses; `spawn` runs it behind a link paced at the line rate, with fault injection. Every GMC capture and every session log in `testdata/sessions/` is replayed against it (`crates/sim/tests/fidelity.rs`). |
 | `program` | The program format (`PROGRAM_FORMAT.md`): types, parsing, validation. |
-| `machine` | The machine model, pure: the machine profile, board frame mm/deg → steps, each cut lowered to controller commands as one unit (head down only inside a cut), soft limits, the byte budget, the run time. Written: the profile, the mapping, the lowering in GMC's form (held to the captures by golden tests, `crates/machine/tests/golden.rs`) and in one stream per cut (each part a capability, off until `gunnar check` shows it), and the run-time and line-budget estimate. |
+| `machine` | The machine model, pure: the machine profile, board frame mm/deg → steps, each cut lowered to controller commands as one unit (head down only inside a cut), soft limits, the byte budget, the run time. Written: the profile, the mapping, the lowering in GMC's form (held to the captures by golden tests, `crates/machine/tests/golden.rs`) and in one stream per cut (each part a capability, off until `mc601 check` shows it), and the run-time and line-budget estimate. |
 | `runner` | Drives the cutter on a controller session: checks and writes the controller configuration the machine profile assumes, homes as GMC does, runs programs (progress per op; `pause` ops on the green button or the operator; pause and cancel between cuts; stop now from any thread) and manual operations (park, clamps), and after any failure brakes, resynchronises, clears the error and restores the safe state (heads up, clamps released), then requires homing. Tested against the simulator over a real session (`crates/runner/tests/runner.rs`). |
-| `route`, `nest`, `solvers` | The cut order and the nesting, and both as one WebAssembly module for the browser. |
-| `gunnar` | The command line: `ports`, `capture`, `probe`, `check`. |
+| `route`, `nest` | The cut order, and the nesting of mats onto sheets. |
+| `mc601` | The command line: `ports`, `capture`, `probe`, `check`. |
 
 What the session layer guarantees, and why:
 - **One reader** splits the incoming bytes into CR-terminated replies and the signal bytes

@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const FORMAT: &str = "gunnar-program";
+pub const FORMAT: &str = "601rs-program";
+/// The format's earlier name, still read so that programs written before the rename load.
+const OLD_FORMAT: &str = "gunnar-program";
 pub const VERSION: u32 = 1;
 
 pub type PointMm = [f64; 2];
@@ -167,7 +169,7 @@ impl Program {
     /// Parse and check identity (rule V1). Structural rules are enforced by the types.
     pub fn from_json(text: &str) -> Result<Program, ProgramError> {
         let p: Program = serde_json::from_str(text)?;
-        if p.format != FORMAT {
+        if p.format != FORMAT && p.format != OLD_FORMAT {
             return Err(ProgramError::WrongFormat(p.format));
         }
         if p.version != VERSION {

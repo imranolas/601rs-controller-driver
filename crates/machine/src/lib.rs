@@ -15,7 +15,7 @@
 //! - **The machine profile** (PROGRAM_FORMAT §8): scales (40 steps/mm, 8.333 steps/°), the board
 //!   origin, each head's offset (bevel −71.5, straight +6.2 mm in X), the soft-limit envelope,
 //!   the park position, speeds and accelerations, and the head and clamp output bits. The one
-//!   source of machine facts for every crate: `gunnar`'s checks, the simulator's settings, the
+//!   source of machine facts for every crate: `mc601`'s checks, the simulator's settings, the
 //!   compiler's travel model and park.
 //! - **Units:** board frame mm/deg → steps for the selected head; blade angles by the rules in
 //!   PROGRAM_FORMAT §4.2 and protocol reference §3.2, unwrapped so the rotary axis keeps counting
@@ -40,7 +40,7 @@
 //!   register ([`Profile::board_origin_mm`]). The oval comes with curves.
 //! - **One stream per cut,** the controller timing the head, the settle and the start (the
 //!   runner's "Who does what"). It needs firmware 2.00 to honour the v1.00 spec, so each part
-//!   is a capability in the profile, switched on once `gunnar check` has shown it on the box.
+//!   is a capability in the profile, switched on once `mc601 check` has shown it on the box.
 //!
 //! Depends on `protocol` (the commands) and `program` (the cuts), not on `controller`.
 //!
@@ -65,7 +65,7 @@
 //!
 //! - **Two speed entries,** not one rewritten: `L21` for travel and `L20` for cutting, both set
 //!   in mode 0 before the job. Each vector names its entry, so nothing changes mid-stream.
-//!   In-stream `G` is ambiguous in the spec ("for all subsequent moves"); `gunnar check` stage 5
+//!   In-stream `G` is ambiguous in the spec ("for all subsequent moves"); `mc601 check` stage 5
 //!   measures whether it applies in sequence or on receipt, and nothing should rely on it
 //!   before then.
 //! - **One ramp** for the stream: `#R` can only be set in mode 0. Use the cutting ramp; GMC's

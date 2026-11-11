@@ -278,7 +278,7 @@ pub enum Command {
     StreamDwellMs(u32),
     /// `G<entry>,<v>`: set a speed-table entry "for all subsequent moves with this entry"
     /// [SPEC1 p.34]. Whether that means in sequence with the stream or from the moment it
-    /// arrives is not settled; `gunnar check` stage 5 measures it.
+    /// arrives is not settled; `mc601 check` stage 5 measures it.
     StreamSetSpeed { entry: u8, value: u32 },
     /// `I<n>` / `I-<n>`: wait until input `n` is high / low. Undefined inputs don't wait.
     StreamWaitInput { input: u8, level: Level },

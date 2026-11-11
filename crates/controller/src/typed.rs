@@ -148,7 +148,7 @@ impl<M: ModeMarker> Controller<M> {
     }
 
     /// Send `command` and a probe in one write, without waiting between them, and return the
-    /// command's reply: the reply-order check `gunnar check` runs. Reply pairing relies on the
+    /// command's reply: the reply-order check `mc601 check` runs. Reply pairing relies on the
     /// controller answering in the order it is sent; if the probe is answered first, this
     /// fails with [`ControllerError::Overtaken`]. A rejection is returned as
     /// [`ControllerError::Rejected`], as by any other call. `command` must be one this mode

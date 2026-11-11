@@ -20,7 +20,7 @@ pub struct Profile {
     ///
     /// The 601's value is the front-left corner by the red button, where boards register
     /// against the stops; board +Y is machine +Y, away from the operator (protocol reference
-    /// §4.1; `gunnar check` stage 3 confirms it). GMC lays every new layout 2.1 cm in from the
+    /// §4.1; `mc601 check` stage 3 confirms it). GMC lays every new layout 2.1 cm in from the
     /// clamping system ([GCF] `MatLayX`/`MatLayY`): the straight edges of its layouts in the
     /// captures lie at X 601–602 and Y 761–762 steps (protocol reference §4.2), so the corner is
     /// 21 mm short of them. A window cut there landed where this puts it, to 0.2 mm (calipers,
@@ -69,7 +69,7 @@ pub struct Profile {
     /// The controller configuration everything here assumes.
     pub controller: ControllerConfig,
     pub homing: Homing,
-    /// What `gunnar check` has shown this controller does beyond GMC's form.
+    /// What `mc601 check` has shown this controller does beyond GMC's form.
     pub capabilities: Capabilities,
 }
 
@@ -134,7 +134,7 @@ pub struct Line {
 }
 
 /// Controller features the one-stream-per-cut form uses. Each needs firmware 2.00 to do what the
-/// v1.00 spec says, so each stays off until `gunnar check` stage 5 has shown it on the box
+/// v1.00 spec says, so each stays off until `mc601 check` stage 5 has shown it on the box
 /// (protocol reference §10). With none, a job is lowered in GMC's form.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,7 +298,7 @@ impl Profile {
             board_origin_mm: MachineMm([0.225, -0.275]),
             clamp_border_mm: [21.0, 21.0],
             // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP]. The
-            // offsets are fitted to testdata/calibration/calibration_1 (`gunnar calibrate`,
+            // offsets are fitted to testdata/calibration/calibration_1 (`mc601 calibrate`,
             // 2026-11-10, ±0.06 mm): GMC's were (-71.5, 1.9) and (6.2, 1.7).
             bevel: Head {
                 offset_mm: [-71.45, 2.03],
@@ -443,7 +443,7 @@ impl Profile {
             }),
             // The buffer's 0x03/0x02 flow control: GMC never enables it and doesn't expect it,
             // so GMC's form keeps it off; the one-stream form sends a cut's travel, head moves
-            // and path in one go, and needs it (gunnar check stage 6).
+            // and path in one go, and needs it (mc601 check stage 6).
             Setting::FlowControl(self.capabilities.streams()),
         ]
     }
@@ -468,7 +468,7 @@ impl Profile {
 
     /// This machine with none of its calibration: no board origin, no head offsets and no
     /// clamp border, so a program's points are where the carriage goes, in mm. For a
-    /// calibration sheet cut raw (`gunnar calibrate`): what it measures then can't inherit an
+    /// calibration sheet cut raw (`mc601 calibrate`): what it measures then can't inherit an
     /// earlier estimate. Everything else (scales, outputs, speeds, soft limits, park) stays.
     pub fn raw(&self) -> Profile {
         let mut p = self.clone();

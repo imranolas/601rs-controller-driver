@@ -1,8 +1,8 @@
-//! `gunnar calibrate`: the machine-and-head calibration, from raw cuts.
+//! `mc601 calibrate`: the machine-and-head calibration, from raw cuts.
 //!
 //! - `sheet FILE` writes the calibration sheet (`testdata/calibration/calibration_2.json`): a
 //!   straight strip block, a bevel window and four overcut combs on a small offcut, in carriage
-//!   coordinates, cut raw by `gunnar run` ([`machine::Profile::raw`]). The profile only places
+//!   coordinates, cut raw by `mc601 run` ([`machine::Profile::raw`]). The profile only places
 //!   the features roughly on the board; the fit never uses it.
 //! - `fit PROGRAM LOG READINGS [PROGRAM LOG READINGS ...]` reads each cut's carriage steps from
 //!   the run log (what was sent, whatever profile it was cut with) and the caliper readings, and
@@ -241,7 +241,7 @@ pub fn sheet_program(profile: &Profile) -> Program {
         version: program::VERSION,
         id: "calibration_2".to_owned(),
         meta: Some(json!({
-            "source": "gunnar calibrate sheet: the machine-and-head calibration sheet, in carriage \
+            "source": "mc601 calibrate sheet: the machine-and-head calibration sheet, in carriage \
                        millimetres (cut raw). Features sit roughly where drawn in \
                        testdata/calibration/calibration_2.html, placed with the profile's head \
                        offsets; the fit reads the exact steps from the run log.",
@@ -276,7 +276,7 @@ pub fn sheet(out: &Path) -> Res<bool> {
         .filter(|o| matches!(o, Op::Cut(_)))
         .count();
     println!(
-        "{}: {cuts} cuts in carriage coordinates, cut raw by `gunnar run`",
+        "{}: {cuts} cuts in carriage coordinates, cut raw by `mc601 run`",
         out.display()
     );
     Ok(true)
@@ -286,7 +286,7 @@ pub fn sheet(out: &Path) -> Res<bool> {
 const SHEET_FILE: &str = "calibration_2.json";
 const READINGS_FILE: &str = "readings.txt";
 
-/// `gunnar calibrate cut`: write the sheet into the session, cut it raw, take its readings.
+/// `mc601 calibrate cut`: write the sheet into the session, cut it raw, take its readings.
 pub fn cut(port: &str, session: &Session) -> Res<bool> {
     let file = session.dir.join(SHEET_FILE);
     let program = sheet_program(&Profile::gunnar_601());
@@ -902,7 +902,7 @@ pub fn latest_session(data: &Path) -> Res<PathBuf> {
         .next()
         .ok_or_else(|| {
             format!(
-                "no calibration session in {}: cut one with `gunnar calibrate cut`",
+                "no calibration session in {}: cut one with `mc601 calibrate cut`",
                 tidy(data)
             )
             .into()
@@ -942,7 +942,7 @@ fn face_note(m: &Value) -> &'static str {
 /// How far a reading may stray from its expected value before it is questioned, mm.
 const NEAR_MM: f64 = 1.5;
 
-/// `gunnar calibrate read`: take a session's readings one by one (each saved as it is given),
+/// `mc601 calibrate read`: take a session's readings one by one (each saved as it is given),
 /// then fit them and keep the fit and a fitted profile in the session.
 pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     let (_, program, log) = session_files(dir)?;
@@ -970,7 +970,7 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     );
     let save = |readings: &HashMap<String, f64>| -> Res<()> {
         let mut text = format!(
-            "# {} readings, {} (gunnar calibrate read)\n",
+            "# {} readings, {} (mc601 calibrate read)\n",
             program.id,
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         );
@@ -1108,7 +1108,7 @@ pub fn fit_sheets(sheets: &[Sheet]) -> Res<(Fit, Vec<CombReading>)> {
     Ok((fit_rows(&rows), combs))
 }
 
-/// `gunnar calibrate fit`: fit session folders and loose sheets together.
+/// `mc601 calibrate fit`: fit session folders and loose sheets together.
 pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>) -> Res<bool> {
     let profile = Profile::gunnar_601();
     let mut all = Vec::new();
@@ -1117,7 +1117,7 @@ pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>
         let readings = d.join(READINGS_FILE);
         if !readings.exists() {
             return Err(format!(
-                "{}: no readings yet: take them with `gunnar calibrate read`",
+                "{}: no readings yet: take them with `mc601 calibrate read`",
                 tidy(d)
             )
             .into());

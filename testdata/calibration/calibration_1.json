@@ -1,9 +1,9 @@
 {
-  "format": "gunnar-program",
+  "format": "601rs-program",
   "version": 1,
   "id": "calibration_1",
   "meta": {
-    "source": "Calibration pattern 1: per head a 30 mm square cut clockwise and one anticlockwise, plain lines on the design positions with overcuts long enough to free every corner. The readings listed under calibration are what `gunnar calibrate` fits: each head's offset, where each side of its slit lands, and its drag. Faces: B1 and the overruns were read on the back; B2's walls slope inward, so calipers in it found its sharp face edge.",
+    "source": "Calibration pattern 1: per head a 30 mm square cut clockwise and one anticlockwise, plain lines on the design positions with overcuts long enough to free every corner. The readings listed under calibration are what `mc601 calibrate` fits: each head's offset, where each side of its slit lands, and its drag. Faces: B1 and the overruns were read on the back; B2's walls slope inward, so calipers in it found its sharp face edge.",
     "calibration": {
       "version": 1,
       "measurements": [

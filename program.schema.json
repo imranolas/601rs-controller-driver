@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/gunnar-program/v1.schema.json",
+  "$id": "https://example.invalid/601rs-program/v1.schema.json",
   "title": "Gunnar 601rs program v1 (draft)",
   "description": "One compiled machine run for one board. See PROGRAM_FORMAT.md. Rules V4, V5, V7, V8 and V10 need code-level validation beyond this schema.",
   "type": "object",
@@ -15,7 +15,7 @@
   "additionalProperties": false,
   "properties": {
     "format": {
-      "const": "gunnar-program"
+      "const": "601rs-program"
     },
     "version": {
       "const": 1

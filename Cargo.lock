@@ -252,26 +252,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gunnar"
-version = "0.1.0"
-dependencies = [
- "anstream",
- "anstyle",
- "chrono",
- "clap",
- "controller",
- "ctrlc",
- "link",
- "machine",
- "program",
- "protocol",
- "runner",
- "serde",
- "serde_json",
- "sim",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -396,6 +376,26 @@ dependencies = [
  "serde_json",
  "sim",
  "thiserror",
+]
+
+[[package]]
+name = "mc601"
+version = "0.1.0"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "chrono",
+ "clap",
+ "controller",
+ "ctrlc",
+ "link",
+ "machine",
+ "program",
+ "protocol",
+ "runner",
+ "serde",
+ "serde_json",
+ "sim",
 ]
 
 [[package]]
@@ -622,15 +622,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "solvers"
-version = "0.1.0"
-dependencies = [
- "nest",
- "route",
- "thiserror",
-]
 
 [[package]]
 name = "strsim"

@@ -1,4 +1,4 @@
-# Gunnar 601rs — Program Format v1 (DRAFT)
+# 601rs — Program Format v1 (DRAFT)
 
 A **program** is one complete, compiled machine run for one board: everything the machine does
 between "board loaded" and "board released". Designers and the order queue **produce** programs.
@@ -15,7 +15,7 @@ Order ──▶ Design ──(compiler)──▶ PROGRAM ──(runner + machine
                      this document defines this boundary
 ```
 
-Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC_Protocol_Reference.md`](GMC_Protocol_Reference.md).
+Schema: [`program.schema.json`](program.schema.json). Protocol background: [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md).
 
 ---
 
@@ -52,7 +52,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 
 > **Registration:** the board's bottom-left corner sits in the machine's front-left corner, by
 > the red button, against the stops, and machine +Y is away from the operator, as here
-> (operator's account, GMC's code and captures: protocol reference §4.1; `gunnar check` stage 3
+> (operator's account, GMC's code and captures: protocol reference §4.1; `mc601 check` stage 3
 > confirmed it). The corner is at machine (0.225, −0.275) mm (Q1).
 >
 > **Clamps:** no cut may come within **21 mm of the left or front edge**, where the clamps hold
@@ -66,7 +66,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`GMC
 
 ```jsonc
 {
-  "format": "gunnar-program",
+  "format": "601rs-program",
   "version": 1,
   "id": "4c1e…",                       // unique; used by the queue and run logs
   "meta": { … },                       // free-form, ignored by the runner (order id, design, author)
@@ -224,7 +224,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 
 | # | Rule |
 |---|------|
-| V1 | `format` = `"gunnar-program"` and `version` is supported. |
+| V1 | `format` = `"601rs-program"` and `version` is supported. |
 | V2 | All required fields are present; units are in range (`speed_pct` 1–100, `head_settle_ms` 0–5000, thickness > 0). |
 | V3 | Every `path_mm` has ≥ 2 points, all finite numbers. |
 | V4 | No zero-length segments (consecutive points ≥ 0.01 mm apart). |
@@ -247,7 +247,7 @@ Bevel overcut ≈ 1.5 × tan 42° ≈ 1.35 mm at each end. The `.gcf` trims are 
 
 ```json
 {
-  "format": "gunnar-program",
+  "format": "601rs-program",
   "version": 1,
   "id": "example-regular-mount",
   "meta": { "source": "reconstruction of g_regular_mount capture" },
@@ -318,13 +318,13 @@ Keeping this separate is what makes programs portable across recalibrations and 
 
 | # | Question | Settled by |
 |---|----------|-----------|
-| Q1 | Board registration and Y direction (board frame → machine steps) | **Settled.** GMC's layouts sit 21 mm in from the corner (`MatLayX`/`MatLayY` 2.1 cm): the golden tests (`crates/machine/tests/golden.rs`) put their corner at machine (21.225, 20.725) mm, straight edges at X 601–602, Y 761–762 steps, so the registered corner is at machine (0.225, −0.275) mm. A 40 mm window cut 30 mm in from the stops (`testdata/calibration/window_40.json`) landed there to 0.2 mm, and cut again in this frame it came out exactly 21.00 mm nearer the stops than in the old one (calipers, 2026-11-10). The stop is the front-left corner by the red button and +Y is away from the operator (`gunnar check` stage 3) |
+| Q1 | Board registration and Y direction (board frame → machine steps) | **Settled.** GMC's layouts sit 21 mm in from the corner (`MatLayX`/`MatLayY` 2.1 cm): the golden tests (`crates/machine/tests/golden.rs`) put their corner at machine (21.225, 20.725) mm, straight edges at X 601–602, Y 761–762 steps, so the registered corner is at machine (0.225, −0.275) mm. A 40 mm window cut 30 mm in from the stops (`testdata/calibration/window_40.json`) landed there to 0.2 mm, and cut again in this frame it came out exactly 21.00 mm nearer the stops than in the old one (calipers, 2026-11-10). The stop is the front-left corner by the red button and +Y is away from the operator (`mc601 check` stage 3) |
 | Q2 | Bevel-side convention: left or right of travel? Does GMC cut openings clockwise? | Path direction in `g_regular_mount` / `g_multi_*` |
 | Q3 | Where exactly GMC applies the Front/Back Begin/End overcut trims | Test cuts, one trim at a time |
 | ~~Q4~~ | Blade-angle formula | **Settled.** In machine steps, Z = 8.333 × (direction of travel, clockwise from +X − head's `blade_mount_deg` + trim), truncated toward zero. Checked against `g_regular_mount`: a bevel edge travelling −Y gives (90 + 3) → 774; a straight edge travelling +X gives (0 − 180 + 0) → −1499 (protocol reference §3.2) |
 | Q5 | Does a run wait for the start button before cutting (GMC polls I221)? Per program or per queue item? | Product decision |
 | Q6 | Does `pause` with clamps engaged work for flipping, or do flips need `clamp none` first? | Product + hardware |
-| Q7 | Corners: does a turn-only vector inside a stream stop the carriage and turn the blade at a safe speed? GMC only sends one on its own (`L20,z…`), never mid-path. Until the machine confirms it, the machine model splits a corner into two strokes (head up, turn, head down) | Hardware check, to add to `gunnar check` stage 5 |
+| Q7 | Corners: does a turn-only vector inside a stream stop the carriage and turn the blade at a safe speed? GMC only sends one on its own (`L20,z…`), never mid-path. Until the machine confirms it, the machine model splits a corner into two strokes (head up, turn, head down) | Hardware check, to add to `mc601 check` stage 5 |
 | ~~Q8~~ | A separate blade trim for closed curves, as GMC has (`ZCorrection_Round`)? | **Settled:** `material.blade_angle_offset_deg.bevel_round` (§3), optional, so v1 stays v1 |
 | Q9 | Do the 2° turn limit, the blade-angle rule and GMC's overlap and run-out values cut clean on this machine? | Test cuts |
 

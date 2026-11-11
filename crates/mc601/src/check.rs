@@ -1,4 +1,4 @@
-//! `gunnar check`: staged hardware checks, each one confirmed by the operator first.
+//! `mc601 check`: staged hardware checks, each one confirmed by the operator first.
 //!
 //! | Stage | Moves | Answers |
 //! |-------|-------|---------|

@@ -74,7 +74,7 @@ impl Default for SimConfig {
             homing_done_signal: true,
             steps_per_mm: 40.0,
             start_counter_exhausted: false,
-            // The 601's own, as `gunnar probe` read them at power-on
+            // The 601's own, as `mc601 probe` read them at power-on
             // (testdata/sessions/gunnar-probe-1794320094.log).
             input_defs: [
                 (235, "379h,6,1"),

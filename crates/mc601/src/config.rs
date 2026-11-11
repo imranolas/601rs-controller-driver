@@ -1,7 +1,7 @@
-//! What `gunnar` remembers between runs: the machine's serial port and the data folder, in
-//! `~/.config/gunnar/config.json` (or `$XDG_CONFIG_HOME/gunnar/`, or the file `$GUNNAR_CONFIG`
-//! names). The data folder holds the sessions (`gunnar logs`); it defaults to
-//! `~/Documents/Gunnar`, and `$GUNNAR_DATA` overrides it.
+//! What `mc601` remembers between runs: the machine's serial port and the data folder, in
+//! `~/.config/mc601/config.json` (or `$XDG_CONFIG_HOME/mc601/`, or the file `$MC601_CONFIG`
+//! names). The data folder holds the sessions (`mc601 logs`); it defaults to
+//! `~/Documents/mc601`, and `$MC601_DATA` overrides it.
 
 use std::path::{Path, PathBuf};
 
@@ -25,12 +25,12 @@ fn home() -> PathBuf {
 
 /// The config file.
 pub fn path() -> PathBuf {
-    if let Some(p) = std::env::var_os("GUNNAR_CONFIG") {
+    if let Some(p) = std::env::var_os("MC601_CONFIG") {
         return p.into();
     }
     std::env::var_os("XDG_CONFIG_HOME")
         .map_or_else(|| home().join(".config"), PathBuf::from)
-        .join("gunnar")
+        .join("mc601")
         .join("config.json")
 }
 
@@ -57,12 +57,12 @@ impl Config {
         Ok(())
     }
 
-    /// Where sessions go: `$GUNNAR_DATA`, else the configured folder, else `~/Documents/Gunnar`.
+    /// Where sessions go: `$MC601_DATA`, else the configured folder, else `~/Documents/mc601`.
     pub fn data_dir(&self) -> PathBuf {
-        std::env::var_os("GUNNAR_DATA")
+        std::env::var_os("MC601_DATA")
             .map(PathBuf::from)
             .or_else(|| self.data_dir.clone())
-            .unwrap_or_else(|| home().join("Documents").join("Gunnar"))
+            .unwrap_or_else(|| home().join("Documents").join("mc601"))
     }
 }
 
@@ -113,7 +113,7 @@ pub fn resolve_port(
         }
         return Err(format!(
             "the configured port {p} isn't connected (ports: {}). Plug the adapter in, give \
-             --port, or change it with `gunnar config --port PORT`",
+             --port, or change it with `mc601 config --port PORT`",
             if shown.is_empty() {
                 "none".to_owned()
             } else {
@@ -130,7 +130,7 @@ pub fn resolve_port(
                 .to_owned(),
         ),
         many => Err(format!(
-            "several USB-serial ports ({}): give --port, or remember one with `gunnar config \
+            "several USB-serial ports ({}): give --port, or remember one with `mc601 config \
              --port PORT`",
             names(many)
         )),

@@ -31,7 +31,7 @@
 //!
 //! The UI only renders runner events and sends requests; it never touches the wire.
 //!
-//! **Until `gunnar check` has run on the box,** the runner uses GMC's form throughout: a cut at
+//! **Until `mc601 check` has run on the box,** the runner uses GMC's form throughout: a cut at
 //! a time, `@X` polled until idle, `$A` in mode 1, progress by finished cuts. Everything below
 //! that hands work to the controller waits for its check (protocol reference §10 lists what
 //! each assumes until then). After any stop, until stages 4 and 6 confirm that `@B` discards
@@ -46,7 +46,7 @@
 //! **The controller** owns timing relative to motion, and facts only it has. Handing it these
 //! jobs replaces GMC's choreography of mode switches and round trips (1,694 mode switches for
 //! 1,334 vectors in its captures) with one stream per cut, timed exactly, with the look-ahead
-//! intact. Each needs firmware 2.00 to honour what the v1.00 spec says; `gunnar check` stages
+//! intact. Each needs firmware 2.00 to honour what the v1.00 spec says; `mc601 check` stages
 //! 2, 5 and 6 test them, except `G` in the stream, which no stage covers yet.
 //!
 //! | Job | On the controller | What GMC does instead |
@@ -70,7 +70,7 @@
 //! - The `#C8` heartbeat: idle `@X` polling already shows the controller is alive.
 //! - Pacing the stream by asking `@H` (`controller::Config::stream_window_bytes`): the host
 //!   doing what `#C7` lets the controller do. Worth it only if the controller's 0x03 warning
-//!   reaches the host too late over the real link, which `gunnar check` stage 6 shows. Keep one
+//!   reaches the host too late over the real link, which `mc601 check` stage 6 shows. Keep one
 //!   of the two, not both.
 //!
 //! # Consequences of handing work to the controller
@@ -78,7 +78,7 @@
 //! - **A brake discards what is queued, safe state included.** Head-up queued as `A02` behind
 //!   a cut is thrown away with the cut, so the stop path restores the safe state itself:
 //!   brake, `clear_stop`, head up, clamps released. (That `@B` discards the queue is what
-//!   `gunnar check` stages 4 and 6 confirm on the machine.)
+//!   `mc601 check` stages 4 and 6 confirm on the machine.)
 //! - **Stream one cut at a time.** Whatever has been streamed runs unless braked, so the unit
 //!   of streaming is the unit of safety: travel head-up, orient the blade, head down, settle,
 //!   stroke, head up. The look-ahead works within a cut and the host decides between cuts,

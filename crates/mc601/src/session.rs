@@ -1,6 +1,6 @@
 //! A session: one probe, check, run or calibration, with everything it writes in one dated
 //! folder under the data folder's `sessions/`: the log, copies of the programs, the readings
-//! and the fit, and a `session.json` summary that `gunnar logs` lists.
+//! and the fit, and a `session.json` summary that `mc601 logs` lists.
 
 use std::path::{Path, PathBuf};
 
@@ -96,7 +96,7 @@ impl Session {
     }
 }
 
-/// A past session, as `gunnar logs` lists it.
+/// A past session, as `mc601 logs` lists it.
 pub struct Summary {
     pub dir: PathBuf,
     pub cmd: String,
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_session_lists_with_its_outcome() {
-        let data = std::env::temp_dir().join(format!("gunnar-session-test-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("mc601-session-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         let s = Session::create(&data, "run", "job", "sim", None).expect("created");
         assert!(s.log_path.starts_with(&s.dir));

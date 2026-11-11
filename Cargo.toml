@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
@@ -34,12 +34,3 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
-
-# The browser's WebAssembly module (solvers): one optimised unit, no unwinding, no symbols.
-# cargo build -p solvers --target wasm32-unknown-unknown --profile wasm
-[profile.wasm]
-inherits = "release"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
