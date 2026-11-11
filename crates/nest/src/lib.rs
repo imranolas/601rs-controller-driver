@@ -6,7 +6,9 @@
 //! Two problems:
 //! - [`Objective::BinPacking`]: every mat, on as few bins as possible, used in the order
 //!   given (offcuts first, then full sheets), and then as little of the last bin as possible,
-//!   so the offcuts are used up and the last sheet keeps the biggest piece (a full-width band);
+//!   so the offcuts are used up and the last sheet keeps the biggest piece (a full-width band
+//!   along its top);
+//!   and then the fewest strokes (the straight-head cuts of the mats' edges, `strokes`);
 //! - [`Objective::Knapsack`]: as much of the mats as fits (by profit, area by default) on the
 //!   bins given, e.g. the drop-outs of other mats' openings.
 //!
@@ -14,14 +16,18 @@
 //! <https://github.com/fontanf/packingsolver>): its tree search for guillotine cutting, an
 //! iterative beam search over partial layouts built one mat at a time. This is a reimplementation
 //! of that design for the cases above only (no defects, minimum waste, cut limits or kerf).
+//! Every layout is then rearranged within its strips and columns for fewer strokes.
 //!
 //! Lengths are integers in any unit (the UI uses tenths of a millimetre), so positions add up
-//! exactly. Coordinates of a [`Solution`] have their origin at a bin's top-left corner, x to the
-//! right and y down.
+//! exactly. Coordinates are the board frame's (PROGRAM_FORMAT §2): the origin at a bin's
+//! bottom-left corner, where the board registers by the left clamp, x to the right and y up,
+//! away from the operator. Layouts start from that corner: the first strip lies along the
+//! bottom edge.
 
 mod beam;
 mod check;
 mod guillotine;
+mod strokes;
 
 pub use check::{Violation, check};
 
@@ -248,6 +254,7 @@ pub fn solve(instance: &Instance, options: &Options) -> Result<Solution, Error> 
         p.item = original;
     }
     check(instance, &solution).map_err(Error::Bug)?;
+    strokes::rearrange(instance, &mut solution);
     Ok(solution)
 }
 

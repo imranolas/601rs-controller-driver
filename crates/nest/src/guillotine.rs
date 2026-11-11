@@ -122,6 +122,8 @@ pub(crate) struct Node {
     /// The area used up so far: everything left of the current strip, and the parts of the
     /// strip below the current row and left of the row's end.
     current_area: Area,
+    /// The strokes of the layout so far, once asked for (`usize::MAX` until then).
+    strokes: Cell<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,15 +147,28 @@ struct Scheme {
     total_bin_area: Area,
     /// The highest profit per area of any item type (for the knapsack bound).
     efficiency: f64,
-    /// The fewest bins all the items could fit in, by area, and the least area they could
-    /// use there: the bins before the last, and the last up to the first full-width line
-    /// past the items' area.
-    min_bins: usize,
-    min_area: Area,
     next_id: Cell<u64>,
 }
 
 impl Scheme {
+    /// The strokes the layout so far needs (`strokes`): in the scheme's frame, which turns the
+    /// layout but changes no count.
+    fn strokes(&self, n: &Node) -> usize {
+        if n.strokes.get() == usize::MAX {
+            let mut rects = Vec::new();
+            let mut node = Some(n);
+            while let Some(m) = node {
+                if let Some(p) = m.item {
+                    let (w, h) = self.items[p.item as usize].size(p.rotated);
+                    rects.push((m.front.bin as usize, p.x, p.y, w, h));
+                }
+                node = m.parent.as_deref();
+            }
+            n.strokes.set(crate::strokes::strokes(rects).0);
+        }
+        n.strokes.get()
+    }
+
     fn guide(&self, n: &Node) -> f64 {
         let (used, area, items, profit) = (
             n.current_area as f64,
@@ -288,6 +303,7 @@ impl Scheme {
             item_area: parent.item_area + it.area,
             profit: parent.profit + it.profit,
             current_area,
+            strokes: Cell::new(usize::MAX),
         })
     }
 }
@@ -308,6 +324,7 @@ impl beam::Scheme for Scheme {
             item_area: 0,
             profit: 0,
             current_area: 0,
+            strokes: Cell::new(usize::MAX),
         })
     }
 
@@ -372,11 +389,14 @@ impl beam::Scheme for Scheme {
         match self.objective {
             // Fewer bins; then, as many, less of the last one used: bins are used in order, so
             // with offcuts first this uses them up and leaves the biggest piece of the last
-            // sheet (a full-width band at its end).
+            // sheet (a full-width band at its end); then fewer strokes.
             Objective::BinPacking => {
                 self.is_leaf(n)
                     && best.is_none_or(|b| {
-                        !self.is_leaf(b) || (n.bins, n.current_area) < (b.bins, b.current_area)
+                        let (ours, theirs) = ((n.bins, n.current_area), (b.bins, b.current_area));
+                        !self.is_leaf(b)
+                            || ours < theirs
+                            || (ours == theirs && self.strokes(n) < self.strokes(b))
                     })
             }
             Objective::Knapsack => best.is_none_or(|b| n.profit > b.profit),
@@ -391,7 +411,8 @@ impl beam::Scheme for Scheme {
                 }
                 // Any completion uses at least all the item area plus the waste so far (waste
                 // never shrinks as items are added), so at least this many bins; and with as many
-                // as `best`, no less area.
+                // as `best`, no less area. One that could only tie is still searched, for its
+                // strokes.
                 let used = self.total_item_area + (n.current_area - n.item_area);
                 let mut need = used;
                 let mut bins = 0;
@@ -403,7 +424,7 @@ impl beam::Scheme for Scheme {
                     bins += 1;
                 }
                 bins > best.bins as usize
-                    || (bins == best.bins as usize && used >= best.current_area)
+                    || (bins == best.bins as usize && used > best.current_area)
             }
             Objective::Knapsack => self.profit_bound(n) <= best.profit,
         }
@@ -423,21 +444,16 @@ impl beam::Scheme for Scheme {
         dominates(&a.front, &b.front)
     }
 
+    /// Bin packing has no bound on strokes, so it searches on to the widest beam.
     fn is_optimal(&self, best: &N) -> bool {
-        match self.objective {
-            Objective::BinPacking => {
-                self.is_leaf(best)
-                    && (best.bins as usize, best.current_area) <= (self.min_bins, self.min_area)
-            }
-            Objective::Knapsack => best.profit >= self.total_profit,
-        }
+        self.objective == Objective::Knapsack && best.profit >= self.total_profit
     }
 }
 
 /// Lay out the items (the instance is valid, and its item types distinct).
 pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
     // The scheme's frame is the real one turned: x ↔ y, so its vertical first stage is our
-    // horizontal one. A real bin's top trim is the scheme's left, its left trim the scheme's
+    // horizontal one. A real bin's bottom trim is the scheme's left, its left trim the scheme's
     // bottom.
     let mut bins: Vec<Bin> = instance
         .bin_sequence()
@@ -445,8 +461,8 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
         .enumerate()
         .map(|(index, b)| Bin {
             index,
-            x0: b.trims.top,
-            x_end: b.h - b.trims.bottom,
+            x0: b.trims.bottom,
+            x_end: b.h - b.trims.top,
             y0: b.trims.left,
             y_end: b.w - b.trims.right,
             area_before: 0,
@@ -476,21 +492,6 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
         })
         .collect();
     let total_item_area: Area = items.iter().map(|i| i.area * i.copies as Area).sum();
-    let mut min_bins = 0;
-    let mut covered = 0;
-    while covered < total_item_area && min_bins < bins.len() {
-        covered += bins[min_bins].area();
-        min_bins += 1;
-    }
-    // In the last bin, the items left over need whole lines across it.
-    let min_area = match min_bins.checked_sub(1).map(|k| bins[k]) {
-        Some(last) => {
-            let height = (last.y_end - last.y0) as Area;
-            let left = total_item_area - last.area_before;
-            last.area_before + (left + height - 1) / height * height
-        }
-        None => 0,
-    };
     let guides = match instance.objective {
         Objective::BinPacking => [Guide::AreaRatio, Guide::WasteRate],
         Objective::Knapsack => [Guide::AreaPerProfit, Guide::AreaPerProfitPerItem],
@@ -510,8 +511,6 @@ pub(crate) fn solve(instance: &Instance, options: &Options) -> Solution {
                 .iter()
                 .map(|i| i.profit as f64 / i.area as f64)
                 .fold(0.0, f64::max),
-            min_bins,
-            min_area,
             next_id: Cell::new(1),
             bins: bins.clone(),
             items: items.clone(),

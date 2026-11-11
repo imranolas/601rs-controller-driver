@@ -48,9 +48,9 @@ pub fn check(instance: &Instance, solution: &Solution) -> Result<(), Violation> 
         }
         let t = bin.trims;
         if p.x < t.left
-            || p.y < t.top
+            || p.y < t.bottom
             || p.x + p.w > bin.w - t.right
-            || p.y + p.h > bin.h - t.bottom
+            || p.y + p.h > bin.h - t.top
         {
             return Err(Violation::Outside(k));
         }

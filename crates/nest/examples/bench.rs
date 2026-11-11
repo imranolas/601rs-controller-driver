@@ -133,15 +133,15 @@ fn main() {
             let (ours, gain) = match (c.instance.objective, c.reference_bins) {
                 (Objective::BinPacking, Some(ref_extent)) if c.leftovers => {
                     let last = s.placements.iter().map(|p| p.bin).max().unwrap_or(0);
-                    let top = c.instance.bin_sequence()[last].trims.top;
+                    let bottom = c.instance.bin_sequence()[last].trims.bottom;
                     let extent = s
                         .placements
                         .iter()
                         .filter(|p| p.bin == last)
                         .map(|p| p.y + p.h)
                         .max()
-                        .unwrap_or(top)
-                        - top;
+                        .unwrap_or(bottom)
+                        - bottom;
                     let ours = last as i64 * 100_000 + extent as i64;
                     (ours, (c.reference * 100_000 + ref_extent) - ours)
                 }

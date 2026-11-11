@@ -350,3 +350,112 @@ fn too_many_item_types_are_refused() {
     };
     assert_eq!(solve(&inst, &Options::default()), Err(Error::TooMany));
 }
+
+fn strokes_of(s: &Solution) -> usize {
+    crate::strokes::strokes(s.placements.iter().map(|p| (p.bin, p.x, p.y, p.w, p.h))).0
+}
+
+#[test]
+fn edges_on_one_line_that_touch_are_one_stroke() {
+    // Two mats side by side: top and bottom run across both, and they share the middle edge.
+    let side_by_side = [(0, 0, 0, 100, 200), (0, 100, 0, 100, 200)];
+    assert_eq!(crate::strokes::strokes(side_by_side), (5, 1000));
+    // On different sheets nothing is shared.
+    let apart = [(0, 0, 0, 100, 200), (1, 100, 0, 100, 200)];
+    assert_eq!(crate::strokes::strokes(apart).0, 8);
+}
+
+/// Two columns whose stacks are the other way round: turning one over lines up the edge
+/// between the mats, one stroke instead of two, and the sheet's leftover stays.
+#[test]
+fn rearranging_lines_up_the_stacks() {
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![sheet(1000, 1000, 0, 1)],
+        items: vec![item(100, 200, 2, false), item(100, 100, 2, false)],
+    };
+    let mut s = layout(
+        &inst,
+        vec![
+            place(0, 0, 0, 0, 100, 200),
+            place(1, 0, 0, 200, 100, 100),
+            place(1, 0, 100, 0, 100, 100),
+            place(0, 0, 100, 100, 100, 200),
+        ],
+    );
+    assert_eq!(check(&inst, &s), Ok(()));
+    assert_eq!(strokes_of(&s), 7);
+    crate::strokes::rearrange(&inst, &mut s);
+    assert_eq!(check(&inst, &s), Ok(()));
+    assert_eq!(strokes_of(&s), 6, "{:?}", s.placements);
+    let bottom = s.placements.iter().map(|p| p.y + p.h).max();
+    assert_eq!(bottom, Some(300), "the same depth of sheet used");
+}
+
+/// The search prefers, of equally good layouts, the one with fewer strokes, and the
+/// rearranging never loses one.
+#[test]
+fn fewer_strokes_without_more_sheets() {
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![sheet(8150, 10150, 50, 4)],
+        items: vec![
+            item(3000, 4000, 3, true),
+            item(3000, 2000, 4, true),
+            item(2500, 2000, 3, true),
+        ],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    assert_eq!(check(&inst, &s), Ok(()));
+    let mut again = s.clone();
+    crate::strokes::rearrange(&inst, &mut again);
+    assert!(strokes_of(&again) <= strokes_of(&s));
+    assert_eq!(s.bins_used, area_bound(&inst));
+}
+
+/// Rearranging starts from the layout as it is, so a second time changes nothing.
+#[test]
+fn rearranging_twice_changes_nothing() {
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![sheet(8150, 10150, 50, 6)],
+        items: vec![
+            item(3050, 4060, 4, true),
+            item(5000, 4000, 5, true),
+            item(2970, 4200, 6, true),
+            item(2500, 2000, 1, true),
+        ],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    let mut again = s.clone();
+    crate::strokes::rearrange(&inst, &mut again);
+    assert_eq!(strokes_of(&again), strokes_of(&s));
+}
+
+/// Layouts start at the bottom-left corner (the left clamp's, where boards register) and the
+/// leftover is a band along the top: trims of different sizes show which edge is which.
+#[test]
+fn layouts_start_at_the_bottom_left() {
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![Bin {
+            w: 1000,
+            h: 1000,
+            trims: Trims {
+                left: 20,
+                right: 5,
+                top: 50,
+                bottom: 10,
+            },
+            copies: 1,
+        }],
+        items: vec![item(300, 200, 5, false)],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    assert_eq!(check(&inst, &s), Ok(()));
+    let min = |f: fn(&Placement) -> Len| s.placements.iter().map(f).min();
+    assert_eq!(min(|p| p.x), Some(20));
+    assert_eq!(min(|p| p.y), Some(10));
+    let top = s.placements.iter().map(|p| p.y + p.h).max();
+    assert_eq!(top, Some(410), "two strips of 200 from the bottom trim");
+}
