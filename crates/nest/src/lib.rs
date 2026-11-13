@@ -27,6 +27,7 @@
 mod beam;
 mod check;
 mod guillotine;
+pub mod irregular;
 mod strokes;
 
 pub use check::{Violation, check};
