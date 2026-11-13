@@ -8,6 +8,7 @@ fn item(w: Len, h: Len, copies: u32, rotate: bool) -> Item {
         copies,
         profit: None,
         rotate,
+        group: None,
     }
 }
 
@@ -252,4 +253,25 @@ fn guillotine_blocks_never_cost_area() {
     let mixed = solve(&instance, &options(64)).expect("a layout");
     let free = solve_free(&instance, &options(64)).expect("a layout");
     assert!(mixed.profit >= free.profit);
+}
+
+#[test]
+fn a_drop_out_goes_to_the_earlier_job() {
+    let mounts = vec![
+        Item {
+            group: Some(4),
+            ..item(100, 80, 1, true)
+        },
+        Item {
+            group: Some(2),
+            ..item(80, 100, 1, true)
+        },
+    ];
+    let s = solve(
+        &knapsack(vec![bin(oval(150, 150, 64), 1)], mounts),
+        &options(16),
+    )
+    .expect("a layout");
+    assert_eq!(s.placements.len(), 1, "one fits");
+    assert_eq!(s.placements[0].item, 1);
 }

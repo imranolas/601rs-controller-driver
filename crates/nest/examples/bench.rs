@@ -66,6 +66,7 @@ fn parse(line: &str) -> Option<Case> {
                 copies: v[2] as u32,
                 profit: None,
                 rotate: v[3] == 1,
+                group: None,
             }
         })
         .collect();

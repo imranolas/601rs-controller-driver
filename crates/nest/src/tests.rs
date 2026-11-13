@@ -21,6 +21,7 @@ fn item(w: Len, h: Len, copies: u32, rotate: bool) -> Item {
         copies,
         profit: None,
         rotate,
+        group: None,
     }
 }
 
@@ -458,4 +459,159 @@ fn layouts_start_at_the_bottom_left() {
     assert_eq!(min(|p| p.y), Some(10));
     let top = s.placements.iter().map(|p| p.y + p.h).max();
     assert_eq!(top, Some(410), "two strips of 200 from the bottom trim");
+}
+
+fn grouped(w: Len, h: Len, copies: u32, rotate: bool, group: u32) -> Item {
+    Item {
+        group: Some(group),
+        ..item(w, h, copies, rotate)
+    }
+}
+
+/// Each bin's groups, in bin order.
+fn groups_by_bin(inst: &Instance, s: &Solution) -> Vec<Vec<Option<u32>>> {
+    let mut by_bin = vec![Vec::new(); s.bins_used];
+    for p in &s.placements {
+        by_bin[p.bin].push(inst.items[p.item].group);
+    }
+    for g in &mut by_bin {
+        g.sort_unstable();
+        g.dedup();
+    }
+    by_bin
+}
+
+#[test]
+fn interchangeable_mats_trade_places_to_keep_each_job_on_one_sheet() {
+    // Each 300 × 100 sheet takes a 200 × 100 and a 100 × 100, and nothing else fits two sheets.
+    // Job 0's large mat is given turned, and comes first among the large mats but last among
+    // the small ones, so copies taken in order would split both jobs.
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![sheet(300, 100, 0, 2)],
+        items: vec![
+            grouped(100, 200, 1, true, 0),
+            grouped(200, 100, 1, true, 1),
+            grouped(100, 100, 1, false, 1),
+            grouped(100, 100, 1, false, 0),
+        ],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    assert_eq!(check(&inst, &s), Ok(()));
+    assert_eq!(
+        groups_by_bin(&inst, &s),
+        vec![vec![Some(0)], vec![Some(1)]],
+        "each job on its own sheet, the first queued on the first"
+    );
+}
+
+#[test]
+fn the_earlier_job_goes_on_the_earlier_sheet() {
+    let inst = Instance {
+        objective: Objective::BinPacking,
+        bins: vec![sheet(200, 100, 0, 2)],
+        items: vec![
+            grouped(100, 100, 2, false, 7),
+            grouped(100, 100, 2, false, 3),
+        ],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    assert_eq!(check(&inst, &s), Ok(()));
+    assert_eq!(groups_by_bin(&inst, &s), vec![vec![Some(3)], vec![Some(7)]]);
+}
+
+#[test]
+fn a_knapsack_tie_goes_to_the_earlier_job() {
+    let inst = Instance {
+        objective: Objective::Knapsack,
+        bins: vec![sheet(100, 100, 0, 1)],
+        items: vec![
+            grouped(100, 100, 1, false, 1),
+            grouped(100, 100, 1, false, 0),
+        ],
+    };
+    let s = solve(&inst, &Options::default()).expect("solves");
+    assert_eq!(check(&inst, &s), Ok(()));
+    assert_eq!(s.placements.len(), 1);
+    assert_eq!(s.placements[0].item, 1);
+}
+
+/// Groups only choose which copy goes where: the rectangles are those of the layout without
+/// them, and no more groups are split.
+#[test]
+fn groups_move_no_mat() {
+    let sizes = [
+        (2030, 2540),
+        (2790, 3560),
+        (4060, 5080),
+        (3000, 4000),
+        (2500, 2000),
+    ];
+    let mut seed = 5;
+    for _ in 0..20 {
+        let mut items = Vec::new();
+        for job in 0..2 + rng(&mut seed) as u32 % 8 {
+            for _ in 0..1 + rng(&mut seed) % 3 {
+                let (w, h) = sizes[rng(&mut seed) as usize % sizes.len()];
+                let it = item(w, h, 1 + rng(&mut seed) as u32 % 2, true);
+                // Some mats are in no job.
+                let group = (rng(&mut seed) % 5 != 0).then_some(job);
+                items.push(Item { group, ..it });
+            }
+        }
+        let copies = items.iter().map(|i| i.copies).sum();
+        let with = Instance {
+            objective: Objective::BinPacking,
+            bins: vec![sheet(8150, 10150, 50, copies)],
+            items,
+        };
+        let without = Instance {
+            items: with
+                .items
+                .iter()
+                .map(|i| Item {
+                    group: None,
+                    ..i.clone()
+                })
+                .collect(),
+            ..with.clone()
+        };
+        let options = Options {
+            max_width: 16,
+            ..Options::default()
+        };
+        let (a, b) = (
+            solve(&with, &options).expect("solves"),
+            solve(&without, &options).expect("solves"),
+        );
+        assert_eq!(check(&with, &a), Ok(()));
+        let rects = |s: &Solution| {
+            let mut r: Vec<_> = s
+                .placements
+                .iter()
+                .map(|p| (p.bin, p.x, p.y, p.w, p.h))
+                .collect();
+            r.sort_unstable();
+            r
+        };
+        assert_eq!(rects(&a), rects(&b));
+        let splits = |s: &Solution| {
+            let mut on: Vec<(u32, usize)> = s
+                .placements
+                .iter()
+                .filter_map(|p| with.items[p.item].group.map(|g| (g, p.bin)))
+                .collect();
+            on.sort_unstable();
+            on.dedup();
+            let mut split: Vec<u32> = on
+                .windows(2)
+                .filter(|w| w[0].0 == w[1].0)
+                .map(|w| w[0].0)
+                .collect();
+            split.dedup();
+            split.len()
+        };
+        assert!(splits(&a) <= splits(&b));
+        assert_eq!(solve(&with, &options), Ok(a));
+    }
 }

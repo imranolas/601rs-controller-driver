@@ -12,6 +12,12 @@
 //! - [`Objective::Knapsack`]: as much of the mats as fits (by profit, area by default) on the
 //!   bins given, e.g. the drop-outs of other mats' openings.
 //!
+//! In both, mats may belong to groups ([`Item::group`]: a job's mats, numbered in queue
+//! order), which only ever break ties: once a layout is found, its interchangeable mats (the
+//! same size, turn and profit) trade places for the fewest groups split over bins, then the
+//! earlier groups first (`groups`). No mat moves, so the bins, the leftover and the strokes
+//! are those the layout has without groups.
+//!
 //! The method is PackingSolver's (Florian Fontan, MIT licence,
 //! <https://github.com/fontanf/packingsolver>): its tree search for guillotine cutting, an
 //! iterative beam search over partial layouts built one mat at a time. This is a reimplementation
@@ -26,6 +32,7 @@
 
 mod beam;
 mod check;
+mod groups;
 mod guillotine;
 pub mod irregular;
 mod strokes;
@@ -56,7 +63,7 @@ pub struct Bin {
 }
 
 /// An item type: a mat's footprint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Item {
     pub w: Len,
     pub h: Len,
@@ -65,14 +72,23 @@ pub struct Item {
     pub profit: Option<Area>,
     /// May be turned a quarter turn.
     pub rotate: bool,
+    /// The group it belongs to (a job), numbered in queue order: the lower, the earlier.
+    /// Groups only ever break ties ([`Objective`]).
+    pub group: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Objective {
     /// Every item, on as few bins as possible, used in order (offcuts first, then full
-    /// sheets); then as little of the last bin as possible.
+    /// sheets); then as little of the last bin as possible; then the fewest strokes. Groups
+    /// then choose which copies of interchangeable items go where: the fewest groups with items
+    /// on more than one bin, then the earlier groups on the earlier bins (the bins' lowest
+    /// groups compared in order).
     BinPacking,
-    /// As much profit as fits on the bins.
+    /// As much profit as fits on the bins. Groups then choose which copies of interchangeable
+    /// items go where, and which are left out: the fewest groups with items on more than one
+    /// bin, then the earlier groups placed first (each group's profit, compared in group
+    /// order).
     Knapsack,
 }
 
@@ -203,48 +219,35 @@ impl Instance {
     }
 }
 
-/// Lay out the items. Identical item types are searched as one (no symmetric layouts), and
-/// every layout is checked ([`check`]) before it is returned.
+/// Lay out the items. Interchangeable item types (the same size, turn and profit, whatever
+/// their groups) are searched as one, so there are no symmetric layouts; which copy goes where
+/// is settled afterwards, for the groups (`groups`). Every layout is checked ([`check`])
+/// before it is returned.
 pub fn solve(instance: &Instance, options: &Options) -> Result<Solution, Error> {
     instance.validate()?;
-    // Merge identical item types: same size, turn and profit.
-    let mut groups: Vec<(Item, Vec<usize>)> = Vec::new();
-    for (k, it) in instance.items.iter().enumerate() {
-        if it.copies == 0 {
-            continue;
-        }
-        let profit = Some(instance.profit(k));
-        match groups.iter_mut().find(|(g, _)| {
-            g.rotate == it.rotate
-                && g.profit == profit
-                && ((g.w, g.h) == (it.w, it.h) || (it.rotate && (g.w, g.h) == (it.h, it.w)))
-        }) {
-            Some((g, members)) => {
-                g.copies += it.copies;
-                members.push(k);
-            }
-            None => groups.push((
-                Item {
-                    profit,
-                    ..it.clone()
-                },
-                vec![k],
-            )),
-        }
-    }
-    if groups.iter().any(|(g, _)| g.copies > u16::MAX as u32) {
+    let kinds = groups::kinds(&instance.items, |k| instance.profit(k));
+    let copies = |kind: &[usize]| kind.iter().map(|&k| instance.items[k].copies).sum::<u32>();
+    if kinds.iter().any(|kind| copies(kind) > u16::MAX as u32) {
         return Err(Error::TooMany);
     }
     let merged = Instance {
-        items: groups.iter().map(|(g, _)| g.clone()).collect(),
+        items: kinds
+            .iter()
+            .map(|kind| Item {
+                copies: copies(kind),
+                profit: Some(instance.profit(kind[0])),
+                group: None,
+                ..instance.items[kind[0]].clone()
+            })
+            .collect(),
         ..instance.clone()
     };
     let mut solution = guillotine::solve(&merged, options);
-    // Back to the original item types, copies in order.
-    let mut next: Vec<(usize, u32)> = vec![(0, 0); groups.len()];
+    // Back to the original item types, copies in order; then, with groups, the copies chosen.
+    let mut next: Vec<(usize, u32)> = vec![(0, 0); kinds.len()];
     for p in &mut solution.placements {
         let g = p.item;
-        let (members, slot) = (&groups[g].1, &mut next[g]);
+        let (members, slot) = (&kinds[g], &mut next[g]);
         while instance.items[members[slot.0]].copies == slot.1 {
             *slot = (slot.0 + 1, 0);
         }
@@ -254,6 +257,12 @@ pub fn solve(instance: &Instance, options: &Options) -> Result<Solution, Error> 
         p.rotated = (p.w, p.h) != (it.w, it.h);
         p.item = original;
     }
+    groups::relabel(
+        instance.objective,
+        &instance.items,
+        |k| instance.profit(k),
+        &mut solution.placements,
+    );
     check(instance, &solution).map_err(Error::Bug)?;
     strokes::rearrange(instance, &mut solution);
     Ok(solution)

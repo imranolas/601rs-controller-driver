@@ -62,6 +62,7 @@ fn mat(w: Len, h: Len, copies: u32) -> Item {
         copies,
         profit: None,
         rotate: true,
+        group: None,
     }
 }
 

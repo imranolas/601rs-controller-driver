@@ -154,7 +154,9 @@ impl Instance {
 /// Lay out the items, one bin at a time (for knapsack the smallest first, as the irregular
 /// search does; for bin packing in order): guillotine layouts in each bin's straight parts and
 /// the irregular nester round the rest, unless the irregular nester alone places more
-/// (`irregular/mixed.rs`). Every layout is checked ([`check`]) before it is returned. Bin packing that
+/// (`irregular/mixed.rs`). Groups ([`Item::group`]) then choose which copies of
+/// interchangeable mounts go where, as for [`crate::solve`]; the irregular search itself knows
+/// nothing of them. Every layout is checked ([`check`]) before it is returned. Bin packing that
 /// can't place every mount is refused: with the first item that fits in no bin on its own,
 /// or if each fits but the bins run out, the first item left out.
 pub fn solve(instance: &Instance, options: &Options) -> Result<Solution, Error> {
@@ -234,6 +236,12 @@ fn finish(instance: &Instance, mut solution: Solution) -> Result<Solution, Error
             return Err(Error::TooBig(k));
         }
     }
+    crate::groups::relabel(
+        instance.objective,
+        &instance.items,
+        |k| instance.profit(k),
+        &mut solution.placements,
+    );
     check(instance, &solution).map_err(Error::Bug)?;
     Ok(solution)
 }
