@@ -33,8 +33,11 @@ macOS, Linux or Windows. `mc601` is its command line.
   every move, asking before each step and logging every byte both ways.
 - **Calibrates the heads** (`mc601 calibrate`): cut one sheet, type in what the ruler says, and a
   least-squares fit of the blade model gives each head's offset, drag and slit.
-- **Orders the cuts** ([`route`](crates/route)) so the head travels least within the cutting
-  rules, and **nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs.
+- **Nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs, and
+  **compiles a laid-out sheet into a program** ([`compiler`](crates/compiler)): each cut placed
+  by the calibrated blade model and run on past its corners, ovals with their overlap, shared
+  edges cut once, in the order ([`route`](crates/route)) that travels least within the cutting
+  rules, clear of the clamp pads or with the operator told which to turn.
 - **Simulates the controller** ([`sim`](crates/sim)), held to the real thing: `cargo test`
   replays every serial capture of GMC and every session log from the machine against it.
 
@@ -57,7 +60,8 @@ rest.
 
 ```mermaid
 flowchart LR
-    mats["mats + board type"] --> nestc["nest"] --> routec["route"] --> comp["compiler<br/>(planned)"] --> prog["program<br/>(JSON)"]
+    mats["mats + board type"] --> nestc["nest"] --> comp["compiler"] --> prog["program<br/>(JSON)"]
+    comp --> routec["route"]
     prog --> run["runner"]
     cli["mc601"] --> run
     run --> mach["machine"]
@@ -74,7 +78,7 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 |-------|--------------|
 | `station` *(planned)* | Service on the machine PC: the queue, an HTTP API and events for apps; starts cuts only from the machine's own screen. |
 | [`nest`](crates/nest) | Places mats on sheets of their board type, and in other mats' drop-outs: three-stage guillotine layouts by iterative beam search (after PackingSolver), offcuts before full sheets, every layout checked before it is returned. |
-| `compiler` *(planned)* | Geometry and a profile in, a program out: flattening, overcut, overlap, cut order. |
+| [`compiler`](crates/compiler) | A laid-out sheet to a program: rectangles and ovals placed by the blade model (fitted from calibration, GMC's overcuts), run on past their corners, ovals flattened with their overlap and run-out, shared edges one stroke, an order that keeps the clamp rules and travels least, the clamp pads to turn. Checked against GMC's own jobs. |
 | `profile` *(planned)* | Board types: speed, trims, overcut, overlap, start speed. |
 | [`route`](crates/route) | The cut order: which cut next and which way round, so the head travels least, within the cutting rules. |
 | [`runner`](crates/runner) | Drives the cutter: configures the controller, homes, runs programs and manual moves; pause, cancel, holds, stop now, a safe state after any failure, events. |

@@ -1,0 +1,25 @@
+[package]
+name = "compiler"
+description = "A laid-out sheet to a program: each contour's cuts placed by the blade model, run on past their corners, ovals flattened with their overlap, shared edges cut once, in an order that keeps the clamps' rules and travels least."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+machine.workspace = true
+program.workspace = true
+route.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+controller.workspace = true
+nest.workspace = true
+runner.workspace = true
+sim.workspace = true
+
+[lints]
+workspace = true

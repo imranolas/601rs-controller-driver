@@ -20,6 +20,7 @@ runner = { path = "crates/runner" }
 sim = { path = "crates/sim" }
 route = { path = "crates/route" }
 nest = { path = "crates/nest" }
+compiler = { path = "crates/compiler" }
 
 # external
 serde = { version = "1", features = ["derive"] }
