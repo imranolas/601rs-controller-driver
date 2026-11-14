@@ -138,6 +138,13 @@ impl<M: ModeMarker> Controller<M> {
         M::MODE
     }
 
+    /// The controller is known to be in this mode: it acknowledged switching to it, and no
+    /// switch has been cut short since. After a stop or a timeout during a switch it may be in
+    /// another, so switch again (to this mode too) before relying on it.
+    pub fn mode_confirmed(&self) -> bool {
+        self.session.mode() == Some(M::MODE)
+    }
+
     /// `@X`
     pub fn status(&mut self) -> Result<Status> {
         let cmd = Command::Status;

@@ -83,10 +83,16 @@ impl Session {
         self.ctl.as_ref().map(|c| any!(c, c => c.mode()))
     }
 
-    /// Switch to `to` (`@M<n>`), unless already there. The controller refuses while anything
-    /// moves (`*028`); a refused switch leaves the session in its old mode.
+    /// Switch to `to` (`@M<n>`), unless known to be there already: after a switch cut short (a
+    /// stop as a cut starts) the controller may be in either mode, so the switch is made again.
+    /// The controller refuses while anything moves (`*028`); a refused switch leaves the session
+    /// in its old mode.
     pub(crate) fn switch(&mut self, to: Mode) -> R<()> {
-        if self.mode() == Some(to) {
+        let confirmed = self
+            .ctl
+            .as_ref()
+            .is_some_and(|c| any!(c, c => c.mode_confirmed()));
+        if self.mode() == Some(to) && confirmed {
             return Ok(());
         }
         let ctl = self.ctl.take().ok_or(Cause::Lost)?;

@@ -260,6 +260,65 @@ fn a_pause_op_holds_until_the_operator_resumes() {
     assert_eq!(result.expect("runs"), Outcome::Finished);
 }
 
+/// A stop from another thread the moment a cut starts lands as the runner switches the
+/// controller to mode 2 for the cut, and cuts the switch short (Bevel, 14 Nov: four times in
+/// four). The controller had switched; the runner, believing mode 1, sent the heads up and
+/// clamps released (`$A02`) unswitched, and the controller refused it (`*001`), leaving the
+/// clamps closed and the stop reported unsafe.
+#[test]
+fn a_stop_as_a_cut_starts_is_made_safe() {
+    for op in [1, 2, 3] {
+        let (mut r, sim) = ready();
+        let stop = r.stop_handle();
+        let (result, _) = run_with(&mut r, &fixture("g_multi_C10"), |e, _| {
+            if matches!(e, Event::Op { index, .. } if *index == op) {
+                let stop = stop.clone();
+                std::thread::spawn(move || stop.brake().expect("brakes"));
+            }
+        });
+        assert!(
+            matches!(result, Err(Error::Failed { safe: true, .. })),
+            "op {op}: {result:?}"
+        );
+        let s = sim.snapshot();
+        assert_eq!(
+            s.outputs,
+            r.profile().neutral_outputs,
+            "op {op}: heads up, clamps released"
+        );
+        assert!(!s.moving);
+    }
+}
+
+/// A second stop while the first is being made safe (an operator pressing again) latched
+/// again, and the heads-up-clamps-released after it failed on the latch: still made safe.
+#[test]
+fn a_second_stop_while_making_safe_is_made_safe_too() {
+    for second_ms in [2, 20] {
+        let (mut r, sim) = ready();
+        let stop = r.stop_handle();
+        let (result, _) = run_with(&mut r, &fixture("g_multi_C10"), |e, _| {
+            if matches!(e, Event::Op { index: 2, .. }) {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    stop.brake().expect("brakes");
+                    std::thread::sleep(Duration::from_millis(second_ms));
+                    stop.brake().expect("brakes again");
+                });
+            }
+        });
+        assert!(
+            matches!(result, Err(Error::Failed { safe: true, .. })),
+            "{second_ms} ms: {result:?}"
+        );
+        // The second stop may land after the run has ended: let it, then look.
+        std::thread::sleep(Duration::from_millis(50));
+        let s = sim.snapshot();
+        assert_eq!(s.outputs, r.profile().neutral_outputs, "{second_ms} ms");
+        assert!(!s.moving);
+    }
+}
+
 #[test]
 fn stop_now_makes_the_machine_safe_and_wants_homing() {
     let (mut r, sim) = ready();

@@ -539,14 +539,29 @@ impl Runner {
     /// latch (a reply abandoned by the stop is discarded, not paired), clear any error (`@@`,
     /// as GMC does after errors: a controller in an error state refuses mode switches), wait
     /// for standstill, then heads up and clamps released. Whether that last step worked.
+    ///
+    /// Another stop while this runs (an operator pressing again because nothing seemed to
+    /// happen) latches again, and everything after it would fail on the latch: so it starts
+    /// over, a few times at most. A failure that isn't a stop is reported at once.
     fn make_safe(&mut self) -> bool {
-        let _ = self.stop.brake();
-        let _ = self.session.clear_stop();
-        let _ = self.session.clear_error();
-        let _ = self.session.wait_idle(Duration::from_secs(30));
-        self.set_outputs(self.profile.neutral_outputs).is_ok()
+        for _ in 0..SAFE_ATTEMPTS {
+            let _ = self.stop.brake();
+            let _ = self.session.clear_stop();
+            let _ = self.session.clear_error();
+            let _ = self.session.wait_idle(Duration::from_secs(30));
+            if self.set_outputs(self.profile.neutral_outputs).is_ok() {
+                return true;
+            }
+            if !self.stop.is_stopped() {
+                return false;
+            }
+        }
+        false
     }
 }
+
+/// How many times making the machine safe starts over when stops keep coming.
+const SAFE_ATTEMPTS: usize = 5;
 
 impl Drop for Runner {
     /// Dropped mid-run (a panic on the runner's thread): make the machine safe.

@@ -140,7 +140,8 @@ pub struct HostCore {
     in_sync: bool,
     stopped: bool,
     closed: Option<String>,
-    /// The mode the controller last acknowledged switching to.
+    /// The mode the controller last acknowledged switching to; none before the first, or once
+    /// a switch was cut short (a stop, a timeout) and may or may not have happened.
     mode: Option<Mode>,
     /// Between 0x03 (buffer almost full) and 0x02 (room again).
     flow_paused: bool,
@@ -541,6 +542,20 @@ impl HostCore {
     /// so they are reported as faults: reported twice is better than lost.
     fn abandon(&mut self, pending: Pending, error: ControllerError, out: &mut Vec<Output>) {
         let id = pending.id();
+        // A mode switch cut short may or may not have happened: the mode is unknown until the
+        // next switch is acknowledged. (A stop just after `@M2` went out left the host believing
+        // mode 1 while the controller was in mode 2, and refusing `$A` there with `*001`.)
+        if let Pending::Request {
+            command: Command::SetMode(_),
+            ..
+        }
+        | Pending::Settling {
+            command: Command::SetMode(_),
+            ..
+        } = &pending
+        {
+            self.mode = None;
+        }
         if let Pending::Settling { first, more, .. } = pending {
             for (code, line) in first.into_iter().chain(more) {
                 self.unsolicited(line, Some(code), out);
@@ -687,6 +702,26 @@ mod tests {
         let out = core.receive(b"\r");
         assert_eq!(completed(&out).map(|(i, _)| i), Some(id));
         assert_eq!(core.mode(), Some(Mode::Cutting));
+    }
+
+    /// What a stop as a cut starts met (Bevel, 14 Nov): a stop cut short `@M2`, which the
+    /// controller carried out, and the host went on believing the old mode. Cut short, a switch
+    /// leaves the mode unknown; refused, it leaves the old mode standing.
+    #[test]
+    fn a_mode_switch_cut_short_leaves_the_mode_unknown() {
+        let (mut core, now) = synced();
+        core.request(&Command::SetMode(Mode::Jog), now)
+            .expect("send");
+        core.receive(b"\r");
+        assert_eq!(core.mode(), Some(Mode::Jog));
+        core.request(&Command::SetMode(Mode::Cutting), now)
+            .expect("send");
+        let (_, out) = core.stop(StopKind::Brake);
+        assert!(matches!(
+            completed(&out),
+            Some((_, Err(ControllerError::Stopped)))
+        ));
+        assert_eq!(core.mode(), None, "it may be in mode 1 or 2");
     }
 
     /// A `*NNN` with a command waiting: nothing completes until the probe written behind it
