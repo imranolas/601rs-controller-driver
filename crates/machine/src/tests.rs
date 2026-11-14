@@ -235,7 +235,7 @@ fn cuts_run_to_the_edge_but_not_over_a_pad_unless_it_is_turned() {
         "{err:?}"
     );
     assert_eq!(
-        cuts_turning(&["L2", "F1"], &[&up]).turned_clamps(),
+        cuts_turning(&["L2", "F1"], &[&up]).turned_at_start(),
         ["L2", "F1"]
     );
 }
@@ -611,4 +611,89 @@ fn errors_say_where() {
         .to_string(),
         "the park: the carriage would reach (1.0, -2.0) mm, outside the machine's limits"
     );
+}
+
+#[test]
+fn pads_are_turned_only_with_the_clamps_open() {
+    let p = p601();
+    let clamp_turning = |side: ClampSide, turned: &[&str]| {
+        Op::Clamp(Clamp {
+            id: None,
+            label: None,
+            side,
+            turned: turned.iter().map(|s| (*s).to_owned()).collect(),
+        })
+    };
+    let across = vec![[50.0, 5.0], [150.0, 5.0]];
+    let cut_across = || {
+        Op::Cut(Cut {
+            id: None,
+            label: None,
+            head: HeadKind::Bevel,
+            path_mm: across.clone(),
+            speed_pct: None,
+        })
+    };
+    let pause = || {
+        Op::Pause(program::Pause {
+            id: None,
+            label: None,
+            message: "Turn F1 out of the way".to_owned(),
+            resume: program::Resume::StartButton,
+        })
+    };
+    let clear = cut(HeadKind::Bevel, &[[50.0, 50.0], [150.0, 50.0]]);
+    // Turning F1 while the board is clamped: refused.
+    let err = lower(
+        &program(
+            1.5,
+            vec![
+                clamp(),
+                clear.clone(),
+                clamp_turning(ClampSide::Left, &["F1"]),
+                cut_across(),
+            ],
+        ),
+        &p,
+    )
+    .expect_err("turned while clamped");
+    assert!(
+        matches!(err, Error::TurnedWhileClamped { op: 2 }),
+        "{err:?}"
+    );
+    // Released, but no pause for the operator: refused too.
+    let err = lower(
+        &program(
+            1.5,
+            vec![
+                clamp(),
+                clear.clone(),
+                clamp_turning(ClampSide::None, &[]),
+                clamp_turning(ClampSide::Left, &["F1"]),
+                cut_across(),
+            ],
+        ),
+        &p,
+    )
+    .expect_err("no pause");
+    assert!(
+        matches!(err, Error::TurnedWhileClamped { op: 3 }),
+        "{err:?}"
+    );
+    // Released, a pause, then clamped again with F1 turned.
+    lower(
+        &program(
+            1.5,
+            vec![
+                clamp(),
+                clear,
+                clamp_turning(ClampSide::None, &[]),
+                pause(),
+                clamp_turning(ClampSide::Left, &["F1"]),
+                cut_across(),
+            ],
+        ),
+        &p,
+    )
+    .expect("turned with the clamps open");
 }

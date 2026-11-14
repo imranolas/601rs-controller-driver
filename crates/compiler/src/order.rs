@@ -27,17 +27,19 @@ fn inside(a: [f64; 4], b: [f64; 4]) -> bool {
 /// rule runs from a cut to one further left or inside, so the rules can't go round in a circle.
 /// (Top and right before bottom and left can: on a grid, the line between two rows is the top
 /// of one row and the bottom of the other, and crosses the line between two columns.)
+/// The clean-up comes after every other cut.
 pub(crate) fn precedence(sheet: &Sheet, cuts: &[Planned]) -> Vec<Vec<usize>> {
     let boxes: Vec<[f64; 4]> = sheet.contours.iter().map(|c| c.box_mm).collect();
     let n = cuts.len();
     let mut after = vec![Vec::new(); n];
     for (j, outer) in cuts.iter().enumerate() {
         for (i, inner) in cuts.iter().enumerate() {
-            let within = inner.parts.iter().any(|p| {
+            let within = inner.parts.iter().filter_map(|p| p.contour()).any(|p| {
                 outer
                     .parts
                     .iter()
-                    .any(|q| inside(boxes[p.contour], boxes[q.contour]))
+                    .filter_map(|q| q.contour())
+                    .any(|q| inside(boxes[p], boxes[q]))
             });
             if i != j && within {
                 after[j].push(i);
@@ -48,17 +50,18 @@ pub(crate) fn precedence(sheet: &Sheet, cuts: &[Planned]) -> Vec<Vec<usize>> {
         if c.keep != Keep::In || c.shape != Shape::Rect {
             continue;
         }
-        let edge = |cut: &Planned, sides: &[Side]| {
-            cut.parts
-                .iter()
-                .any(|p| p.contour == k && sides.contains(&p.side))
-        };
+        let edge = |cut: &Planned, sides: &[Side]| cut.parts.iter().any(|p| p.is_edge(k, sides));
         let others: Vec<usize> = (0..n)
             .filter(|&i| edge(&cuts[i], &[Side::Top, Side::Right, Side::Bottom]))
             .collect();
         for j in (0..n).filter(|&j| edge(&cuts[j], &[Side::Left])) {
             after[j].extend(others.iter().copied().filter(|&i| i != j));
         }
+    }
+    // The clean-up after every piece's cut, so the board is whole while they are cut.
+    let cleanup = |c: &Planned| c.parts.iter().all(|p| matches!(p, Part::Cleanup { .. }));
+    for j in (0..n).filter(|&j| cleanup(&cuts[j])) {
+        after[j].extend((0..n).filter(|&i| !cleanup(&cuts[i])));
     }
     after
 }
@@ -94,9 +97,12 @@ pub(crate) fn ops(
             .filter(|&w| reachable(profile, c.head, &c.ways[w]))
             .collect();
         if reach.is_empty() {
-            return Err(Error::OutOfReach {
-                contour: c.parts[0].contour,
-                head: c.head,
+            return Err(match c.parts[0] {
+                Part::Edge { contour, .. } => Error::OutOfReach {
+                    contour,
+                    head: c.head,
+                },
+                Part::Cleanup { line } => Error::CleanupOutOfReach { line },
             });
         }
         let clear: Vec<usize> = reach
@@ -204,16 +210,19 @@ fn reachable(profile: &Profile, head: Head, path: &[[f64; 2]]) -> bool {
 }
 
 /// What a cut cuts, for the run log: each contour's id (or `c` and its number) and the side,
-/// `+` between the contours sharing it.
+/// or `cleanup` and the line's number; `+` between the parts sharing it.
 fn id(sheet: &Sheet, parts: &[Part]) -> String {
     let names: Vec<String> = parts
         .iter()
-        .map(|p| {
-            let c = &sheet.contours[p.contour];
-            let contour =
-                c.id.clone()
-                    .unwrap_or_else(|| format!("c{}", p.contour + 1));
-            format!("{contour}.{}", p.side.name())
+        .map(|&p| match p {
+            Part::Edge { contour, side } => {
+                let name = sheet.contours[contour]
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("c{}", contour + 1));
+                format!("{name}.{}", side.name())
+            }
+            Part::Cleanup { line } => format!("cleanup.{}", line + 1),
         })
         .collect();
     names.join("+")
@@ -223,16 +232,18 @@ fn id(sheet: &Sheet, parts: &[Part]) -> String {
 fn label(sheet: &Sheet, parts: &[Part]) -> String {
     let names: Vec<String> = parts
         .iter()
-        .map(|p| {
-            let c = &sheet.contours[p.contour];
-            let contour = c
-                .label
-                .clone()
-                .unwrap_or_else(|| format!("contour {}", p.contour + 1));
-            match p.side {
-                Side::Round => contour,
-                side => format!("{contour}, {} edge", side.name()),
+        .map(|&p| match p {
+            Part::Edge { contour, side } => {
+                let name = sheet.contours[contour]
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("contour {}", contour + 1));
+                match side {
+                    Side::Round => name,
+                    side => format!("{name}, {} edge", side.name()),
+                }
             }
+            Part::Cleanup { line } => format!("clean-up line {}", line + 1),
         })
         .collect();
     names.join(" / ")

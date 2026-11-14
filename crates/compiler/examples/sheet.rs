@@ -115,6 +115,7 @@ fn sheets(rng: &mut Rng, mats: u32) -> Vec<Sheet> {
                     },
                 },
                 contours,
+                cleanup: Vec::new(),
             }
         })
         .collect()

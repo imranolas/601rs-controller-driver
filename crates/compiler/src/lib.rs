@@ -26,6 +26,10 @@
 //!   clamp pads, if any do; the pads the rest run over are turned out of the way
 //!   ([`Compiled::turned`], the `clamp` op's `turned`), as long as one still holds the board.
 //!   Both clamps close on a board wider than half the table.
+//! - **Clean-up** ([`Sheet::cleanup`], if the caller wants the waste worth keeping freed): the
+//!   lines that free it, less the stretches the pieces' edges already cut, after every piece
+//!   cut. Their pads are turned with the rest, before the run. Each line is cut as far as the
+//!   straight head reaches; the rest is left to break by hand ([`Compiled::uncut`]).
 //!
 //! The program is then lowered by the machine model, which checks it against the machine, and
 //! its run time estimated.
@@ -52,6 +56,13 @@ pub struct Sheet {
     pub board: Board,
     pub material: Material,
     pub contours: Vec<Contour>,
+    /// The clean-up, if the waste worth keeping is to be cut free: lines along the layout's
+    /// guillotine cuts, `[x0, y0, x1, y1]` each, along x or y. They are cut after every piece,
+    /// with the straight head; a stretch along a piece's straight edge is cut once, with the
+    /// edge. Their cuts' ids are `cleanup.` and the line's number, so the estimate can tell their
+    /// time apart. Empty: no clean-up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup: Vec<[f64; 4]>,
 }
 
 /// One contour to cut, in the board frame, face down.
@@ -134,6 +145,10 @@ pub struct Compiled {
     pub turned: Vec<String>,
     /// The pads still holding the board once those are turned: at least one.
     pub held_by: Vec<String>,
+    /// The stretches of the clean-up lines the straight head can't reach, `[x0, y0, x1, y1]`
+    /// each, left for the operator to break by hand: on the 601 it stops 6.2 mm short of the
+    /// board's left edge and 2.2 mm short of its front.
+    pub uncut: Vec<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -144,6 +159,8 @@ pub enum Error {
     Empty,
     #[error("contour {contour}: its box isn't a box on the board")]
     BadContour { contour: usize },
+    #[error("clean-up line {line}: it isn't a line along x or y on the board")]
+    BadCleanup { line: usize },
     #[error("contour {contour}: an oval this small can't take the line's offset")]
     TooSmall { contour: usize },
     #[error(
@@ -155,6 +172,8 @@ pub enum Error {
     Vgroove { contour: usize },
     #[error("contour {contour}: the {} head can't reach it on this machine: it is too near the board's edge", head_name(*head))]
     OutOfReach { contour: usize, head: Head },
+    #[error("clean-up line {line}: the straight head can't reach it on this machine")]
+    CleanupOutOfReach { line: usize },
     #[error("the cuts can't be put in order: {0}")]
     Route(#[from] route::Error),
     #[error("the program doesn't fit the machine: {0}")]
@@ -199,13 +218,17 @@ pub fn compile(
             }
         }
     }
-    cuts.extend(edges::strokes(
+    let (strokes, cleanup_cuts, uncut) = edges::straight(
         &sheet.contours,
         &straight,
+        &sheet.cleanup,
         &blade.straight,
         thickness,
         options.straight_away_from_clamps,
-    ));
+        reach(profile, Head::Straight),
+    );
+    cuts.extend(strokes);
+    cuts.extend(cleanup_cuts);
     let order::Pads {
         ops,
         turned,
@@ -227,7 +250,27 @@ pub fn compile(
         estimate,
         turned,
         held_by,
+        uncut,
     })
+}
+
+/// How far inside its limits the carriage stays, mm, so rounding to motor steps can't take it out
+/// (the route's check allows half as much).
+const REACH_MARGIN_MM: f64 = 0.1;
+
+/// Where on the board `head` can cut, `[x0, y0, x1, y1]`: where the carriage stays inside the
+/// machine's limits (V10).
+fn reach(profile: &Profile, head: Head) -> [f64; 4] {
+    let [dx, dy] = profile.head(head).offset_mm;
+    let machine::MachineMm([ox, oy]) = profile.board_origin_mm;
+    let e = &profile.envelope_mm;
+    let m = REACH_MARGIN_MM;
+    [
+        e.x[0] + dx - ox + m,
+        e.y[0] + dy - oy + m,
+        e.x[1] + dx - ox - m,
+        e.y[1] + dy - oy - m,
+    ]
 }
 
 /// How far a contour may reach past the board's edge: GMC's own layouts sit a fraction of a
@@ -256,14 +299,41 @@ fn check(sheet: &Sheet) -> Result<(), Error> {
             return Err(Error::BadContour { contour: k });
         }
     }
+    for (k, &[x0, y0, x1, y1]) in sheet.cleanup.iter().enumerate() {
+        let on =
+            |v: f64, size: f64| v.is_finite() && v >= -OVER_EDGE_MM && v <= size + OVER_EDGE_MM;
+        let (along_x, along_y) = ((y0 - y1).abs() <= 1e-6, (x0 - x1).abs() <= 1e-6);
+        let ok = on(x0, b.width_mm)
+            && on(x1, b.width_mm)
+            && on(y0, b.height_mm)
+            && on(y1, b.height_mm)
+            && along_x != along_y;
+        if !ok {
+            return Err(Error::BadCleanup { line: k });
+        }
+    }
     Ok(())
 }
 
-/// What one cut cuts: an edge of a contour.
+/// What one cut cuts: an edge of a contour, or a stretch of a clean-up line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Part {
-    pub contour: usize,
-    pub side: Side,
+pub(crate) enum Part {
+    Edge { contour: usize, side: Side },
+    Cleanup { line: usize },
+}
+
+impl Part {
+    pub(crate) fn contour(self) -> Option<usize> {
+        match self {
+            Part::Edge { contour, .. } => Some(contour),
+            Part::Cleanup { .. } => None,
+        }
+    }
+
+    /// An edge of contour `k` on one of `sides`.
+    pub(crate) fn is_edge(self, k: usize, sides: &[Side]) -> bool {
+        matches!(self, Part::Edge { contour, side } if contour == k && sides.contains(&side))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

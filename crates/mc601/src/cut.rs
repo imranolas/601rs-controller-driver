@@ -292,7 +292,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
     for l in &loaded {
         let p = &l.program;
         let b = &p.board;
-        let turned = p.turned_clamps();
+        let turned = p.turned_at_start();
         let turn = if turned.is_empty() {
             String::new()
         } else {

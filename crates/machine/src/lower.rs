@@ -145,6 +145,14 @@ pub enum Error {
         point: usize,
         pad: String,
     },
+    /// A `clamp` op changes which pads are turned while the board is clamped: a pad is turned
+    /// by hand with the clamps open, so the clamps must be released (`side: none`) and a
+    /// `pause` given to the operator first.
+    #[error(
+        "op {op}: the clamp pads can only be turned with the clamps open: release them and \
+         pause first"
+    )]
+    TurnedWhileClamped { op: usize },
     /// A `clamp` op turns a pad the profile doesn't have.
     #[error("op {op}: there is no clamp {pad} to turn")]
     UnknownClamp { op: usize, pad: String },
@@ -185,6 +193,8 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
         out: Vec::new(),
         pads: profile.pads(),
         turned: Vec::new(),
+        released: true,
+        may_turn: true,
     };
     let r = profile.radius_slowdown;
     for (reg, v) in [
@@ -225,7 +235,16 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                         pad: pad.clone(),
                     });
                 }
+                // Pads are turned by hand with the clamps open: before the program, or in a pause
+                // after a release.
+                let same = c.turned.len() == l.turned.len()
+                    && c.turned.iter().all(|t| l.turned.contains(t));
+                if !same && !l.may_turn {
+                    return Err(Error::TurnedWhileClamped { op: i });
+                }
                 l.turned.clone_from(&c.turned);
+                l.released = c.side == ClampSide::None;
+                l.may_turn &= l.released;
                 l.clamp(c.side);
             }
             Op::Cut(c) => l.cut(i, c)?,
@@ -241,6 +260,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                 l.travel(At::Op(i), frame::steps(profile, head, p), z, deg)?;
             }
             Op::Pause(p) => {
+                l.may_turn |= l.released;
                 l.idle();
                 l.out.push(Step::Hold {
                     message: p.message.clone(),
@@ -365,6 +385,10 @@ struct Lowering<'a> {
     /// The clamp pads, and those the last `clamp` op turned out of the way.
     pads: Vec<Pad>,
     turned: Vec<String>,
+    /// The clamps are open (the last `clamp` op released them, or there was none yet).
+    released: bool,
+    /// The operator can turn pads now: before any clamping, or in a pause since a release.
+    may_turn: bool,
 }
 
 impl Lowering<'_> {

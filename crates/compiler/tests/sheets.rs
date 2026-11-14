@@ -119,6 +119,7 @@ fn sheet(rng: &mut Rng, s: &Solution, bin: usize) -> Sheet {
         },
         material: material(),
         contours,
+        cleanup: Vec::new(),
     }
 }
 

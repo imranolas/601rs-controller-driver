@@ -37,6 +37,7 @@ fn sheet(gmc: &Program, contours: Vec<Contour>) -> Sheet {
         board: gmc.board.clone(),
         material: gmc.material.clone(),
         contours,
+        cleanup: Vec::new(),
     }
 }
 

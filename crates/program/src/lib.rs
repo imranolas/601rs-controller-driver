@@ -182,19 +182,15 @@ impl Program {
         Ok(p)
     }
 
-    /// Every clamp pad the program has turned out of the way, once each, in order: what the
-    /// operator must do before it runs.
-    pub fn turned_clamps(&self) -> Vec<&str> {
-        let mut out: Vec<&str> = Vec::new();
-        for op in &self.ops {
-            if let Op::Clamp(c) = op {
-                for name in &c.turned {
-                    if !out.contains(&name.as_str()) {
-                        out.push(name);
-                    }
-                }
-            }
-        }
-        out
+    /// The clamp pads the operator turns out of the way before the program runs: its first
+    /// `clamp` op's. Any later change comes with a release and a `pause` of its own (§4.1).
+    pub fn turned_at_start(&self) -> &[String] {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Clamp(c) => Some(c.turned.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }

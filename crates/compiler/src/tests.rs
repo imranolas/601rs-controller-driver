@@ -27,6 +27,7 @@ fn sheet(w: f64, h: f64, contours: Vec<Contour>) -> Sheet {
         },
         material: material(),
         contours,
+        cleanup: Vec::new(),
     }
 }
 
@@ -340,5 +341,117 @@ fn a_board_with_every_pad_turned_is_refused() {
     assert_eq!(
         (c.turned, c.held_by),
         (vec!["F1".to_owned()], vec!["L1".to_owned()])
+    );
+}
+
+/// Bevel's own example (its `cleanup` tests): a 600 × 500 piece in the trims' corner of a
+/// 1015 × 815 sheet frees the rest of its strip and the band above it.
+fn bevels_corner() -> Sheet {
+    Sheet {
+        cleanup: vec![
+            [621.0, 21.0, 1015.0, 21.0],
+            [0.0, 521.0, 1015.0, 521.0],
+            [621.0, 21.0, 621.0, 521.0],
+        ],
+        ..sheet(
+            1015.0,
+            815.0,
+            vec![
+                mount([21.0, 21.0, 621.0, 521.0]),
+                window([80.0, 80.0, 560.0, 460.0]),
+            ],
+        )
+    }
+}
+
+#[test]
+fn the_clean_up_comes_last_in_the_same_program() {
+    let c = run(&bevels_corner());
+    let cs = cuts(&c);
+    let first_cleanup = cs
+        .iter()
+        .position(|(id, _, _)| id.starts_with("cleanup."))
+        .expect("clean-up cuts");
+    assert!(
+        cs[first_cleanup..]
+            .iter()
+            .all(|(id, _, _)| id.starts_with("cleanup.")),
+        "after every piece's cut: {cs:?}"
+    );
+    // The line up the piece's right edge is that edge, cut once with the piece; the band's line
+    // is cut either side of the piece's top edge, the left stretch from where the head reaches;
+    // the rest of the strip's front line is one cut. Three clean-up cuts.
+    let cleanup: Vec<&(String, Head, Vec<[f64; 2]>)> = cs[first_cleanup..].iter().collect();
+    assert_eq!(cleanup.len(), 3, "{cleanup:?}");
+    assert!(cleanup.iter().all(|(id, _, _)| id != "cleanup.3"));
+    let reach_x = 6.41 - 0.225 + 0.1;
+    assert!(
+        cleanup
+            .iter()
+            .any(|(id, _, p)| id == "cleanup.2" && (p[0][0] - reach_x).abs() < 1e-9),
+        "{cleanup:?}"
+    );
+    assert_eq!(c.uncut, vec![[0.0, 521.0, reach_x, 521.0]]);
+    assert!(c.turned.is_empty());
+    // Without the lines, no clean-up, and less time.
+    let plain = run(&Sheet {
+        cleanup: Vec::new(),
+        ..bevels_corner()
+    });
+    assert!(
+        cuts(&plain)
+            .iter()
+            .all(|(id, _, _)| !id.starts_with("cleanup."))
+    );
+    assert!(plain.estimate.total_s < c.estimate.total_s);
+}
+
+#[test]
+fn a_clean_up_line_over_a_pad_turns_it_before_the_run() {
+    // Up from the front edge through pad F1, beside a mount.
+    let s = Sheet {
+        cleanup: vec![[97.0, 0.0, 97.0, 200.0]],
+        ..sheet(400.0, 400.0, vec![mount([150.0, 50.0, 350.0, 350.0])])
+    };
+    let c = run(&s);
+    assert_eq!(c.turned, ["F1"]);
+    assert!(!c.held_by.contains(&"F1".to_owned()));
+    match &c.program.ops[0] {
+        Op::Clamp(clamp) => assert_eq!(clamp.turned, ["F1"]),
+        op => panic!("{op:?}"),
+    }
+    // From 2.2 mm up: the straight head can't reach the front edge.
+    let reach_y = 1.88 + 0.275 + 0.1;
+    assert_eq!(c.uncut, vec![[97.0, 0.0, 97.0, reach_y]]);
+}
+
+#[test]
+fn clean_up_lines_along_the_pieces_alone_add_no_cut() {
+    let s = Sheet {
+        cleanup: vec![[621.0, 21.0, 621.0, 521.0]],
+        ..bevels_corner()
+    };
+    let c = run(&s);
+    assert!(
+        cuts(&c)
+            .iter()
+            .all(|(id, _, _)| !id.starts_with("cleanup."))
+    );
+}
+
+#[test]
+fn a_clean_up_line_must_run_along_x_or_y() {
+    let s = Sheet {
+        cleanup: vec![[100.0, 100.0, 200.0, 150.0]],
+        ..bevels_corner()
+    };
+    assert_eq!(
+        compile(
+            &s,
+            &Blade::fitted(),
+            &Profile::gunnar_601(),
+            &Options::default()
+        ),
+        Err(Error::BadCleanup { line: 0 })
     );
 }

@@ -109,8 +109,10 @@ Sets the clamp state for the following cuts. `"none"` releases the clamps. Clamp
 the next `clamp` op. The runner always releases everything at the end.
 
 `turned` (optional) names the clamp pads (§2) the operator turns out of the way for the cuts
-that follow: those cuts may run over them, and no others may. A run asks for them before it
-starts. A name the machine profile doesn't have is an error.
+that follow: those cuts may run over them, and no others may. A name the machine profile doesn't
+have is an error. A pad is turned by hand with the clamps open, so the first `clamp` op's pads
+are turned before the run starts (a run asks for them), and a later `clamp` op may change them
+only after the clamps are released (`"none"`) and a `pause` has given the operator the chance.
 
 ### 4.2 `cut`
 ```json
@@ -243,7 +245,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | V8 | `ids`, when present, are unique within the program. |
 | V9 | The `pause` `resume` value is known. |
 | V10 *(machine model)* | Every machine coordinate, after the profile mapping, is inside the machine's soft-limit envelope. |
-| V11 *(machine model)* | No cut runs over a clamp pad that the `clamp` op before it doesn't name in `turned`, and every name in `turned` is one of the profile's pads. |
+| V11 *(machine model)* | No cut runs over a clamp pad that the `clamp` op before it doesn't name in `turned`; every name in `turned` is one of the profile's pads; and `turned` changes only before the first clamping, or after a release and a `pause`. |
 
 V1–V9 need no machine profile, so the designer can check them while editing. V10 and V11 need the
 profile.

@@ -134,7 +134,7 @@ impl Curve<'_> {
             .collect();
         Some(Planned {
             head: self.head,
-            parts: vec![Part {
+            parts: vec![Part::Edge {
                 contour: k,
                 side: Side::Round,
             }],

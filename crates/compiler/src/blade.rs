@@ -55,7 +55,7 @@ impl Blade {
     /// - GMC's bevel cuts start 0.4 mm before an edge's corner and run 3.8 mm past the far one on
     ///   1.5 mm board, both growing 1 mm per mm of board (its C10, C11 and C12 jobs); its
     ///   straight cuts start 0.5 mm short and run 2.3 mm past, whatever the board (its trims
-    ///   in [GCF]; the captures agree to 0.3 mm).
+    ///   in its parameters; the captures agree to 0.3 mm).
     pub fn fitted() -> Blade {
         Blade {
             bevel: HeadCut {
