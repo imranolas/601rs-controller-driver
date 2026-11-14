@@ -3,7 +3,7 @@
 //! machine never invalidates a stored program. [`Profile::gunnar_601`] holds the 601rs's values,
 //! from GMC's parameters [GCF] and its captures [CAP]; the protocol reference cites each.
 
-use program::Head as HeadKind;
+use program::{ClampSide, Head as HeadKind};
 
 use crate::frame::{CarriageMm, MachineMm};
 use protocol::{Axis, Setting, SignalAcks, Units};
@@ -26,10 +26,21 @@ pub struct Profile {
     /// 21 mm short of them. A window cut there landed where this puts it, to 0.2 mm (calipers,
     /// 2026-11-10).
     pub board_origin_mm: MachineMm,
-    /// The nearest a cut may come to the board's left and front edges, mm, so the heads clear
-    /// the clamps: GMC's minimum borders ([GCF] `SysBx`/`SysBy`, 2.1 cm). GMC's cut-to-edge mode,
-    /// with clamps swivelled out of the way, isn't supported yet.
+    /// On a machine whose clamp pads aren't given ([`Profile::clamp_pads`] empty), the nearest
+    /// a cut may come to the board's left and front edges, mm: GMC's minimum borders ([GCF]
+    /// `SysBx`/`SysBy`), which GMC applies only to a machine without clamp pads or a vacuum
+    /// table [GMC]. The 601 has pads, so this is unused there.
     pub clamp_border_mm: [f64; 2],
+    /// Where the clamps press on the board. A cut may run to any edge but over a pad, unless the
+    /// operator turns that pad out of the way (PROGRAM_FORMAT §4.1, `turned`), as GMC asks them
+    /// to ("Please deactivate the indicated clamps") [GMC].
+    #[serde(default = "ClampPads::gunnar_601")]
+    pub clamp_pads: ClampPads,
+    /// The widest board the left clamp holds alone, mm: half the table, 780 mm on the 601
+    /// (GMC's rule, protocol reference §2.5). Both clamps hold a wider board: the pads on the
+    /// table's right half are the right clamp's.
+    #[serde(default = "one_clamp_up_to_mm")]
+    pub one_clamp_up_to_mm: f64,
     pub bevel: Head,
     pub straight: Head,
     pub clamps: Clamps,
@@ -198,6 +209,77 @@ pub struct Head {
     pub up: u8,
 }
 
+/// The clamps' pads: where each presses on a board, from the table's front-left corner, where
+/// boards register (so in the board frame, to the board origin's fraction of a millimetre).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClampPads {
+    /// The pads along the front edge: each one's centre, mm from the left. Named `F1`, `F2`, …
+    /// from the left.
+    pub front_mm: Vec<f64>,
+    /// The pads along the left edge: each one's centre, mm from the front. Named `L1`, `L2`, …
+    /// from the front.
+    pub left_mm: Vec<f64>,
+    /// A pad's length along its edge, and how far it reaches in from the edge, mm.
+    pub size_mm: [f64; 2],
+}
+
+impl ClampPads {
+    /// The 601's ([GCF] `ClampsX`, `ClampsY`, `ClampWidth` 4.3 and `ClampHeight` 2, in cm there;
+    /// the same in GMC's default parameters). GMC also mirrors the left pads at the table's right
+    /// end for Cut Other End, which isn't supported yet.
+    pub fn gunnar_601() -> Self {
+        Self {
+            front_mm: vec![97.0, 327.0, 577.0, 985.0, 1232.0, 1462.0],
+            left_mm: vec![102.0, 327.0, 667.0],
+            size_mm: [43.0, 20.0],
+        }
+    }
+}
+
+/// One clamp pad, in the board frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pad {
+    /// `F1`… along the front edge, `L1`… along the left edge.
+    pub name: String,
+    /// Where it presses, `[x0, y0, x1, y1]`: from its edge (0) to its reach.
+    pub rect_mm: [f64; 4],
+}
+
+impl Pad {
+    /// Segment `a`–`b` passes over the pad (more than touching it). The pad reaches on past its
+    /// edge, off the board, so a cut beyond the edge there hits it too.
+    pub fn hit(&self, a: [f64; 2], b: [f64; 2]) -> bool {
+        const SLACK: f64 = 1e-6;
+        let [x0, y0, x1, y1] = self.rect_mm;
+        // Open towards the edge it sits on.
+        let (x0, y0) = (
+            if x0 <= 0.0 { f64::NEG_INFINITY } else { x0 },
+            if y0 <= 0.0 { f64::NEG_INFINITY } else { y0 },
+        );
+        let lo = [x0 + SLACK, y0 + SLACK];
+        let hi = [x1 - SLACK, y1 - SLACK];
+        // Liang–Barsky: the part of the segment inside the box.
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for k in 0..2 {
+            let d = b[k] - a[k];
+            if d == 0.0 {
+                if a[k] <= lo[k] || a[k] >= hi[k] {
+                    return false;
+                }
+                continue;
+            }
+            let (mut ta, mut tb) = ((lo[k] - a[k]) / d, (hi[k] - a[k]) / d);
+            if ta > tb {
+                std::mem::swap(&mut ta, &mut tb);
+            }
+            t0 = t0.max(ta);
+            t1 = t1.min(tb);
+        }
+        t0 < t1
+    }
+}
+
 /// The clamps' output bits.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +379,8 @@ impl Profile {
             // GMC's layout corner, (21.225, 20.725), less its 21 mm layout inset.
             board_origin_mm: MachineMm([0.225, -0.275]),
             clamp_border_mm: [21.0, 21.0],
+            clamp_pads: ClampPads::gunnar_601(),
+            one_clamp_up_to_mm: one_clamp_up_to_mm(),
             // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP]. The
             // offsets are fitted to testdata/calibration/calibration_1 (`mc601 calibrate`,
             // 2026-11-10, ±0.06 mm): GMC's were (-71.5, 1.9) and (6.2, 1.7).
@@ -400,6 +484,57 @@ impl Profile {
         }
     }
 
+    /// The clamps that hold a board `width_mm` wide at the usual end of the table: the left one,
+    /// or both for a board wider than half the table.
+    pub fn clamp_side(&self, width_mm: f64) -> ClampSide {
+        if width_mm <= self.one_clamp_up_to_mm {
+            ClampSide::Left
+        } else {
+            ClampSide::Both
+        }
+    }
+
+    /// Every clamp pad, in the board frame: `F1`… along the front, then `L1`… along the left.
+    /// A pad is there whether or not the board reaches it, so the head can hit one off the
+    /// board too.
+    pub fn pads(&self) -> Vec<Pad> {
+        let c = &self.clamp_pads;
+        let [long, deep] = c.size_mm;
+        let front = c.front_mm.iter().enumerate().map(|(k, &x)| Pad {
+            name: format!("F{}", k + 1),
+            rect_mm: [x - long / 2.0, 0.0, x + long / 2.0, deep],
+        });
+        let left = c.left_mm.iter().enumerate().map(|(k, &y)| Pad {
+            name: format!("L{}", k + 1),
+            rect_mm: [0.0, y - long / 2.0, deep, y + long / 2.0],
+        });
+        front.chain(left).collect()
+    }
+
+    /// The pads that press on a board `width_mm` × `height_mm` at the usual end of the table,
+    /// clipped to it: the notches a layout keeps out of to need no pad turned.
+    pub fn pads_on(&self, width_mm: f64, height_mm: f64) -> Vec<Pad> {
+        self.pads()
+            .into_iter()
+            .filter_map(|p| {
+                let [x0, y0, x1, y1] = p.rect_mm;
+                let r = [
+                    x0.max(0.0),
+                    y0.max(0.0),
+                    x1.min(width_mm),
+                    y1.min(height_mm),
+                ];
+                (r[0] < r[2] && r[1] < r[3]).then_some(Pad { rect_mm: r, ..p })
+            })
+            .collect()
+    }
+
+    /// Whether a board can be cut at the other end of the table (GMC's Cut Other End): not
+    /// yet, since the profile has no second registration (protocol reference §2.5).
+    pub fn can_cut_at_other_end(&self, _width_mm: f64, _height_mm: f64) -> bool {
+        false
+    }
+
     /// Steps/s for a speed in % of the maximum (`#G20 = 360 × speed %` on the 601).
     pub fn speed(&self, pct: f64) -> u32 {
         (self.max_speed as f64 * pct / 100.0) as u32
@@ -476,6 +611,14 @@ impl Profile {
         p.bevel.offset_mm = [0.0, 0.0];
         p.straight.offset_mm = [0.0, 0.0];
         p.clamp_border_mm = [f64::NEG_INFINITY; 2];
+        p.clamp_pads.front_mm.clear();
+        p.clamp_pads.left_mm.clear();
         p
     }
+}
+
+/// Half the 601's table (protocol reference §2.5): the default for profiles written before the
+/// field.
+fn one_clamp_up_to_mm() -> f64 {
+    780.0
 }

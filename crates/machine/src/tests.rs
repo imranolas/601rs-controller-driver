@@ -143,9 +143,12 @@ fn cut(head: HeadKind, path: &[[f64; 2]]) -> Op {
     })
 }
 
+/// A machine without clamp pads keeps GMC's whole-edge border.
 #[test]
-fn cuts_keep_clear_of_the_clamps() {
-    let p = p601();
+fn cuts_keep_clear_of_the_border_on_a_machine_without_pads() {
+    let mut p = p601();
+    p.clamp_pads.front_mm.clear();
+    p.clamp_pads.left_mm.clear();
     // GMC's own layouts cut exactly on its 21 mm border.
     let edge = [[0.0, 0.0], [200.0, 0.0]];
     lower(
@@ -169,11 +172,80 @@ fn cuts_keep_clear_of_the_clamps() {
     }
 }
 
+#[test]
+fn a_board_over_half_the_table_is_held_by_both_clamps() {
+    let p = p601();
+    assert_eq!(p.clamp_side(780.0), ClampSide::Left);
+    assert_eq!(p.clamp_side(781.0), ClampSide::Both);
+    assert!(!p.can_cut_at_other_end(700.0, 500.0));
+    // A 300 × 400 mm board reaches one pad at the front and two at the left.
+    let on: Vec<String> = p
+        .pads_on(300.0, 400.0)
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(on, ["F1", "L1", "L2"]);
+    assert_eq!(p.pads_on(300.0, 400.0)[0].rect_mm, [75.5, 0.0, 118.5, 20.0]);
+}
+
+/// Board-frame cuts (no layout offset) with the clamp op turning `turned`.
+fn cuts_turning(turned: &[&str], paths: &[&[[f64; 2]]]) -> Program {
+    let mut ops = vec![Op::Clamp(Clamp {
+        id: None,
+        label: None,
+        side: ClampSide::Left,
+        turned: turned.iter().map(|s| (*s).to_owned()).collect(),
+    })];
+    ops.extend(paths.iter().map(|path| {
+        Op::Cut(Cut {
+            id: None,
+            label: None,
+            head: HeadKind::Bevel,
+            path_mm: path.to_vec(),
+            speed_pct: None,
+        })
+    }));
+    program(1.5, ops)
+}
+
+#[test]
+fn cuts_run_to_the_edge_but_not_over_a_pad_unless_it_is_turned() {
+    let p = p601();
+    // 5 mm from the front edge, between pads F1 (to 118.5) and F2: clear.
+    let between = [[130.0, 5.0], [190.0, 5.0]];
+    lower(&cuts_turning(&[], &[&between]), &p).expect("runs to the edge between pads");
+    // Across F1, with no point on it: the segment counts.
+    let across = [[50.0, 5.0], [150.0, 5.0]];
+    let err = lower(&cuts_turning(&[], &[&across]), &p).expect_err("over F1");
+    assert!(
+        matches!(&err, Error::OnClamp { op: 1, point: 1, pad } if pad == "F1"),
+        "{err:?}"
+    );
+    lower(&cuts_turning(&["F1"], &[&across]), &p).expect("F1 turned out of the way");
+    // Up the left edge, onto L2 (from 305.5).
+    let up = [[5.0, 130.0], [5.0, 309.0]];
+    let err = lower(&cuts_turning(&["F1"], &[&up]), &p).expect_err("over L2");
+    assert!(
+        matches!(&err, Error::OnClamp { pad, .. } if pad == "L2"),
+        "{err:?}"
+    );
+    let err = lower(&cuts_turning(&["F9"], &[&between]), &p).expect_err("no F9");
+    assert!(
+        matches!(&err, Error::UnknownClamp { op: 0, pad } if pad == "F9"),
+        "{err:?}"
+    );
+    assert_eq!(
+        cuts_turning(&["L2", "F1"], &[&up]).turned_clamps(),
+        ["L2", "F1"]
+    );
+}
+
 fn clamp() -> Op {
     Op::Clamp(Clamp {
         id: None,
         label: None,
         side: ClampSide::Left,
+        turned: Vec::new(),
     })
 }
 

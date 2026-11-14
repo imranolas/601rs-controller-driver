@@ -32,7 +32,7 @@ use program::{ClampSide, Cut, Head as HeadKind, Op, Program, Resume};
 use protocol::{Command, Mode, Radius, Setting, SettingKey, StreamFlags};
 
 use crate::frame::{self, CarriageMm, Pt};
-use crate::profile::{Capabilities, Profile};
+use crate::profile::{Capabilities, Pad, Profile};
 
 /// The speed-table entry cutting uses, and in GMC's form travel too.
 pub const ENTRY: u8 = 20;
@@ -134,8 +134,22 @@ pub enum Error {
     /// The carriage would leave the machine's soft limits (V10).
     #[error("{at}: the carriage would reach {carriage_mm}, outside the machine's limits")]
     OutsideEnvelope { at: At, carriage_mm: CarriageMm },
-    /// A cut comes nearer the board's left or front edge than the clamps allow
-    /// ([`Profile::clamp_border_mm`]): the head would hit them.
+    /// A cut runs over a clamp pad ([`Profile::pads`]) the program hasn't turned out of the way
+    /// (the `clamp` op's `turned`): the head would hit it.
+    #[error(
+        "op {op}: the segment to point {point} runs over clamp {pad}; turn it out of the way \
+         and name it in the clamp op's `turned`"
+    )]
+    OnClamp {
+        op: usize,
+        point: usize,
+        pad: String,
+    },
+    /// A `clamp` op turns a pad the profile doesn't have.
+    #[error("op {op}: there is no clamp {pad} to turn")]
+    UnknownClamp { op: usize, pad: String },
+    /// On a machine without clamp pads, a cut comes nearer the board's left or front edge than
+    /// [`Profile::clamp_border_mm`]: the head would hit the clamps.
     #[error(
         "op {op}: point {point} at {x:.2}, {y:.2} mm is within {border_x} mm of the left edge or \
          {border_y} mm of the front edge, where the head would hit the clamps"
@@ -169,6 +183,8 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
         settings: HashMap::new(),
         streaming: false,
         out: Vec::new(),
+        pads: profile.pads(),
+        turned: Vec::new(),
     };
     let r = profile.radius_slowdown;
     for (reg, v) in [
@@ -198,7 +214,20 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
     let mut ops = Vec::with_capacity(program.ops.len());
     for (i, op) in program.ops.iter().enumerate() {
         match op {
-            Op::Clamp(c) => l.clamp(c.side),
+            Op::Clamp(c) => {
+                if let Some(pad) = c
+                    .turned
+                    .iter()
+                    .find(|t| !l.pads.iter().any(|p| &p.name == *t))
+                {
+                    return Err(Error::UnknownClamp {
+                        op: i,
+                        pad: pad.clone(),
+                    });
+                }
+                l.turned.clone_from(&c.turned);
+                l.clamp(c.side);
+            }
             Op::Cut(c) => l.cut(i, c)?,
             Op::Move(mv) => {
                 let kind = l.head.unwrap_or(HeadKind::Straight);
@@ -333,6 +362,9 @@ struct Lowering<'a> {
     /// Stream commands sent since the last wait until idle.
     streaming: bool,
     out: Vec<Step>,
+    /// The clamp pads, and those the last `clamp` op turned out of the way.
+    pads: Vec<Pad>,
+    turned: Vec<String>,
 }
 
 impl Lowering<'_> {
@@ -458,21 +490,32 @@ impl Lowering<'_> {
         if !is_pct(speed) {
             return Err(Error::BadNumber { at: At::Op(op) });
         }
-        let [bx, by] = p.clamp_border_mm;
-        // A hair of slack: GMC's own layouts cut exactly on the border.
-        if let Some((point, &[x, y])) = cut
-            .path_mm
-            .iter()
-            .enumerate()
-            .find(|&(_, &[x, y])| x < bx - 1e-6 || y < by - 1e-6)
+        if self.pads.is_empty() {
+            let [bx, by] = p.clamp_border_mm;
+            // A hair of slack: GMC's own layouts cut exactly on the border.
+            if let Some((point, &[x, y])) = cut
+                .path_mm
+                .iter()
+                .enumerate()
+                .find(|&(_, &[x, y])| x < bx - 1e-6 || y < by - 1e-6)
+            {
+                return Err(Error::NearClamps {
+                    op,
+                    point,
+                    x,
+                    y,
+                    border_x: bx,
+                    border_y: by,
+                });
+            }
+        } else if let Some((point, pad)) = pads_hit(&self.pads, &cut.path_mm)
+            .into_iter()
+            .find(|(_, pad)| !self.turned.contains(&pad.name))
         {
-            return Err(Error::NearClamps {
+            return Err(Error::OnClamp {
                 op,
                 point,
-                x,
-                y,
-                border_x: bx,
-                border_y: by,
+                pad: pad.name.clone(),
             });
         }
         let strokes = strokes(op, &cut.path_mm, p.break_angle_deg)?;
@@ -647,4 +690,23 @@ fn strokes(op: usize, path: &[Pt], break_deg: f64) -> Result<Vec<&[Pt]>, Error> 
     }
     out.push(&path[from..]);
     Ok(out)
+}
+
+/// The pads a cut along `path` passes over, each with the first point it reaches past one, in
+/// path order. A path of one point is a point.
+pub fn pads_hit<'p>(pads: &'p [Pad], path: &[Pt]) -> Vec<(usize, &'p Pad)> {
+    let mut out: Vec<(usize, &Pad)> = Vec::new();
+    let segments = path
+        .windows(2)
+        .enumerate()
+        .map(|(k, w)| (k + 1, w[0], w[1]))
+        .chain(path.first().filter(|_| path.len() == 1).map(|&a| (0, a, a)));
+    for (point, a, b) in segments {
+        for pad in pads {
+            if pad.hit(a, b) && !out.iter().any(|(_, p)| p.name == pad.name) {
+                out.push((point, pad));
+            }
+        }
+    }
+    out
 }

@@ -211,6 +211,7 @@ fn with_a_hold(resume: Resume) -> Program {
             id: None,
             label: None,
             side: ClampSide::Left,
+            turned: Vec::new(),
         }),
         p.ops[1].clone(),
         Op::Pause(Pause {

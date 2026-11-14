@@ -272,6 +272,7 @@ fn program_from(job: &Job, profile: &Profile) -> Program {
                 id: None,
                 label: None,
                 side,
+                turned: Vec::new(),
             }));
             clamped = true;
         }

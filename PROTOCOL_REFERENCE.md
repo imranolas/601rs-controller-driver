@@ -407,6 +407,26 @@ GMC sleeps `HeadUpDown` ms (200–500 by profile, §8) after switching a head [G
 and `20` the **right**, as the capture notes label `42` and `22`. The `.gcf` names (`i_pr` on
 `40`, `i_pl` on `20`) do not name the side.
 
+**Where the clamps press** [GCF] [GMC]. The 601 is set up with clamp pads (`Clamps` true), not
+a vacuum table, so GMC checks a layout against each pad, not against the whole-edge borders
+`SysBx`/`SysBy` (those apply only on a machine with neither) [GMC]. Positions are pad centres
+in cm from the table's front-left corner, where boards register:
+
+| Pads | Along | Centres (cm) |
+|------|-------|--------------|
+| `ClampsX` | the front edge, reaching `ClampHeight` 2 cm in | 9.7, 32.7, 57.7, 98.5, 123.2, 146.2 |
+| `ClampsY` | the left edge, reaching 2 cm in | 10.2, 32.7, 66.7 |
+
+Each pad is `ClampWidth` 4.3 cm along its edge [GCF]; GMC's default parameters have the same.
+For Cut Other End GMC mirrors the left pads at the table's right end, `PageWidth` 156 cm
+[GMC]. The pads on the table's left half are the ones a board up to 78 cm reaches, so they are
+presumably the left clamp's (`40`), and the rest the right clamp's.
+
+A cut that runs over a pad isn't refused: GMC lists the pads with their positions and numbers,
+"Please deactivate the indicated clamps", highlights them, and lets the operator go on once
+they are turned out of the way [GMC]. The driver does the same through the `clamp` op's
+`turned` (PROGRAM_FORMAT §4.1).
+
 ### 2.6 Inputs, outputs and errors
 
 **Logical inputs** [SPEC1 p.11]. Inputs are debounced for 2 ms and read every program cycle

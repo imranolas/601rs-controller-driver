@@ -119,6 +119,10 @@ pub struct Clamp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub side: ClampSide,
+    /// The clamp pads the operator turns out of the way for the cuts that follow, by the
+    /// machine profile's names (`F3`, `L1`): those cuts may run over them (§4.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turned: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,5 +180,21 @@ impl Program {
             return Err(ProgramError::UnsupportedVersion(p.version));
         }
         Ok(p)
+    }
+
+    /// Every clamp pad the program has turned out of the way, once each, in order: what the
+    /// operator must do before it runs.
+    pub fn turned_clamps(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for op in &self.ops {
+            if let Op::Clamp(c) = op {
+                for name in &c.turned {
+                    if !out.contains(&name.as_str()) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        out
     }
 }

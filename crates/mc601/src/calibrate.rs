@@ -224,6 +224,7 @@ pub fn sheet_program(profile: &Profile) -> Program {
         id: None,
         label: None,
         side: ClampSide::Left,
+        turned: Vec::new(),
     })];
     for p in layout() {
         let [dx, dy] = profile.head(p.head).offset_mm;

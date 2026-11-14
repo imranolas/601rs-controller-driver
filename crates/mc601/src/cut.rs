@@ -131,7 +131,12 @@ fn describe(l: &Loaded) -> String {
 
 fn op_name(op: &Op) -> String {
     let name = match op {
-        Op::Clamp(c) => format!("clamp {:?}", c.side).to_lowercase(),
+        Op::Clamp(c) if c.turned.is_empty() => format!("clamp {:?}", c.side).to_lowercase(),
+        Op::Clamp(c) => format!(
+            "{}, {} turned out of the way",
+            format!("clamp {:?}", c.side).to_lowercase(),
+            c.turned.join(", ")
+        ),
         Op::Cut(c) => {
             let len: f64 = c
                 .path_mm
@@ -287,9 +292,18 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
     for l in &loaded {
         let p = &l.program;
         let b = &p.board;
+        let turned = p.turned_clamps();
+        let turn = if turned.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Turn clamp pads {} out of the way first.",
+                turned.join(", ")
+            )
+        };
         let ask = format!(
             "Cut {}: load a {} × {} mm board, {} mm thick, into the front-left corner against \
-             the left clamp. The heads come down. (about {:.0} s)",
+             the left clamp.{turn} The heads come down. (about {:.0} s)",
             p.id, b.width_mm, b.height_mm, b.thickness_mm, l.estimate_s
         );
         match op.confirm(&ask) {

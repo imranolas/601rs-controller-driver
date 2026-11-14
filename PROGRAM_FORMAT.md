@@ -55,10 +55,14 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`PRO
 > (operator's account, GMC's code and captures: protocol reference §4.1; `mc601 check` stage 3
 > confirmed it). The corner is at machine (0.225, −0.275) mm (Q1).
 >
-> **Clamps:** no cut may come within **21 mm of the left or front edge**, where the clamps hold
-> the board (GMC's minimum borders `SysBx`/`SysBy`, 2.1 cm; `Profile::clamp_border_mm`). GMC
-> lays every new layout that far in (`MatLayX`/`MatLayY`). Its cut-to-edge mode, with clamps
-> swivelled out of the way, isn't supported yet.
+> **Clamps:** a cut may run to any edge of the board, but not over a **clamp pad** unless the
+> operator turns that pad out of the way (§4.1 `turned`), as GMC asks them to. The 601 has six
+> pads along the front edge (`F1`–`F6`, centred 97, 327, 577, 985, 1232 and 1462 mm from the
+> left) and three along the left (`L1`–`L3`, 102, 327 and 667 mm from the front), each 43 mm
+> along its edge and 20 mm deep (`Profile::clamp_pads`, from GMC's parameters). A pad reaches
+> on past its edge, so a cut off the board there hits it too. A machine profile without pads
+> keeps GMC's whole-edge border instead (`Profile::clamp_border_mm`). Cut Other End isn't
+> supported yet.
 
 ---
 
@@ -99,9 +103,14 @@ Each op is an object with an `op` field. Every op may also carry a `label` (show
 ### 4.1 `clamp`
 ```json
 { "op": "clamp", "side": "left" }          // "left" | "right" | "both" | "none"
+{ "op": "clamp", "side": "left", "turned": ["F2", "L1"] }
 ```
 Sets the clamp state for the following cuts. `"none"` releases the clamps. Clamps stay as set until
 the next `clamp` op. The runner always releases everything at the end.
+
+`turned` (optional) names the clamp pads (§2) the operator turns out of the way for the cuts
+that follow: those cuts may run over them, and no others may. A run asks for them before it
+starts. A name the machine profile doesn't have is an error.
 
 ### 4.2 `cut`
 ```json
@@ -234,8 +243,10 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | V8 | `ids`, when present, are unique within the program. |
 | V9 | The `pause` `resume` value is known. |
 | V10 *(machine model)* | Every machine coordinate, after the profile mapping, is inside the machine's soft-limit envelope. |
+| V11 *(machine model)* | No cut runs over a clamp pad that the `clamp` op before it doesn't name in `turned`, and every name in `turned` is one of the profile's pads. |
 
-V1–V9 need no machine profile, so the designer can check them while editing. V10 needs the profile.
+V1–V9 need no machine profile, so the designer can check them while editing. V10 and V11 need the
+profile.
 
 ---
 
