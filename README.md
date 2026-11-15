@@ -79,7 +79,7 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 | `station` *(planned)* | Service on the machine PC: the queue, an HTTP API and events for apps; starts cuts only from the machine's own screen. |
 | [`nest`](crates/nest) | Places mats on sheets of their board type, and in other mats' drop-outs: three-stage guillotine layouts by iterative beam search (after PackingSolver), offcuts before full sheets, every layout checked before it is returned. |
 | [`compiler`](crates/compiler) | A laid-out sheet to a program: rectangles and ovals placed by the blade model (fitted from calibration, GMC's overcuts), run on past their corners, ovals flattened with their overlap and run-out, shared edges one stroke, an order that keeps the clamp rules and travels least, the clamp pads to turn. Checked against GMC's own jobs. |
-| `profile` *(planned)* | Board types: speed, trims, overcut, overlap, start speed. |
+| [`calibrate`](crates/calibrate) | Calibrating the machine: the calibration sheet, where each of its cuts went (from lowering, no log needed), and the least-squares fit of the blade model. To come ([`CALIBRATION.md`](CALIBRATION.md)): the machine's calibration file, with each board profile's settings, and the routines as plans an app can run. |
 | [`route`](crates/route) | The cut order: which cut next and which way round, so the head travels least, within the cutting rules. |
 | [`runner`](crates/runner) | Drives the cutter: configures the controller, homes, runs programs and manual moves; pause, cancel, holds, stop now, a safe state after any failure, events. |
 | [`machine`](crates/machine) | The machine model, pure: profile, mm and degrees to steps, each cut lowered as one unit (GMC's form, held to its captures, or one stream per cut), soft limits, run time, the line's byte budget. |
@@ -171,7 +171,8 @@ blanked.
 
 - [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md): the wire protocol, the cut sequence, calibration, with citations
 - [`PROGRAM_FORMAT.md`](PROGRAM_FORMAT.md): the program format, the contract between the compiler and the runner
-- [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md): the calibration and diagnostic routines
+- [`CALIBRATION.md`](CALIBRATION.md): calibrating the machine and each board profile, from an app (a design)
+- [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md): the calibration and diagnostic routines (the first plan)
 - [`docs/hardware-testing.md`](docs/hardware-testing.md): running `mc601 probe` and `mc601 check` at the machine
 
 ## Build and test

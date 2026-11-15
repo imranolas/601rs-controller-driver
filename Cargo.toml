@@ -21,6 +21,7 @@ sim = { path = "crates/sim" }
 route = { path = "crates/route" }
 nest = { path = "crates/nest" }
 compiler = { path = "crates/compiler" }
+calibrate = { path = "crates/calibrate" }
 
 # external
 serde = { version = "1", features = ["derive"] }

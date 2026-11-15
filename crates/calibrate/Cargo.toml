@@ -1,0 +1,17 @@
+[package]
+name = "calibrate"
+description = "Calibrating the 601: the calibration sheet, where each of its cuts went, and the least-squares fit of the blade model to the operator's readings."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+machine.workspace = true
+program.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
