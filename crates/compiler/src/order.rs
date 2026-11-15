@@ -27,7 +27,7 @@ fn inside(a: [f64; 4], b: [f64; 4]) -> bool {
 /// rule runs from a cut to one further left or inside, so the rules can't go round in a circle.
 /// (Top and right before bottom and left can: on a grid, the line between two rows is the top
 /// of one row and the bottom of the other, and crosses the line between two columns.)
-/// The clean-up comes after every other cut.
+/// A clean-up line on no piece's edge comes after every other cut.
 pub(crate) fn precedence(sheet: &Sheet, cuts: &[Planned]) -> Vec<Vec<usize>> {
     let boxes: Vec<[f64; 4]> = sheet.contours.iter().map(|c| c.box_mm).collect();
     let n = cuts.len();
@@ -58,7 +58,8 @@ pub(crate) fn precedence(sheet: &Sheet, cuts: &[Planned]) -> Vec<Vec<usize>> {
             after[j].extend(others.iter().copied().filter(|&i| i != j));
         }
     }
-    // The clean-up after every piece's cut, so the board is whole while they are cut.
+    // A clean-up line of its own after every piece's cut, so the board is whole while they are
+    // cut. (One on a piece's edge is that edge's cut.)
     let cleanup = |c: &Planned| c.parts.iter().all(|p| matches!(p, Part::Cleanup { .. }));
     for j in (0..n).filter(|&j| cleanup(&cuts[j])) {
         after[j].extend((0..n).filter(|&i| !cleanup(&cuts[i])));
@@ -196,9 +197,9 @@ pub(crate) struct Pads {
 /// out.
 const REACH_MARGIN_MM: f64 = 0.05;
 
-/// `head` can follow `path`: the carriage stays inside the machine's limits (V10). The straight
-/// head sits 6.4 mm right of the carriage on the 601, so it can't reach the board's left
-/// 6.2 mm.
+/// `head` can follow `path`: the carriage stays inside the machine's limits (V10). On the 601
+/// the carriage may go 7.5 mm below zero (the homing offset), so the straight head, 6.4 mm right
+/// of it, reaches past the board's left edge; the bevel head, 71.5 mm left, not past ~1,488 mm.
 fn reachable(profile: &Profile, head: Head, path: &[[f64; 2]]) -> bool {
     let h = profile.head(head);
     let e = &profile.envelope_mm;

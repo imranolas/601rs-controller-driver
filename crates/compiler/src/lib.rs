@@ -21,14 +21,16 @@
 //!   left edge after its other three, so it is cut free on the clamped side, as GMC ends a
 //!   mount, and a strip of mounts stays attached at the left until each is free; and, within
 //!   those rules, the least head-up travel, from the park back to it.
-//! - **Clamps and reach**: of the ways to cut a contour, those the head can reach (the 601's
-//!   straight head can't reach the board's left 6.2 mm), and of those the ones that keep off the
+//! - **Clamps and reach**: of the ways to cut a contour, those the head can reach (on the 601
+//!   both reach the board's left and front edges; the bevel head not past about 1,488 mm), and
+//!   of those the ones that keep off the
 //!   clamp pads, if any do; the pads the rest run over are turned out of the way
 //!   ([`Compiled::turned`], the `clamp` op's `turned`), as long as one still holds the board.
 //!   Both clamps close on a board wider than half the table.
 //! - **Clean-up** ([`Sheet::cleanup`], if the caller wants the waste worth keeping freed): the
-//!   lines that free it, less the stretches the pieces' edges already cut, after every piece
-//!   cut. Their pads are turned with the rest, before the run. Each line is cut as far as the
+//!   lines that free it share cuts with the pieces' straight edges as the nester counts them
+//!   (on one line, overlapping or touching: one cut, with the piece); a line on no piece's edge
+//!   is cut after every piece. Their pads are turned with the rest, before the run. Each line is cut as far as the
 //!   straight head reaches; the rest is left to break by hand ([`Compiled::uncut`]).
 //!
 //! The program is then lowered by the machine model, which checks it against the machine, and
@@ -57,10 +59,10 @@ pub struct Sheet {
     pub material: Material,
     pub contours: Vec<Contour>,
     /// The clean-up, if the waste worth keeping is to be cut free: lines along the layout's
-    /// guillotine cuts, `[x0, y0, x1, y1]` each, along x or y. They are cut after every piece,
-    /// with the straight head; a stretch along a piece's straight edge is cut once, with the
-    /// edge. Their cuts' ids are `cleanup.` and the line's number, so the estimate can tell their
-    /// time apart. Empty: no clean-up.
+    /// guillotine cuts, `[x0, y0, x1, y1]` each, along x or y, cut with the straight head. A line
+    /// on one line with a piece's straight edge, overlapping or touching it, is one cut with it, as
+    /// the nester counts strokes; a line on no piece's edge is cut after every piece. Each cut's
+    /// id names what it cuts, `cleanup.` and a line's number among them. Empty: no clean-up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup: Vec<[f64; 4]>,
 }
@@ -146,8 +148,8 @@ pub struct Compiled {
     /// The pads still holding the board once those are turned: at least one.
     pub held_by: Vec<String>,
     /// The stretches of the clean-up lines the straight head can't reach, `[x0, y0, x1, y1]`
-    /// each, left for the operator to break by hand: on the 601 it stops 6.2 mm short of the
-    /// board's left edge and 2.2 mm short of its front.
+    /// each, left for the operator to break by hand: beyond where the carriage may go (on the 601
+    /// it reaches past the board's left and front edges, so none there).
     pub uncut: Vec<[f64; 4]>,
 }
 

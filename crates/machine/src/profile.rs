@@ -452,10 +452,15 @@ impl Profile {
             },
             break_angle_deg: 15.0,
             // [GCF] DRX 156 cm, DRY 101.5 cm: GMC's own soft-limit basis, until the diagnostic
-            // tool measures the envelope.
+            // tool measures the envelope. Below zero: homing leaves X and Y 300 steps (7.5 mm)
+            // off their switches before zeroing them (`homing.offset_steps`), so the carriage has
+            // that much room below zero before it meets a switch. GMC uses it to cut to the
+            // board's edge: its page check lets a cut run 2 mm past the front and left edges
+            // [GMC], with the straight head 6.4 mm right of the carriage. With it the straight
+            // head reaches 1.3 mm past the board's left edge and 5.3 mm past its front.
             envelope_mm: Envelope {
-                x: [0.0, 1560.0],
-                y: [0.0, 1015.0],
+                x: [-7.5, 1560.0],
+                y: [-7.5, 1015.0],
             },
             // [GCF] AutoParkX/Y 140 × 20 cm, the bevel blade's position: its carriage less the
             // bevel's offset, 147.15 × 19.81 cm [CAP].

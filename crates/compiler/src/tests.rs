@@ -298,9 +298,9 @@ fn the_same_sheet_gives_the_same_program() {
 }
 
 #[test]
-fn an_edge_the_straight_head_cannot_reach_is_refused() {
-    // The straight head sits 6.4 mm right of the carriage: it can't reach x 3.
-    let s = sheet(300.0, 300.0, vec![mount([3.0, 50.0, 100.0, 150.0])]);
+fn an_edge_out_of_the_head_s_reach_is_refused() {
+    // The bevel head sits 71.5 mm left of the carriage: it can't reach past about 1,488 mm.
+    let s = sheet(1550.0, 300.0, vec![window([1450.0, 100.0, 1540.0, 200.0])]);
     assert_eq!(
         compile(
             &s,
@@ -310,15 +310,11 @@ fn an_edge_the_straight_head_cannot_reach_is_refused() {
         ),
         Err(Error::OutOfReach {
             contour: 0,
-            head: Head::Straight
+            head: Head::Bevel
         })
     );
-    // At 10 mm it can.
-    run(&sheet(
-        300.0,
-        300.0,
-        vec![mount([10.0, 50.0, 100.0, 150.0])],
-    ));
+    // The straight head reaches the board's left edge.
+    run(&sheet(300.0, 300.0, vec![mount([0.0, 50.0, 100.0, 150.0])]));
 }
 
 #[test]
@@ -365,45 +361,63 @@ fn bevels_corner() -> Sheet {
 }
 
 #[test]
-fn the_clean_up_comes_last_in_the_same_program() {
-    let c = run(&bevels_corner());
-    let cs = cuts(&c);
-    let first_cleanup = cs
-        .iter()
-        .position(|(id, _, _)| id.starts_with("cleanup."))
-        .expect("clean-up cuts");
-    assert!(
-        cs[first_cleanup..]
-            .iter()
-            .all(|(id, _, _)| id.starts_with("cleanup.")),
-        "after every piece's cut: {cs:?}"
-    );
-    // The line up the piece's right edge is that edge, cut once with the piece; the band's line
-    // is cut either side of the piece's top edge, the left stretch from where the head reaches;
-    // the rest of the strip's front line is one cut. Three clean-up cuts.
-    let cleanup: Vec<&(String, Head, Vec<[f64; 2]>)> = cs[first_cleanup..].iter().collect();
-    assert_eq!(cleanup.len(), 3, "{cleanup:?}");
-    assert!(cleanup.iter().all(|(id, _, _)| id != "cleanup.3"));
-    let reach_x = 6.41 - 0.225 + 0.1;
-    assert!(
-        cleanup
-            .iter()
-            .any(|(id, _, p)| id == "cleanup.2" && (p[0][0] - reach_x).abs() < 1e-9),
-        "{cleanup:?}"
-    );
-    assert_eq!(c.uncut, vec![[0.0, 521.0, reach_x, 521.0]]);
-    assert!(c.turned.is_empty());
-    // Without the lines, no clean-up, and less time.
-    let plain = run(&Sheet {
+fn clean_up_lines_share_cuts_with_the_pieces_as_the_nester_counts() {
+    // Each of Bevel's three lines is on one of the piece's edges, overlapping or touching it:
+    // the strip's front line runs on from the piece's bottom edge, the band's line through its
+    // top edge, the line up its side is its right edge. Four straight cuts, with or without.
+    let with = run(&bevels_corner());
+    let without = run(&Sheet {
         cleanup: Vec::new(),
         ..bevels_corner()
     });
+    let straight = |c: &Compiled| {
+        cuts(c)
+            .into_iter()
+            .filter(|(_, h, _)| *h == Head::Straight)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(straight(&with).len(), 4, "{:?}", straight(&with));
+    assert_eq!(straight(&without).len(), 4);
+    let line = |id: &str| {
+        straight(&with)
+            .into_iter()
+            .find(|(i, _, _)| i.split('+').any(|p| p == id))
+            .unwrap_or_else(|| panic!("no cut of {id}"))
+    };
+    // The bottom edge runs on to the board's right edge (1015, and its run-on past it).
+    let (id, _, bottom) = line("c1.bottom");
+    assert!(id.contains("cleanup.1"), "{id}");
+    assert!(bottom[1][0] > 1015.0, "{bottom:?}");
+    // The top edge from the board's left edge (starting 0.5 mm in, as every straight cut does)
+    // to its right: the straight head reaches past the left edge, as GMC's does when it cuts to
+    // the edge.
+    let (id, _, top) = line("c1.top");
+    assert!(id.contains("cleanup.2"), "{id}");
+    assert!((top[0][0] - 0.5).abs() < 1e-9, "{top:?}");
+    assert!(line("c1.right").0.contains("cleanup.3"));
+    assert!(with.uncut.is_empty(), "{:?}", with.uncut);
+    assert!(with.turned.is_empty());
+}
+
+#[test]
+fn a_clean_up_line_on_no_piece_s_edge_comes_after_every_piece() {
+    // A line up through the band, dividing it in two: no piece's edge is on it.
+    let mut s = bevels_corner();
+    s.cleanup.push([800.0, 521.0, 800.0, 815.0]);
+    let c = run(&s);
+    let cs = cuts(&c);
+    let alone = cs
+        .iter()
+        .position(|(id, _, _)| id == "cleanup.4")
+        .expect("its own cut");
+    assert_eq!(alone, cs.len() - 1, "after every piece's cut: {cs:?}");
     assert!(
-        cuts(&plain)
-            .iter()
-            .all(|(id, _, _)| !id.starts_with("cleanup."))
+        cs.iter()
+            .filter(|(id, _, _)| id.split('+').all(|p| p.starts_with("cleanup.")))
+            .count()
+            == 1,
+        "the others share the pieces' cuts"
     );
-    assert!(plain.estimate.total_s < c.estimate.total_s);
 }
 
 #[test]
@@ -420,9 +434,8 @@ fn a_clean_up_line_over_a_pad_turns_it_before_the_run() {
         Op::Clamp(clamp) => assert_eq!(clamp.turned, ["F1"]),
         op => panic!("{op:?}"),
     }
-    // From 2.2 mm up: the straight head can't reach the front edge.
-    let reach_y = 1.88 + 0.275 + 0.1;
-    assert_eq!(c.uncut, vec![[97.0, 0.0, 97.0, reach_y]]);
+    // All of it, from the front edge.
+    assert!(c.uncut.is_empty(), "{:?}", c.uncut);
 }
 
 #[test]

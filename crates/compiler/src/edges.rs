@@ -1,5 +1,5 @@
-//! Rectangles: a bevel rectangle's four cuts, and straight edges merged into strokes; and the
-//! stretches of the clean-up lines that no piece's edge cuts.
+//! Rectangles: a bevel rectangle's four cuts, and straight edges merged into strokes, the
+//! clean-up lines with them.
 
 use std::cmp::Ordering;
 
@@ -84,16 +84,18 @@ struct Stroke {
     plus: bool,
     minus: bool,
     parts: Vec<Part>,
+    /// Where along it pieces' edges run, if any do (the rest is clean-up).
+    piece: Option<(f64, f64)>,
 }
 
 /// Shorter than this, a stretch of a clean-up line is rounding, not a cut (V4's shortest step).
 const SHORTEST_MM: f64 = 0.01;
 
-/// The straight rectangles' strokes, and the clean-up's: the stretches of the clean-up lines
-/// that no piece's stroke runs along. Each runs +X or +Y if `away_from_clamps`, else either
-/// way. Where a clean-up stretch meets a piece's stroke end to end, one runs on over the other.
+/// The straight strokes: the pieces' edges and the clean-up lines, those on one line that
+/// overlap or touch one stroke, as the nester counts them; first those with a piece's edge on
+/// them, then the clean-up's own. Each runs +X or +Y if `away_from_clamps`, else either way.
 ///
-/// The clean-up's strokes are cut as far as the head reaches, `reach` (`[x0, y0, x1, y1]` on the
+/// A clean-up line is cut as far as the head reaches, `reach` (`[x0, y0, x1, y1]` on the
 /// board); the stretches beyond it are returned too, to be broken by hand.
 pub(crate) fn straight(
     contours: &[Contour],
@@ -127,8 +129,7 @@ pub(crate) fn straight(
             });
         }
     }
-    let pieces = merge(edges);
-    let mut stretches = Vec::new();
+    // The clean-up lines join the pieces' edges: on one line, overlapping or touching, one cut.
     for (line, &[x0, y0, x1, y1]) in cleanup.iter().enumerate() {
         let horizontal = (y0 - y1).abs() <= SAME_MM;
         let (at, a, b) = if horizontal {
@@ -136,27 +137,15 @@ pub(crate) fn straight(
         } else {
             (x0, y0, y1)
         };
-        // What's left of it once the pieces' strokes along it are taken away.
-        let mut left = vec![(a.min(b), a.max(b))];
-        for s in pieces
-            .iter()
-            .filter(|s| s.horizontal == horizontal && (s.at - at).abs() <= SAME_MM)
-        {
-            left = left
-                .into_iter()
-                .flat_map(|(f, t)| [(f, t.min(s.from)), (f.max(s.to), t)])
-                .filter(|(f, t)| t - f >= SHORTEST_MM)
-                .collect();
-        }
-        stretches.extend(left.into_iter().map(|(from, to)| Edge {
+        edges.push(Edge {
             horizontal,
             at,
-            from,
-            to,
+            from: a.min(b),
+            to: a.max(b),
             plus: true,
             minus: true,
             part: Part::Cleanup { line },
-        }));
+        });
     }
     let ends = cut.run_on(thickness_mm);
     let planned = |s: Stroke| -> Planned {
@@ -178,11 +167,12 @@ pub(crate) fn straight(
             }
         }
     };
-    // The clean-up, within reach.
+    // Each stroke within reach: a clean-up line is cut as far as the head reaches, the rest left
+    // to break by hand; a piece's edge must be reached whole (if it can't be, the order says so).
     let mut uncut = Vec::new();
-    let mut cleanup_cuts = Vec::new();
-    for s in merge(stretches) {
-        let (lo, hi) = if s.horizontal {
+    let (mut pieces, mut cleanup_cuts) = (Vec::new(), Vec::new());
+    for s in merge(edges) {
+        let (reach_lo, reach_hi) = if s.horizontal {
             (reach[0], reach[2])
         } else {
             (reach[1], reach[3])
@@ -199,9 +189,26 @@ pub(crate) fn straight(
                 [s.at, from, s.at, to]
             }
         };
+        // A clean-up line is clipped to the reach; on a stroke with pieces' edges, only a
+        // clean-up stretch beyond them, and only if they are within reach themselves: a piece's
+        // edge and its run-on are never clipped (the order refuses one it can't reach).
+        let (lo, hi) = match s.piece {
+            Some((from, to)) => (
+                if s.from < from - SAME_MM && from >= reach_lo {
+                    reach_lo
+                } else {
+                    f64::NEG_INFINITY
+                },
+                if s.to > to + SAME_MM && to <= reach_hi {
+                    reach_hi
+                } else {
+                    f64::INFINITY
+                },
+            ),
+            None => (reach_lo, reach_hi),
+        };
         let within = s.at >= across_lo && s.at <= across_hi;
-        let (from, to) = (s.from.max(lo), s.to.min(hi));
-        if !within || to - from < SHORTEST_MM {
+        if s.piece.is_none() && (!within || s.to.min(hi) - s.from.max(lo) < SHORTEST_MM) {
             uncut.push(line(s.from, s.to));
             continue;
         }
@@ -213,15 +220,19 @@ pub(crate) fn straight(
         }
         // Along the line: x for a horizontal one. Each way's run-on stops at the reach too.
         let k = usize::from(!s.horizontal);
+        let piece = s.piece.is_some();
         let mut p = planned(s);
         for w in &mut p.ways {
             for pt in w.iter_mut() {
                 pt[k] = pt[k].clamp(lo, hi);
             }
         }
-        cleanup_cuts.push(p);
+        if piece {
+            pieces.push(p);
+        } else {
+            cleanup_cuts.push(p);
+        }
     }
-    let pieces = pieces.into_iter().map(planned).collect();
     (pieces, cleanup_cuts, uncut)
 }
 
@@ -254,6 +265,12 @@ fn merge(mut edges: Vec<Edge>) -> Vec<Stroke> {
                 s.to = s.to.max(e.to);
                 s.plus |= e.plus;
                 s.minus |= e.minus;
+                if matches!(e.part, Part::Edge { .. }) {
+                    s.piece = Some(
+                        s.piece
+                            .map_or((e.from, e.to), |(f, t)| (f.min(e.from), t.max(e.to))),
+                    );
+                }
                 if !s.parts.contains(&e.part) {
                     s.parts.push(e.part);
                 }
@@ -267,6 +284,7 @@ fn merge(mut edges: Vec<Edge>) -> Vec<Stroke> {
                 plus: e.plus,
                 minus: e.minus,
                 parts: vec![e.part],
+                piece: matches!(e.part, Part::Edge { .. }).then_some((e.from, e.to)),
             });
         }
     }
