@@ -697,3 +697,21 @@ fn pads_are_turned_only_with_the_clamps_open() {
     )
     .expect("turned with the clamps open");
 }
+
+#[test]
+fn the_outputs_say_which_head_is_down_and_which_clamps_close() {
+    let p = p601();
+    assert_eq!(p.heads(0x02), Heads::Up);
+    assert_eq!(p.heads(0x42), Heads::Up);
+    assert_eq!(p.heads(0x45), Heads::BevelDown);
+    assert_eq!(p.heads(0x41), Heads::BevelDown, "the slow head-down");
+    assert_eq!(
+        p.heads(0x40),
+        Heads::BevelDown,
+        "the blade out, the head still down"
+    );
+    assert_eq!(p.heads(0x4A), Heads::StraightDown);
+    assert_eq!(p.clamped(0x42), ClampSide::Left);
+    assert_eq!(p.clamped(0x62), ClampSide::Both);
+    assert_eq!(p.clamped(0x02), ClampSide::None);
+}

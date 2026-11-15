@@ -1070,7 +1070,7 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Compact follow-on vectors on 2.00; after `G`, `A`, `W`? | accepted | stage 5 |
 | Does a second speed entry give its own feed? | yes | stage 5 |
 | In-stream `G`: in sequence or on receipt? | in sequence (stage 5, 2026-11-10); the sim still applies it on receipt | stage 5 |
-| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` counts; the running command; no wrap (10001 after 9998) (stage 5, 2026-11-10); the sim still leaves `C` out | stage 5 |
+| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` counts; the running command; no wrap (10001 after 9998) (stage 5, 2026-11-10), and the sim counts it too | stage 5 |
 | Which of `0x02`/`0x03` means "full"? | **`0x03`**, as the byte table says: filling a held stream, `0x03` came at 72,340 bytes (`@H98`, about 1 KB before full, not the prose's ~200 bytes) and nothing before it (stage 8, 2026-11-10). The simulator still warns 200 bytes before full | stage 8 |
 | Buffer size | **about 73 KB**: behind a held `I221`, `@H` reads 0 until about 8 KB are in, then rises 1 % per ~650 bytes (1 % at 8.6 KB, 50 % at 40.6 KB, 95 % at 70 KB), so it counts the last ~65 KB (stage 8, 2026-11-10; stage 6's 2200 bytes read `@H0` for this reason). The simulator models both parts | stage 8 |
 | Does `0x03` come in time through a USB adapter (no overrun at full speed)? | yes | stage 6 |

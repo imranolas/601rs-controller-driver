@@ -178,6 +178,9 @@ enum Item {
     },
     /// `C8` / `C16`: speed override on / off from here [SPEC1 p.35].
     Override(bool),
+    /// Any other `C`: its flag acts when it arrives, but it still takes its turn in the
+    /// buffer and advances `@N`, as the machine's does (stage 5, 2026-11-10).
+    Flags,
 }
 
 #[derive(Debug, Clone)]
@@ -1036,7 +1039,7 @@ impl SimCore {
                 } else if bits & 16 != 0 {
                     Item::Override(false)
                 } else {
-                    return;
+                    Item::Flags
                 }
             }
             // Wait until input n is high (`In`) or low (`I-n`); an undefined input does not
@@ -1287,7 +1290,7 @@ impl SimCore {
                             self.limit_hit = None;
                         }
                         match q.item {
-                            Item::WaitInput { .. } | Item::Override(_) => {}
+                            Item::WaitInput { .. } | Item::Override(_) | Item::Flags => {}
                             Item::Vector { target, speed } => {
                                 let from = self.pos;
                                 let dir = direction(from, target);

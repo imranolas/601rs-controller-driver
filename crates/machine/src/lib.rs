@@ -106,8 +106,8 @@ pub use lower::{
     park, vgroove_reset,
 };
 pub use profile::{
-    Accel, Capabilities, ClampPads, Clamps, ControllerConfig, DeadTime, Envelope, Head, Homing,
-    Line, Pad, Profile, RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
+    Accel, Capabilities, ClampPads, Clamps, ControllerConfig, DeadTime, Envelope, Head, Heads,
+    Homing, Line, Pad, Profile, RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
 };
 
 #[cfg(test)]

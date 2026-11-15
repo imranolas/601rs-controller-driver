@@ -68,7 +68,7 @@ pub use protocol::{
     WatchdogMs,
 };
 pub use stop::StopHandle;
-pub use typed::{Controller, ModeMarker, ModeSwitchError, connect, mode};
+pub use typed::{Ask, Controller, ModeMarker, ModeSwitchError, connect, mode};
 
 /// Timing parameters of a session.
 #[derive(Debug, Clone)]

@@ -405,8 +405,8 @@ fn in_stream_outputs_dwell_wait_and_progress() {
     cut.wait_idle(LONG).expect("idle");
     assert_eq!(
         cut.command_counter().expect("@N"),
-        5,
-        "I221, L20, A00 (C1 is a flag, not counted)"
+        6,
+        "I221, C1, L20, A00: a C advances @N too, as the machine's (stage 5, 2026-11-10)"
     );
     assert_eq!(cut.position_steps(Axis::X).expect("@P"), 4_000);
     assert!(

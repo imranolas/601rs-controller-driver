@@ -327,7 +327,8 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
             Event::Op { index, .. } => {
                 println!("  op {}/{ops}: {}", index + 1, op_name(&p.ops[index]));
             }
-            Event::OpDone { .. } | Event::Resumed => {}
+            // The command line shows ops as they come, not the machine live.
+            Event::OpDone { .. } | Event::Resumed | Event::State(_) => {}
             Event::Paused { next } => println!("  paused before op {}", next + 1),
             Event::Holding {
                 message, resume, ..

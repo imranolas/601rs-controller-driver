@@ -10,6 +10,7 @@ use program::{ClampSide, Program, Resume};
 use protocol::{Axis, Command, Status};
 
 use crate::error::{Cause, Error, Mismatch};
+use crate::live::{Bus, Live, MachineState, steps_in};
 use crate::session::Session;
 
 /// How the runner waits.
@@ -26,6 +27,10 @@ pub struct Config {
     /// Host-side waits (head settles) are divided by this: 1 on the machine, and the
     /// simulator's speed-up when it runs faster than life.
     pub speedup: f64,
+    /// How often the position is read and a [`Event::State`] pushed while the machine works
+    /// (`@LX` and `@LY`, while the runner waits; heads and clamps at every poll). Zero: no
+    /// state is read or pushed.
+    pub state_every: Duration,
 }
 
 impl Default for Config {
@@ -36,6 +41,7 @@ impl Default for Config {
             start_button: 221,
             poll: Duration::from_millis(50),
             speedup: 1.0,
+            state_every: Duration::from_millis(100),
         }
     }
 }
@@ -91,6 +97,9 @@ pub enum Event {
         error: String,
         safe: bool,
     },
+    /// The machine's state, when it changes ([`MachineState`]): during runs and manual
+    /// operations, and from [`Runner::refresh`].
+    State(MachineState),
 }
 
 /// How a run ended, when it ended as asked.
@@ -133,6 +142,8 @@ pub struct Runner {
     needs_homing: bool,
     /// Inside a run or a manual operation: if dropped then, make the machine safe.
     busy: bool,
+    live: Live,
+    bus: Bus,
 }
 
 impl fmt::Debug for Runner {
@@ -158,7 +169,15 @@ impl Runner {
             outputs: None,
             needs_homing: false,
             busy: false,
+            live: Live::new(config.state_every),
+            bus: Bus::default(),
         }
+    }
+
+    /// Every [`Event`] from now on, runs' and manual operations' alike, for as long as the
+    /// receiver is kept: for a UI that shows the machine live, or a log.
+    pub fn subscribe(&self) -> Receiver<Event> {
+        self.bus.subscribe()
     }
 
     /// A handle that stops the machine at once, from any thread (`@B`). The run in progress
@@ -214,20 +233,73 @@ impl Runner {
     /// Home the machine as GMC does: heads up, Z first, then X and Y; then set the bevel head's
     /// V-groove switch to normal cutting, and park (protocol reference §4.1).
     pub fn home(&mut self) -> Result<(), Error> {
+        let bus = self.bus.clone();
+        let out = &mut |e: Event| bus.publish(&e);
         self.busy = true;
-        let r = self.homing();
+        let r = self.homing(out);
         self.busy = false;
-        match r {
+        let result = match r {
             Ok(s) if s.homed => {
                 self.needs_homing = false;
+                self.live.trust(true);
                 Ok(())
             }
             Ok(s) => Err(Error::HomingIncomplete(s)),
             Err(f) => Err(self.fail(None, f)),
-        }
+        };
+        let _ = self.report(out);
+        result
     }
 
-    fn homing(&mut self) -> Result<Status, Cause> {
+    /// Read the machine's state and push it to subscribers if it has changed: for a UI between
+    /// runs, when nothing else is reading it. Asks nothing while a stop is latched.
+    pub fn refresh(&mut self) -> Result<(), Error> {
+        let bus = self.bus.clone();
+        Ok(self.report(&mut |e| bus.publish(&e))?)
+    }
+
+    /// Read the state now, and push it to `out` if it has changed.
+    fn report(&mut self, out: &mut dyn FnMut(Event)) -> Result<(), Cause> {
+        if !self.live.on() || self.stop.is_stopped() {
+            return Ok(());
+        }
+        let status = self.session.status()?;
+        let [x, y, _] = self.session.position()?;
+        self.live.observe(&status);
+        self.live.at_steps([x, y], &self.profile);
+        if let Some(s) = self.live.due(&self.profile) {
+            out(Event::State(s));
+        }
+        Ok(())
+    }
+
+    /// Wait until `done`, reading the machine's state as it goes and pushing it to `out` when
+    /// it changes.
+    fn wait(
+        &mut self,
+        timeout: Duration,
+        done: impl FnMut(&Status) -> bool,
+        out: &mut dyn FnMut(Event),
+    ) -> Result<Status, Cause> {
+        if !self.live.on() {
+            return self.session.wait_until(timeout, done);
+        }
+        let Self {
+            session,
+            live,
+            profile,
+            ..
+        } = self;
+        session.wait_until_with(timeout, done, |ask, status| {
+            live.read(ask, status, profile)?;
+            if let Some(s) = live.due(profile) {
+                out(Event::State(s));
+            }
+            Ok(())
+        })
+    }
+
+    fn homing(&mut self, out: &mut dyn FnMut(Event)) -> Result<Status, Cause> {
         if self.stop.is_stopped() {
             self.session.clear_stop()?;
         }
@@ -252,7 +324,7 @@ impl Runner {
         }
         self.session.home(&[Axis::Z])?;
         let homed = |s: &Status| !s.moving && !s.homing;
-        self.session.wait_until(self.config.homing_timeout, homed)?;
+        self.wait(self.config.homing_timeout, homed, out)?;
         for s in [
             Setting::Speed {
                 entry: 11,
@@ -271,7 +343,7 @@ impl Runner {
             self.session.set(s)?;
         }
         self.session.home(&[Axis::X, Axis::Y])?;
-        let s = self.session.wait_until(self.config.homing_timeout, homed)?;
+        let s = self.wait(self.config.homing_timeout, homed, out)?;
         if !s.homed {
             return Ok(s);
         }
@@ -280,7 +352,7 @@ impl Runner {
         let mut steps = machine::vgroove_reset(p, clamps, x);
         steps.extend(machine::park(p, clamps));
         let (_tx, rx) = mpsc::channel();
-        self.exec(&steps, None, &rx, &mut |_| {})?;
+        self.exec(&steps, None, &rx, out)?;
         self.session.status()
     }
 
@@ -310,10 +382,14 @@ impl Runner {
 
     fn manual(&mut self, steps: &[Step]) -> Result<(), Error> {
         let (_tx, rx) = mpsc::channel();
+        let bus = self.bus.clone();
+        let out = &mut |e: Event| bus.publish(&e);
         self.busy = true;
-        let r = self.exec(steps, None, &rx, &mut |_| {});
+        let r = self.exec(steps, None, &rx, out);
         self.busy = false;
-        r.map(|_| ()).map_err(|f| self.fail(None, f))
+        let result = r.map(|_| ()).map_err(|f| self.fail(None, f));
+        let _ = self.report(out);
+        result
     }
 
     fn require_homed(&mut self) -> Result<(), Error> {
@@ -336,6 +412,12 @@ impl Runner {
         let job = machine::lower(program, &self.profile).map_err(Error::Invalid)?;
         self.require_homed()?;
         let estimate_s = machine::estimate(&job, &self.profile, &Host::default()).total_s;
+        // Every event to the subscribers too.
+        let bus = self.bus.clone();
+        let events = &mut |e: Event| {
+            bus.publish(&e);
+            events(e);
+        };
         events(Event::Started {
             ops: job.ops.len(),
             estimate_s,
@@ -343,8 +425,11 @@ impl Runner {
         self.busy = true;
         let r = self.job(program, &job, requests, events);
         self.busy = false;
+        self.live.op(None, Vec::new());
+        // The machine's state as the run leaves it, then how the run ended: always the last.
         match r {
             Ok(outcome) => {
+                let _ = self.report(events);
                 events(match outcome {
                     Outcome::Finished => Event::Finished,
                     Outcome::Cancelled { next } => Event::Cancelled { next },
@@ -353,6 +438,7 @@ impl Runner {
             }
             Err(Failure { op, cause }) => {
                 let safe = self.recover();
+                let _ = self.report(events);
                 events(Event::Failed {
                     op,
                     error: cause.to_string(),
@@ -398,6 +484,8 @@ impl Runner {
                 id: op.id().map(str::to_owned),
                 label: op.label().map(str::to_owned),
             });
+            self.live
+                .op(Some(index), steps_in(steps, self.outputs, &self.profile));
             if self
                 .exec(steps, Some(index), requests, events)
                 .map_err(at)?
@@ -409,9 +497,15 @@ impl Runner {
             // let the cut end, so that it is done when reported done, and a fault in it is
             // laid on it rather than on the next.
             if self.profile.capabilities.streams() {
-                self.session
-                    .wait_idle(self.config.idle_timeout)
+                self.wait(self.config.idle_timeout, Status::is_idle, events)
                     .map_err(at)?;
+                self.stream_done(events);
+            }
+            // All its steps done, before it is reported done.
+            if self.live.on()
+                && let Some(s) = self.live.changed(&self.profile)
+            {
+                events(Event::State(s));
             }
             events(Event::OpDone { index });
         }
@@ -428,7 +522,8 @@ impl Runner {
         loop {
             match requests.try_recv() {
                 Ok(Request::Pause) => {
-                    self.session.wait_idle(self.config.idle_timeout)?;
+                    self.wait(self.config.idle_timeout, Status::is_idle, events)?;
+                    self.stream_done(events);
                     events(Event::Paused { next });
                     let flow = self.wait_for_go(true, requests)?;
                     if flow == Flow::Continue {
@@ -475,9 +570,19 @@ impl Runner {
     ) -> Result<Flow, Cause> {
         for step in steps {
             match step {
-                Step::Send(c) => self.send(c)?,
+                Step::Send(c) => {
+                    self.send(c)?;
+                    // Heads or clamps set outside a stream: in effect now.
+                    if self.live.on()
+                        && matches!(c, Command::SetOutputs(_))
+                        && let Some(s) = self.live.due(&self.profile)
+                    {
+                        events(Event::State(s));
+                    }
+                }
                 Step::WaitIdle => {
-                    self.session.wait_idle(self.config.idle_timeout)?;
+                    self.wait(self.config.idle_timeout, Status::is_idle, events)?;
+                    self.stream_done(events);
                 }
                 Step::Settle(ms) => {
                     std::thread::sleep(Duration::from_secs_f64(
@@ -505,7 +610,14 @@ impl Runner {
             (Some(Mode::Parameters), Command::Set(s)) => self.session.set(*s)?,
             (Some(Mode::Jog), Command::SetOutputs(bits)) => self.set_outputs(*bits)?,
             (Some(Mode::Cutting), _) => {
+                // A stream starts: number its commands from 0, so `@N` says which have run.
+                if self.live.on() && !self.live.streaming() {
+                    self.session.switch(Mode::Cutting)?;
+                    self.session.set_command_counter(0)?;
+                    self.live.stream_starts(self.outputs);
+                }
                 self.session.stream(c)?;
+                self.live.streamed(c);
                 if let Command::StreamOutputs(bits) = c {
                     self.outputs = Some(*bits);
                 }
@@ -515,9 +627,20 @@ impl Runner {
         Ok(())
     }
 
+    /// The machine is still after a stream: what it set is in effect. Push the state.
+    fn stream_done(&mut self, out: &mut dyn FnMut(Event)) {
+        if self.live.streaming() {
+            self.live.stream_ends(self.outputs);
+            if let Some(s) = self.live.due(&self.profile) {
+                out(Event::State(s));
+            }
+        }
+    }
+
     fn set_outputs(&mut self, bits: u8) -> Result<(), Cause> {
         self.session.set_outputs(bits)?;
         self.outputs = Some(bits);
+        self.live.outputs_set(bits);
         Ok(())
     }
 
@@ -530,7 +653,11 @@ impl Runner {
     /// After a failure: make the machine safe, and want it homed again. Whether it is safe.
     fn recover(&mut self) -> bool {
         self.needs_homing = true;
-        self.make_safe()
+        self.live.trust(false);
+        let safe = self.make_safe();
+        // Whatever the stream left set, the outputs are now what was last set.
+        self.live.stream_ends(self.outputs);
+        safe
     }
 
     /// After a stop or a failure (PROGRAM_FORMAT §5): brake through the stop lane, which

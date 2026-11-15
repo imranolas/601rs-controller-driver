@@ -280,6 +280,14 @@ impl Pad {
     }
 }
 
+/// Which head is down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heads {
+    Up,
+    BevelDown,
+    StraightDown,
+}
+
 /// The clamps' output bits.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -527,6 +535,32 @@ impl Profile {
                 (r[0] < r[2] && r[1] < r[3]).then_some(Pad { rect_mm: r, ..p })
             })
             .collect()
+    }
+
+    /// Which head the outputs (`$A` bits) hold down: the straight while its own bit is on, the
+    /// bevel while its hold-up bit is off (down, or down with the blade out), else neither.
+    pub fn heads(&self, outputs: u8) -> Heads {
+        let straight = self.straight.down & !self.straight.up;
+        if outputs & straight != 0 {
+            Heads::StraightDown
+        } else if outputs & self.bevel.up == 0 {
+            Heads::BevelDown
+        } else {
+            Heads::Up
+        }
+    }
+
+    /// Which clamps the outputs close.
+    pub fn clamped(&self, outputs: u8) -> ClampSide {
+        match (
+            outputs & self.clamps.left != 0,
+            outputs & self.clamps.right != 0,
+        ) {
+            (true, true) => ClampSide::Both,
+            (true, false) => ClampSide::Left,
+            (false, true) => ClampSide::Right,
+            (false, false) => ClampSide::None,
+        }
     }
 
     /// Whether a board can be cut at the other end of the table (GMC's Cut Other End): not
