@@ -325,6 +325,9 @@ Separate file, owned by the machine, produced by calibration (diagnostic tool) o
 
 Keeping this separate is what makes programs portable across recalibrations and blade changes.
 
+The calibrated values (head offsets, scale, the blade, each board profile's settings) are in
+the machine's calibration file, over `machine::Profile::gunnar_601()` ([`CALIBRATION.md`](CALIBRATION.md) §4).
+
 ---
 
 ## 9. Open questions

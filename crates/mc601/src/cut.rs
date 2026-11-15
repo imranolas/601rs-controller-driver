@@ -167,7 +167,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
         } else {
             Capabilities::all()
         },
-        ..Profile::gunnar_601()
+        ..crate::calibration::machine()
     };
     let programs: Vec<Program> = files.iter().map(|f| read(f)).collect::<Res<_>>()?;
     let raw = programs.iter().filter(|p| is_raw(p)).count();

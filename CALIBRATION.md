@@ -1,6 +1,6 @@
 # 601rs — Calibration (design, draft)
 
-**Status:** a design, 15 Nov 2026; step 1 of §10 is built. Decided with Imran the same day: one file for `mc601` and
+**Status:** a design, 15 Nov 2026; steps 1 and 2 of §10 are built. Decided with Imran the same day: one file for `mc601` and
 Bevel, the profile list in it, the shop's fitted numbers as the defaults, and hooks left for
 later (§11). Nothing here is built yet beyond what §1 says exists. It replaces the calibration parts of [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md)
 (4.4, 4.5, 4.9). That spec is older than the driver.
@@ -51,8 +51,9 @@ What exists works. It just can't be reached from an app, and its results don't f
    normal runner with the current calibration: no raw mode, and every safety check applies. The
    fit learns where each cut went by lowering the program again with the profile it was cut
    with. Lowering is pure, so no log is needed.
-4. **Pure.** No I/O and no clock in the library. Bevel and `mc601` store the files and pass in
-   the time.
+4. **Pure, but for the store.** No clock in the library: Bevel and `mc601` pass in the time.
+   Its only I/O is `calibrate::store`, the calibration file's path, load and save, kept there so
+   the two front ends that share the file can't disagree about it.
 5. **Nothing changes without the operator.** The fit proposes. Apply writes a new revision,
    which records what changed, from what, and why. Every revision is kept, and revert is one
    step.
@@ -96,62 +97,79 @@ uses (§9).
 
 ## 4. The calibration file
 
+*Built (§10, step 2): `calibrate::calibration`, `calibrate::key`, `calibrate::store`.*
+
 ```jsonc
 {
   "format": "601rs-calibration",
   "version": 1,
-  "revision": 7,                                  // +1 on every change
-  "machine": {                                    // over Profile::gunnar_601(); absent: default
-    "bevel":    { "offset_mm": [-71.462, 2.041] },
-    "straight": { "offset_mm": [6.405, 1.874] },
-    "scale":    { "x_steps_per_mm": 40.0, "y_steps_per_mm": 40.0 }
-  },
-  "blade": {                                      // over Blade::fitted(): the reference board
-    "bevel":    { "edge_mm": [0.453, 0.453] },
-    "straight": { "edge_mm": [-0.102, 0.087] }
-  },
-  "profiles": {
-    "C2": {
-      "name": "Mount board 1.4",
-      "thickness_mm": 1.4,
-      "speed_pct": 95,
-      "head_settle_ms": 200,
-      "blade_angle_offset_deg": { "straight": 0, "bevel": 3, "bevel_round": 0 },
-      "bevel":    { "run_on_mm": [0.3, 3.6], "edge_mm": [0.47, 0.47], "face_mm": 2.07 },
-      "straight": { "run_on_mm": [-0.5, 2.3] }
-    }
+  "revision": 7,                                  // +1 on every change; 0: never changed
+  "values": {                                     // each over its default; absent: the default
+    "machine.bevel.offset.x": -71.462,
+    "machine.bevel.offset.y": 2.041,
+    "blade.straight.edge.left": -0.102,
+    "profile.C2.name": "Mount board 1.4",
+    "profile.C2.thickness_mm": 1.4,
+    "profile.C2.speed_pct": 95.0,
+    "profile.C2.head_settle_ms": 200.0,
+    "profile.C2.trim.bevel": 3.0,
+    "profile.C2.bevel.run_on.end": 3.6
   },
   "history": [
-    { "revision": 7, "at": "2026-11-15T10:42:00Z", "routine": "overcut", "profile": "C2",
+    { "revision": 7, "at": "2026-11-15T10:42:00Z", "routine": "overcut",
       "session": "2026-11-15 10.31 overcut C2",
       "changes": [ { "key": "profile.C2.bevel.run_on.end", "before": 3.7, "after": 3.6, "se": 0.15 } ] }
   ]
 }
 ```
 
+**Keys.** Each value is one number (or, for a profile's name, text) under a dotted key. One
+value is one history line, so setting an X offset never carries its Y along, and revert is
+exact. `calibrate::key::Key` is the typed form; its text is what the file, the history,
+`mc601` and Bevel's TypeScript use.
+
+| Key | Unit | Default |
+|-----|------|---------|
+| `machine.<head>.offset.<x\|y>` | mm | `Profile::gunnar_601()` |
+| `machine.scale.<x\|y>` | steps/mm | `Profile::gunnar_601()` (40) |
+| `blade.<head>.edge.<left\|right>` | mm, on the back | `Blade::fitted()` |
+| `blade.<head>.run_on.<start\|end>` | mm, on board of no thickness | `Blade::fitted()` |
+| `blade.<head>.run_on_per_mm` | mm per mm of board | `Blade::fitted()` |
+| `blade.<head>.overlap_ms`, `blade.<head>.run_out_mm` | ms, mm | `Blade::fitted()` |
+| `profile.<id>.name`, `.thickness_mm`, `.speed_pct`, `.head_settle_ms` | text, mm, %, ms | required |
+| `profile.<id>.trim.<straight\|bevel\|bevel_round>` | ° | 0; `bevel_round` the bevel's |
+| `profile.<id>.<head>.edge.<left\|right>`, `.run_on.<start\|end>`, `.overlap_ms`, `.run_out_mm` | as the blade's; run-ons as measured on the profile's board | the machine's, at the profile's thickness |
+
+`<head>` is `bevel` or `straight`; a profile id is letters, digits, `_` and `-`. Each key has
+bounds that catch a typing slip or a corrupt file (a speed of 1 to 100 %, a scale of 1 to 1000
+steps/mm, …). Whether a change is plausible is the fit's question (§7), not the file's.
+
 **Rules**
 
 - **Overrides only.** A value that's absent is the driver's default. The file stays short, and
   better defaults in a new driver still apply.
-- **The history is append-only.** The current value's provenance (when, which routine, its
-  uncertainty) is the last entry that touched it. Revert to revision *n* writes a new revision
-  equal to *n*, so revert can be reverted too. A typed value (thickness, speed) is a history entry
-  with no routine.
+- **A profile exists while it has a name**, and must then have a thickness, speed and settle
+  too. Removing a profile unsets all its values, as one revision.
+- **The history is append-only.** Each change keeps the value the file held before and after
+  (absent: the default), and a fitted value its standard error. The current value's
+  provenance (when, which routine, its uncertainty) is the last entry that touched it. Revert to
+  revision *n* writes a new revision equal to *n*, so revert can be reverted too. A typed value
+  (thickness, speed) is an entry with no routine. Edits that change nothing make no revision.
 - **Profile ids are the shop's.** The file owns the profile list and each profile's cutting
   values, since they depend on this machine's blades. Bevel's board list refers to a profile by
   id (decided, §11).
-- `deny_unknown_fields`, as the other formats. Version 1 refuses other versions.
+- `deny_unknown_fields`, an unknown key refused, and version 1 refuses other versions.
 - **One file for the machine**, shared by `mc601` and Bevel (decided, §11): a calibration taken
   from either is the machine's. The path rule is the driver's, so the two can't drift:
-  `calibrate::default_path()`, the crate's one function that isn't pure (it reads environment
-  variables only). It gives `$MC601_CALIBRATION` if set, else `calibration.json` beside
-  `mc601`'s `config.json`: `~/.config/mc601/` (or `$XDG_CONFIG_HOME/mc601/`), and
-  `%APPDATA%\mc601\` on Windows, the shop PC. `mc601` takes `--calibration FILE` too.
-- **Two writers, one file.** A write names the revision it read. If the file has moved on since,
-  the write is refused and the caller reads again, so neither overwrites the other's change.
+  `calibrate::store`, the crate's only I/O. The file is `$MC601_CALIBRATION` if set, else
+  `calibration.json` beside `mc601`'s `config.json`: `~/.config/mc601/` (or
+  `$XDG_CONFIG_HOME/mc601/`), and `%APPDATA%\mc601\` on Windows, the shop PC. `mc601` takes
+  `--calibration FILE` too.
+- **Two writers, one file.** `store::save` names the revision it read. If the file has moved
+  on since, the write is refused (`Error::Moved`) and the caller reads again, so neither
+  overwrites the other's change. It writes a temporary file and renames it into place.
 - **A missing file is the defaults**, which are the shop's 601 as fitted (decided, §11). Another
-  shop's 601 starts there and runs `heads` first. The overview says where each default came from
-  ("fitted on the shop's 601, 10 Nov").
+  shop's 601 starts there and runs `heads` first.
 
 **Resolving it.** Everything else asks the file, never the defaults directly:
 
@@ -162,30 +180,38 @@ impl Calibration {
     pub fn from_json(text: &str) -> Result<Self, Error>;
     pub fn to_json(&self) -> String;
     pub fn revision(&self) -> u32;
+    pub fn history(&self) -> &[Entry];
 
-    /// `Profile::gunnar_601()` with the machine's overrides.
+    /// `Profile::gunnar_601()` with the calibrated head offsets and scale.
     pub fn machine(&self) -> machine::Profile;
     /// The blade model for cutting this profile's board. For each value: the profile's own,
-    /// then the machine's (reference board), then the driver's model. The run-on model is
-    /// `run_on_mm + run_on_per_mm × thickness`.
+    /// then the machine's (reference board), then the driver's model. A profile's run-ons are as
+    /// measured on its board; the machine's are `run_on_mm + run_on_per_mm × thickness`.
     pub fn blade(&self, profile: &str) -> Result<compiler::Blade, Error>;
-    /// The program `material` for this profile: speed, settle, trims.
+    /// The program `material` for this profile: name, speed, settle, trims.
     pub fn material(&self, profile: &str) -> Result<program::Material, Error>;
     pub fn thickness(&self, profile: &str) -> Result<f64, Error>;
+    pub fn profiles(&self) -> Vec<(String, String)>;      // id, name
 
-    /// Every value that can be calibrated, with its current value, where it came from
-    /// (default, typed, or fitted by a routine on a date, ± its uncertainty): the overview.
+    /// The value in effect, and as the file holds it.
+    pub fn get(&self, key: &Key) -> Result<Val, Error>;
+    pub fn raw(&self, key: &Key) -> Option<&Val>;
+    /// Every value, the machine's and each profile's, with its label, unit, whether the file
+    /// sets it, and its last change (when, which routine, ± its standard error): the overview.
     pub fn values(&self) -> Vec<ValueState>;
-    /// A typed value: thickness, speed, settle, a profile's name; a new profile.
-    pub fn set(&self, key: &Key, value: Typed, stamp: &Stamp) -> Result<Calibration, Error>;
-    pub fn revert(&self, to: u32, stamp: &Stamp) -> Result<Calibration, Error>;
-}
-```
 
-`Key` is a typed path (`HeadOffset { head, axis }`, `RunOn { profile, head, end }`, …). Its JSON
-form is the dotted string in the history (`machine.bevel.offset.x`,
-`profile.C2.bevel.run_on.end`), so Bevel's TypeScript can key on it. `Stamp` is `{ at, session }`,
-given by the caller.
+    /// Edits (a value, or back to the default; a fitted one with its standard error) as one
+    /// new revision, with why: when, routine, session, note.
+    pub fn set(&self, edits: &[Edit], why: &Why) -> Result<Calibration, Error>;
+    pub fn remove_profile(&self, id: &str, why: &Why) -> Result<Calibration, Error>;
+    pub fn revert(&self, to: u32, why: &Why) -> Result<Calibration, Error>;
+}
+
+// calibrate::store
+pub fn default_path() -> PathBuf;
+pub fn load(path: &Path) -> Result<Calibration, Error>;          // missing: the defaults
+pub fn save(path: &Path, cal: &Calibration, read: u32) -> Result<(), Error>;
+```
 
 ## 5. Routines
 
@@ -414,7 +440,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 | `compiler` | No new signature: `compile` already takes a `Blade` and a `Profile`, from `Calibration::blade` and `machine`. `Blade::fitted()` stays as the default model. |
 | `machine` | `Profile::gunnar_601()` keeps the shop's fitted numbers as the defaults (decided, §11). Each fitted value names the record it came from, as it does now. |
 | `runner` | `Runner::set_profile(profile)` between jobs (busy otherwise), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ. |
-| `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply); `mc601 calibration show \| history \| revert N \| set KEY VALUE`. `run` and `check` read the file. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
+| `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
 
 **In Bevel** (for Bevel's own spec; the driver is designed to make it possible):
 
@@ -446,9 +472,14 @@ Each step passes `cargo test` and stops for review.
    lower exactly as their logs show they were sent, each with the profile it was cut with; and
    its fit, from the log or the lowering alike, is the one printed before the move. Calibration
    2 has no readings in `testdata` yet, so it is held by the synthetic fit only.
-2. **The file.** `Calibration`: overrides, resolution (`machine`, `blade`, `material`),
-   `values`, `set`, history, revert. `mc601 run` and `check` read it. Calibration 2's fit applied
-   to `Calibration::new()` gives today's `gunnar_601` offsets.
+2. **The file.** *Built, 15 Nov.* `Calibration` (§4): the values over the defaults by key,
+   the profiles, resolution (`machine`, `blade`, `material`), `values` for the overview, `set`,
+   `remove_profile` and `revert` with the history; `store` for the shared path, load and a
+   save that refuses a stale write. `mc601 run`, `check`, `probe` and `calibrate` drive with the
+   file's machine (each session's first line names the revision), and `mc601 calibration`
+   shows it, sets and unsets values, removes a profile, lists the history and reverts. Golden,
+   in `mc601`: calibration 1's fitted head offsets, set in the file, resolve to the profile its
+   fit writes. Writing a fit into the file from `mc601 calibrate` is step 3's proposal.
 3. **Plans, sessions, proposals.** `heads` and `overcut` as plans in the board frame, with
    steps, drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, suspects,
    `apply`. Synthetic recovery tests. `mc601 calibrate heads|overcut` on the sim, end to end.

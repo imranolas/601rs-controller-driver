@@ -33,6 +33,8 @@ macOS, Linux or Windows. `mc601` is its command line.
   every move, asking before each step and logging every byte both ways.
 - **Calibrates the heads** (`mc601 calibrate`): cut one sheet, type in what the ruler says, and a
   least-squares fit of the blade model gives each head's offset, drag and slit.
+  The machine's calibration is one file (`mc601 calibration`), with its history, that
+  everything that cuts reads.
 - **Nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs, and
   **compiles a laid-out sheet into a program** ([`compiler`](crates/compiler)): each cut placed
   by the calibrated blade model and run on past its corners, ovals with their overlap, shared
@@ -78,8 +80,8 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 |-------|--------------|
 | `station` *(planned)* | Service on the machine PC: the queue, an HTTP API and events for apps; starts cuts only from the machine's own screen. |
 | [`nest`](crates/nest) | Places mats on sheets of their board type, and in other mats' drop-outs: three-stage guillotine layouts by iterative beam search (after PackingSolver), offcuts before full sheets, every layout checked before it is returned. |
+| [`calibrate`](crates/calibrate) | Calibrating the machine: the calibration file (head offsets, scale, the blade, each board profile's settings, with its history), shared by `mc601` and apps and read by everything that cuts; the calibration sheet, where each of its cuts went (from lowering, no log needed), and the least-squares fit of the blade model. To come ([`CALIBRATION.md`](CALIBRATION.md)): the routines as plans an app can run, and fits applied to the file. |
 | [`compiler`](crates/compiler) | A laid-out sheet to a program: rectangles and ovals placed by the blade model (fitted from calibration, GMC's overcuts), run on past their corners, ovals flattened with their overlap and run-out, shared edges one stroke, an order that keeps the clamp rules and travels least, the clamp pads to turn. Checked against GMC's own jobs. |
-| [`calibrate`](crates/calibrate) | Calibrating the machine: the calibration sheet, where each of its cuts went (from lowering, no log needed), and the least-squares fit of the blade model. To come ([`CALIBRATION.md`](CALIBRATION.md)): the machine's calibration file, with each board profile's settings, and the routines as plans an app can run. |
 | [`route`](crates/route) | The cut order: which cut next and which way round, so the head travels least, within the cutting rules. |
 | [`runner`](crates/runner) | Drives the cutter: configures the controller, homes, runs programs and manual moves; pause, cancel, holds, stop now, a safe state after any failure, events. |
 | [`machine`](crates/machine) | The machine model, pure: profile, mm and degrees to steps, each cut lowered as one unit (GMC's form, held to its captures, or one stream per cut), soft limits, run time, the line's byte budget. |
@@ -88,7 +90,7 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 | [`link`](crates/link) | Reader and writer halves: a serial port paced to the line, an in-memory pair, a byte tap. |
 | [`sim`](crates/sim) | The controller simulator behind an in-memory link, for tests and dry runs; checked against every GMC capture and session log. |
 | [`program`](crates/program) | The program format: types, parsing, validation. |
-| [`mc601`](crates/mc601) | The command line: `run`, `calibrate`, `check`, `probe`, `logs`, `config`, `ports`, `capture`. |
+| [`mc601`](crates/mc601) | The command line: `run`, `calibrate`, `calibration`, `check`, `probe`, `logs`, `config`, `ports`, `capture`. |
 
 **Invariant:** commands this software must never send (mode 9 file transfer, firmware upload,
 parameter save `#W`) cannot be represented in `protocol::Command`.

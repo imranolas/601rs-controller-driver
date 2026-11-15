@@ -32,7 +32,7 @@ use crate::target::Res;
 
 /// `mc601 calibrate sheet`: the sheet's program, written to `out`.
 pub fn sheet(out: &Path) -> Res<bool> {
-    let program = ::calibrate::sheet::program(&Profile::gunnar_601());
+    let program = ::calibrate::sheet::program(&crate::calibration::machine());
     let text = serde_json::to_string_pretty(&program)? + "\n";
     std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
     let cuts = program
@@ -54,7 +54,7 @@ const READINGS_FILE: &str = "readings.txt";
 /// `mc601 calibrate cut`: write the sheet into the session, cut it raw, take its readings.
 pub fn cut(port: &str, session: &Session) -> Res<bool> {
     let file = session.dir.join(SHEET_FILE);
-    let program = ::calibrate::sheet::program(&Profile::gunnar_601());
+    let program = ::calibrate::sheet::program(&crate::calibration::machine());
     std::fs::write(&file, serde_json::to_string_pretty(&program)? + "\n")
         .map_err(|e| format!("{}: {e}", file.display()))?;
     anstream::println!(
@@ -329,7 +329,7 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     if readings.is_empty() {
         return Ok(true);
     }
-    let profile = Profile::gunnar_601();
+    let profile = crate::calibration::machine();
     let text = std::fs::read_to_string(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let thickness = program.board.thickness_mm;
     let sheet = Sheet {
@@ -366,7 +366,7 @@ fn keep(dir: &Path, report: &str, fitted: &Profile) -> Res<()> {
 
 /// `mc601 calibrate fit`: fit session folders and loose sheets together.
 pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>) -> Res<bool> {
-    let profile = Profile::gunnar_601();
+    let profile = crate::calibration::machine();
     let mut all = Vec::new();
     for d in dirs {
         let (path, _, log) = session_files(d)?;
@@ -677,5 +677,39 @@ mod tests {
         let fitted = fit.profile(&Profile::gunnar_601());
         assert_eq!(fitted.straight.offset_mm, [6.413, 1.868]);
         assert_eq!(fitted.bevel.offset_mm, [-71.452, 2.032]);
+    }
+
+    /// The record's fitted head offsets, written into the calibration file, are the machine
+    /// everything then drives: the file resolves to the profile the fit writes.
+    #[test]
+    fn the_records_fit_in_the_file_is_the_machine() {
+        use ::calibrate::key::Axis;
+        use ::calibrate::{Calibration, Edit, Key, Why};
+        let readings =
+            read_readings(&Path::new(RECORD).join("calibration_1.readings.txt")).expect("readings");
+        let sheet = Sheet::lowered(
+            "calibration_1",
+            program("calibration_1.json"),
+            &cut_with_on_10_nov(),
+            readings,
+        )
+        .expect("lowers");
+        let (fit, _) = fit_sheets(&[sheet]).expect("fits");
+        let cal = Calibration::new();
+        let mut edits = Vec::new();
+        for h in [Head::Straight, Head::Bevel] {
+            let (mm, se) = fit.head_offset(h, &cal.machine()).expect("settled");
+            for (i, axis) in [Axis::X, Axis::Y].into_iter().enumerate() {
+                let v = (mm[i] * 1000.0).round() / 1000.0;
+                edits.push(Edit::set(Key::HeadOffset(h, axis), v).with_se(se[i]));
+            }
+        }
+        let why = Why {
+            routine: Some("calibration_1".into()),
+            ..Why::typed("2026-11-10T16:00:00Z")
+        };
+        let cal = cal.set(&edits, &why).expect("set");
+        assert_eq!(cal.machine(), fit.profile(&Profile::gunnar_601()));
+        assert_eq!(cal.revision(), 1);
     }
 }

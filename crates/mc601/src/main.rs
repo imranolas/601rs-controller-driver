@@ -7,6 +7,7 @@
 //! (`mc601 config`), else the only USB-serial port plugged in (`config`).
 
 mod calibrate;
+mod calibration;
 mod check;
 mod config;
 mod cut;
@@ -45,6 +46,9 @@ use crate::target::Res;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// The calibration file [default: the one mc601 shares with Bevel: `mc601 calibration path`]
+    #[arg(long, global = true, value_name = "FILE")]
+    calibration: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -59,6 +63,15 @@ enum Command {
     /// Calibrate the heads: cut the sheet, take its readings, fit them
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
+    /// Show the machine's calibration, change a value, or go back to an earlier revision
+    #[command(
+        after_help = "Examples:\n  mc601 calibration\n  mc601 calibration history\n  \
+                            mc601 calibration set machine.bevel.offset.x -71.462\n  \
+                            mc601 calibration set profile.C2.name \"Mount board 1.4\" \
+                            profile.C2.thickness_mm 1.4 profile.C2.speed_pct 95 \
+                            profile.C2.head_settle_ms 200\n  mc601 calibration revert 3"
+    )]
+    Calibration(CalibrationArgs),
     /// List recent sessions
     Logs(LogsArgs),
     /// Ask the controller read-only questions; nothing moves (stage 1)
@@ -175,6 +188,49 @@ struct LogsArgs {
 }
 
 #[derive(Args)]
+struct CalibrationArgs {
+    #[command(subcommand)]
+    command: Option<CalibrationCommand>,
+}
+
+#[derive(Subcommand)]
+enum CalibrationCommand {
+    /// Every value: the file's, or the driver's default [the default command]
+    Show {
+        /// Only the values the file sets
+        #[arg(long)]
+        set: bool,
+    },
+    /// Every change, oldest first
+    History,
+    /// Set values, as one revision: KEY VALUE [KEY VALUE ...]
+    Set {
+        #[arg(required = true, num_args = 2.., value_names = ["KEY", "VALUE"], allow_negative_numbers = true)]
+        pairs: Vec<String>,
+        /// Why, for the history
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Put values back to the driver's default, as one revision
+    Unset {
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+        /// Why, for the history
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove a board profile and all its values
+    RemoveProfile {
+        /// The profile's id (C2)
+        id: String,
+    },
+    /// Every value as it was at REVISION, as a new revision
+    Revert { revision: u32 },
+    /// Print where the calibration file is
+    Path,
+}
+
+#[derive(Args)]
 struct ConfigArgs {
     /// Remember this port
     #[arg(long, value_name = "PORT")]
@@ -216,9 +272,24 @@ fn parse_stages(v: &str) -> Result<Stages, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let needs_calibration = matches!(
+        cli.command,
+        Command::Run(_)
+            | Command::Calibrate(_)
+            | Command::Calibration(_)
+            | Command::Probe(_)
+            | Command::Check(_)
+    );
+    if needs_calibration {
+        if let Err(e) = calibration::init(cli.calibration.clone()) {
+            anstream::eprintln!("{} {e}", paint(BAD, "error:"));
+            return ExitCode::FAILURE;
+        }
+    }
     let result = match cli.command {
         Command::Run(a) => run(a),
         Command::Calibrate(c) => calibrate_command(c),
+        Command::Calibration(a) => calibration_command(a),
         Command::Logs(a) => logs(a),
         Command::Probe(m) => machine_check("probe", &m, false, &[], 0),
         Command::Check(a) => machine_check("check", &a.machine, a.sim_limits, &a.stage.0, a.speed),
@@ -255,7 +326,14 @@ fn open_session(
     anstream::println!(
         "{} on {on}  {}",
         paint(style::BOLD, cmd),
-        paint(DIM, format!("· session {}", tidy(&session.dir)))
+        paint(
+            DIM,
+            format!(
+                "· session {} · {}",
+                tidy(&session.dir),
+                calibration::describe()
+            )
+        )
     );
     Ok((port, session))
 }
@@ -331,6 +409,18 @@ fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
             calibrate::fit(&dirs, &triples, f.profile.as_deref())
         }
         CalibrateCommand::Sheet { out } => calibrate::sheet(&out),
+    }
+}
+
+fn calibration_command(a: CalibrationArgs) -> Res<bool> {
+    match a.command.unwrap_or(CalibrationCommand::Show { set: false }) {
+        CalibrationCommand::Show { set } => calibration::show(set),
+        CalibrationCommand::History => calibration::history(),
+        CalibrationCommand::Set { pairs, note } => calibration::set(&pairs, note),
+        CalibrationCommand::Unset { keys, note } => calibration::unset(&keys, note),
+        CalibrationCommand::RemoveProfile { id } => calibration::remove_profile(&id),
+        CalibrationCommand::Revert { revision } => calibration::revert(revision),
+        CalibrationCommand::Path => calibration::print_path(),
     }
 }
 
