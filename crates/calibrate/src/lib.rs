@@ -1,6 +1,7 @@
-//! Calibrating the 601 (CALIBRATION.md): the machine's calibration file, the calibration sheet,
-//! where each of its cuts went, and the fit to the operator's readings. Pure but for [`store`]:
-//! no clock, so `mc601` and an app (Bevel) use it alike.
+//! Calibrating the 601 (CALIBRATION.md): the machine's calibration file, the two routines that
+//! calibrate it, as plans an app can run, their sessions, the fit to the operator's readings,
+//! and what it proposes. Pure but for [`store`]: no clock, so `mc601` and an app (Bevel) use it
+//! alike.
 //!
 //! - [`calibration`]: the file. The calibrated values over the driver's defaults (the shop's
 //!   601 as fitted), the board profiles, and the history; what everything that cuts asks for
@@ -10,16 +11,18 @@
 //!   and bounds.
 //! - [`store`]: where the file lives, shared by `mc601` and Bevel, and reading and writing it
 //!   without one overwriting the other's change.
-//! - [`sheet`]: calibration sheet 2, in carriage coordinates, and the readings to take off it.
+//! - [`plan`]: a routine as data: the program to cut, the steps and readings, what each should
+//!   read and where it is taken; [`heads`] (stage 1) and [`runons`] (stage 2) make them.
+//! - [`session`]: one run of a routine, kept as a file: how far it was cut, the readings so far.
+//! - [`fit`]: the readings as linear rows in each head's unknowns (where its line lands on the
+//!   registered corner, where each side of its slit lands, its drag), solved by least squares
+//!   with each unknown's standard error; the combs read by eye; and what a calibration predicts.
+//! - [`proposal`]: what a fit proposes for the file, each change with its verdict and its
+//!   effect in words, applied as one revision.
 //! - [`sent`]: the cuts a program sent, in carriage millimetres, from the bytes on the line or
 //!   from lowering the program again with the profile it was cut with. Lowering is pure, so an
 //!   app that keeps no log still knows where every cut went.
-//! - [`fit`]: the readings as linear rows in each head's unknowns (where its line lands on the
-//!   registered corner, where each side of its slit lands, its drag), solved by least squares
-//!   with each unknown's standard error; the combs read by eye.
-//!
-//! Steps 1, 2, 3 and 5 of CALIBRATION.md §10. The routines as plans, and the fit's proposals
-//! applied to the file, come next.
+//! - [`sheet`]: calibration sheet 2, the record's, in carriage coordinates.
 //!
 //! Depends on `compiler`, `machine` and `program`.
 

@@ -31,13 +31,16 @@ macOS, Linux or Windows. `mc601` is its command line.
   pace with the line, so a stop never waits behind a backlog of queued vectors.
 - **Checks the machine** (`mc601 probe`, `mc601 check`): eight stages, from read-only questions to
   every move, asking before each step and logging every byte both ways.
-- **Calibrates the heads** (`mc601 calibrate`): cut one sheet, type in what the ruler says, and a
-  least-squares fit of the blade model gives each head's offset, drag and slit.
-  The machine's calibration is one file (`mc601 calibration`), with its history, that
-  everything that cuts reads.
+- **Calibrates the heads** (`mc601 calibrate heads | runons`, [`CALIBRATION.md`](CALIBRATION.md)):
+  two routines on 150 × 150 mm offcuts. Stage 1 cuts a mount with a bevel window and takes 16
+  caliper readings for each head's position, its slit and the bevel's lean; stage 2 cuts combs,
+  read by flexing the board, for how far each head reaches along a cut on each face. Each
+  proposes its changes, ± their uncertainty, in words, and writes the chosen ones as a revision
+  of the machine's calibration file (`mc601 calibration`), which everything that cuts reads.
 - **Nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs, and
   **compiles a laid-out sheet into a program** ([`compiler`](crates/compiler)): each cut placed
-  by the calibrated blade model and run on past its corners, ovals with their overlap, shared
+  by the calibrated tool model, for the board's thickness, and run on past its corners until it
+  meets the next cut on both faces, ovals with their overlap, shared
   edges cut once, in the order ([`route`](crates/route)) that travels least within the cutting
   rules, clear of the clamp pads or with the operator told which to turn.
 - **Simulates the controller** ([`sim`](crates/sim)), held to the real thing: `cargo test`
@@ -80,7 +83,7 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 |-------|--------------|
 | `station` *(planned)* | Service on the machine PC: the queue, an HTTP API and events for apps; starts cuts only from the machine's own screen. |
 | [`nest`](crates/nest) | Places mats on sheets of their board type, and in other mats' drop-outs: three-stage guillotine layouts by iterative beam search (after PackingSolver), offcuts before full sheets, every layout checked before it is returned. |
-| [`calibrate`](crates/calibrate) | Calibrating the machine: the calibration file (head offsets, scale, the blade, each board profile's settings, with its history), shared by `mc601` and apps and read by everything that cuts; the calibration sheet, where each of its cuts went (from lowering, no log needed), and the least-squares fit of the blade model. To come ([`CALIBRATION.md`](CALIBRATION.md)): the routines as plans an app can run, and fits applied to the file. |
+| [`calibrate`](crates/calibrate) | Calibrating the machine ([`CALIBRATION.md`](CALIBRATION.md)): the calibration file (head offsets, each head's tool model, the board profiles, with its history), shared by `mc601` and apps and read by everything that cuts; the two routines as plans an app can run, their sessions, the least-squares fit, and proposals with verdicts and effects, applied to the file as revisions. Where each cut went comes from lowering, no log needed. |
 | [`compiler`](crates/compiler) | A laid-out sheet to a program: rectangles and ovals placed by the blade model (fitted from calibration, GMC's overcuts), run on past their corners, ovals flattened with their overlap and run-out, shared edges one stroke, an order that keeps the clamp rules and travels least, the clamp pads to turn. Checked against GMC's own jobs. |
 | [`route`](crates/route) | The cut order: which cut next and which way round, so the head travels least, within the cutting rules. |
 | [`runner`](crates/runner) | Drives the cutter: configures the controller, homes, runs programs and manual moves; pause, cancel, holds, stop now, a safe state after any failure, events. |

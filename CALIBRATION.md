@@ -19,27 +19,37 @@ generic: a new routine needs no new UI.
 
 ## 1. Where things stand
 
-What exists works. It just can't be reached from an app, and its results don't flow anywhere.
+*16 Nov, end of day.* Built on `calibrate/m3-plans` (§10 has each step):
 
-- **The fit** is in the `mc601` binary (`crates/mc601/src/calibrate.rs`). It is a least-squares
-  fit of the blade model (each head's line `P`, the slit edges `e`, the drag), with standard
-  errors and the overcut combs read by eye. It is good and it stays (§7). But it is driven from
-  the terminal, and it gets each cut's carriage position by parsing the serial tap log. Bevel's
-  station keeps no such log.
-- **The sheet** (`calibration_2`) is cut **raw**: carriage coordinates, run with
-  `Profile::raw()`, chosen by `meta.calibration.frame = "carriage"` in `mc601 run`. The runner
-  takes its profile once, at `Runner::new`, so Bevel's station can't cut raw without a new mode.
-- **Calibrated numbers live in source.** The board origin `(0.225, −0.275)` and the head offsets
-  `(−71.45, 2.03)` and `(6.41, 1.88)` are in `Profile::gunnar_601()`. The slit edges are in
-  `Blade::fitted()`. Today a calibration means editing Rust and rebuilding.
-- **Bevel hardcodes both.** `machine::Profile::gunnar_601()` appears in five places in Bevel
-  (`station`, `arrange::time`, `arrange::load`, `arrange::arrange`), and
-  `compiler::Blade::fitted()` in one (`arrange::time`). Bevel's profiles in
-  `data/materials.json` (C2, C3, C16) have a name and a thickness. Their cutting settings
-  (speed, settle, trims) are placeholders.
-- **Profile values have no home.** Speed, head settle and blade trims travel in each program's
-  `material`. Run-ons, overlaps and run-outs are GMC's numbers in `Blade::gmc()`, the same for
-  every board.
+- **The file** (§4): the machine's calibration, one per machine, shared by `mc601` and Bevel,
+  with its history and revert. Everything that cuts asks it: `machine()`, `blade()`,
+  `material(profile)`, `thickness(profile)`.
+- **The tool model** (§3) in the compiler: each head described physically, lines and run-ons
+  worked out from it and the board's thickness.
+- **The two routines** (§5): stage 1, the heads (16 caliper readings), and stage 2, the
+  run-ons (8 combs read by flexing), each a plan (§6), a session (§8) and a proposal with
+  verdicts and effects in words (§7); `mc601 calibrate heads | runons | read | fit`.
+- **How a cut starts:** the bevel's soft start on thick board, and an oval's entry as GMC's,
+  each switchable.
+- **The runner** takes a new calibration between runs (`set_profile`).
+- All of it runs end to end on the simulator, and GMC's own jobs are still rebuilt to the step.
+
+**Waiting on the machine** (`docs/hardware-testing.md`), in order:
+
+1. The comparison cuts on thick board: the bevel's soft start against GMC's start, and an
+   oval's entry against a full settle.
+2. Stage 1 on a measured offcut: the first real scatter, and straight strokes cut both ways.
+3. Stage 2 on a common board, then on a 2.5–2.7 mm board: whether the reach changes with
+   thickness.
+4. If its sheet is still there, calibration 1's overrun readings taken again on the face
+   (§10, step 4).
+
+**Waiting on Bevel** (step 9, §10): its Calibrate on the driver's session and
+stage 2; cutting with the file's blade and machine, not the hardcoded defaults; programs
+compiled again when the calibration is newer; the board profiles in the file.
+
+**Not yet:** pooling sessions in a proposal (a report only, `mc601 calibrate fit DIR DIR`);
+ovals and hooks (§5); Bevel recording a blade change (§11).
 
 ## 2. Principles
 
