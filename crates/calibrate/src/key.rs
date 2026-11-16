@@ -11,10 +11,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Axis {
     X,
     Y,
+}
+
+impl Axis {
+    pub const BOTH: [Axis; 2] = [Axis::X, Axis::Y];
+
+    /// Its place in a point: 0 for X, 1 for Y.
+    pub fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+        }
+    }
+
+    /// As a key and a person write it: `x`, `y`.
+    fn word(self) -> &'static str {
+        match self {
+            Axis::X => "x",
+            Axis::Y => "y",
+        }
+    }
 }
 
 /// A side of the board: the back, up, where the blade enters; the face, the customer's, down.
@@ -113,19 +134,6 @@ impl fmt::Display for Val {
     }
 }
 
-pub(crate) const HEADS: [Head; 2] = [Head::Bevel, Head::Straight];
-
-fn head_word(h: Head) -> &'static str {
-    match h {
-        Head::Bevel => "bevel",
-        Head::Straight => "straight",
-    }
-}
-
-fn head_of(s: &str) -> Option<Head> {
-    HEADS.into_iter().find(|h| head_word(*h) == s)
-}
-
 /// A profile id: letters, digits, `_` and `-`, so it can sit in a dotted key.
 pub fn valid_profile_id(id: &str) -> bool {
     !id.is_empty()
@@ -199,13 +207,11 @@ impl Key {
     /// The machine's keys, in the order the overview lists them.
     pub fn machine() -> Vec<Key> {
         let mut out = Vec::new();
-        for h in HEADS {
-            out.push(Key::HeadOffset(h, Axis::X));
-            out.push(Key::HeadOffset(h, Axis::Y));
+        for h in Head::ALL {
+            out.extend(Axis::BOTH.map(|a| Key::HeadOffset(h, a)));
         }
-        out.push(Key::Scale(Axis::X));
-        out.push(Key::Scale(Axis::Y));
-        for head in HEADS {
+        out.extend(Axis::BOTH.map(Key::Scale));
+        for head in Head::ALL {
             for value in BladeValue::ALL {
                 out.push(Key::Blade { head, value });
             }
@@ -356,13 +362,10 @@ impl Key {
 
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let axis = |a: &Axis| if *a == Axis::X { "x" } else { "y" };
         match self {
-            Key::HeadOffset(h, a) => write!(f, "machine.{}.offset.{}", head_word(*h), axis(a)),
-            Key::Scale(a) => write!(f, "machine.scale.{}", axis(a)),
-            Key::Blade { head, value } => {
-                write!(f, "blade.{}.{}", head_word(*head), value.path())
-            }
+            Key::HeadOffset(h, a) => write!(f, "machine.{h}.offset.{}", a.word()),
+            Key::Scale(a) => write!(f, "machine.scale.{}", a.word()),
+            Key::Blade { head, value } => write!(f, "blade.{head}.{}", value.path()),
             Key::Profile { profile, value } => write!(f, "profile.{profile}.{}", value.path()),
         }
     }
@@ -374,11 +377,8 @@ impl FromStr for Key {
     fn from_str(s: &str) -> Result<Key, Error> {
         let bad = || Error::File(format!("{s:?} isn't a calibration value"));
         let parts: Vec<&str> = s.split('.').collect();
-        let axis = |a: &str| match a {
-            "x" => Some(Axis::X),
-            "y" => Some(Axis::Y),
-            _ => None,
-        };
+        let axis = |a: &str| Axis::BOTH.into_iter().find(|x| x.word() == a);
+        let head = |h: &str| h.parse::<Head>().ok();
         let blade = |rest: &[&str]| {
             let path = rest.join(".");
             BladeValue::ALL.into_iter().find(|v| v.path() == path)
@@ -386,10 +386,10 @@ impl FromStr for Key {
         let key = match parts.as_slice() {
             ["machine", "scale", a] => Key::Scale(axis(a).ok_or_else(bad)?),
             ["machine", h, "offset", a] => {
-                Key::HeadOffset(head_of(h).ok_or_else(bad)?, axis(a).ok_or_else(bad)?)
+                Key::HeadOffset(head(h).ok_or_else(bad)?, axis(a).ok_or_else(bad)?)
             }
             ["blade", h, rest @ ..] => Key::Blade {
-                head: head_of(h).ok_or_else(bad)?,
+                head: head(h).ok_or_else(bad)?,
                 value: blade(rest).ok_or_else(bad)?,
             },
             ["profile", id, rest @ ..] if valid_profile_id(id) => {

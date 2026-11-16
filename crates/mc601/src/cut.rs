@@ -74,12 +74,13 @@ fn read(file: &Path) -> Res<Program> {
     Ok(Program::from_json(&text).map_err(|e| format!("{}: {e}", file.display()))?)
 }
 
-/// Whether `program` is a calibration sheet with readings to take.
+/// Whether `program` is a calibration sheet, with readings to take: a stage's (its plan's) or
+/// the record's.
 fn has_readings(program: &Program) -> bool {
     program
         .meta
         .as_ref()
-        .and_then(|m| m.pointer("/calibration/readings"))
+        .and_then(|m| m.get("calibration"))
         .is_some()
 }
 

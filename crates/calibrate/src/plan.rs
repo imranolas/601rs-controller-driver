@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use machine::Profile;
 use program::{Board, Clamp, ClampSide, Cut, Head, Material, Op, Program};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::key::Surface;
+use crate::fit::predict;
+use crate::reading::{Check, Kind, Reading};
 use crate::{Calibration, Error, Sheet};
 
 /// A calibration routine (CALIBRATION.md §5).
@@ -87,7 +88,9 @@ impl Stock {
         if (0.5..=6.0).contains(&t) {
             Ok(())
         } else {
-            Err(format!("calibration needs a board 0.5 to 6 mm thick, not {t} mm").into())
+            Err(Error::Plan(format!(
+                "calibration needs a board 0.5 to 6 mm thick, not {t} mm"
+            )))
         }
     }
 }
@@ -102,15 +105,9 @@ pub(crate) struct Line {
     pub b: [f64; 2],
 }
 
-/// A routine's program on `stock`: the left clamp, then `lines` in order, its readings listed
-/// as the fit reads them.
-pub(crate) fn program(
-    id: &str,
-    routine: Routine,
-    stock: &Stock,
-    lines: &[Line],
-    readings: Vec<Value>,
-) -> Program {
+/// A routine's program on `stock`: the left clamp, then `lines` in order. Its meta names the
+/// routine, which marks it a calibration sheet; its readings are the plan's.
+pub(crate) fn program(id: &str, routine: Routine, stock: &Stock, lines: &[Line]) -> Program {
     let mut ops = vec![Op::Clamp(Clamp {
         id: None,
         label: None,
@@ -132,10 +129,7 @@ pub(crate) fn program(
         id: id.to_owned(),
         meta: Some(json!({
             "source": format!("calibrate: {} of the 601's calibration (CALIBRATION.md §5)", routine.name()),
-            "calibration": {
-                "version": 2, "frame": "board", "routine": routine.name(),
-                "readings": readings,
-            },
+            "calibration": { "frame": "board", "routine": routine.name() },
         })),
         board: Board {
             width_mm: OFFCUT_MM,
@@ -149,12 +143,12 @@ pub(crate) fn program(
 
 /// What to cut and what to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Plan {
     pub routine: Routine,
     /// The board it needs, in words.
     pub board: String,
-    /// What to cut, in the board frame; its readings are listed in its
-    /// `meta.calibration.readings`, which the fit reads.
+    /// What to cut, in the board frame.
     pub program: Program,
     /// The machine profile it was placed with, the calibration's: lowering the program with it
     /// gives where the carriage went.
@@ -166,65 +160,12 @@ pub struct Plan {
 
 /// Readings taken with the pieces held one way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
     /// "Lift the mount out of the frame, push out the window, and lay the mount back up."
     pub instruction: String,
     /// Reading ids, in order.
     pub readings: Vec<String>,
-}
-
-/// One reading.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Reading {
-    /// "W.width".
-    pub id: String,
-    /// "The window, left to right (inside jaws)".
-    pub prompt: String,
-    /// The side of the board up as it is read.
-    pub surface: Surface,
-    pub kind: Kind,
-    /// Where it is taken, in the board frame: from one edge to the other, mm; for a comb, its
-    /// reference.
-    pub dimension: [[f64; 2]; 2],
-    /// The program's cuts it reads: if one of them didn't finish, it can't be taken.
-    pub needs: Vec<String>,
-}
-
-/// What a reading is.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    /// A length, by calipers, mm.
-    Length {
-        /// What it should read by the calibration the plan was made with.
-        expected_mm: f64,
-        /// Further than this from what's expected, ask before keeping it.
-        unusual_mm: f64,
-    },
-    /// A comb's first tooth to come free at its reference, by flexing the board: 1 to `teeth`
-    /// from the shortest, or 0 if none does. Its teeth are the program's cuts `cuts`, tooth 1
-    /// first.
-    Tooth { teeth: usize, cuts: Vec<String> },
-}
-
-impl Reading {
-    /// What a length should read; none for a comb.
-    pub fn expected_mm(&self) -> Option<f64> {
-        match self.kind {
-            Kind::Length { expected_mm, .. } => Some(expected_mm),
-            Kind::Tooth { .. } => None,
-        }
-    }
-}
-
-/// A value as typed.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Check {
-    Fine,
-    /// Further from what's expected than a misread usually is: ask before keeping it.
-    Unusual {
-        off_mm: f64,
-    },
 }
 
 impl Plan {
@@ -237,35 +178,9 @@ impl Plan {
     /// # Errors
     /// When the plan has no such reading, or the value isn't a length, or a tooth of the comb.
     pub fn check(&self, id: &str, value: f64) -> Result<Check, Error> {
-        let r = self
-            .reading(id)
-            .ok_or_else(|| format!("{id} isn't a reading of this plan"))?;
-        match r.kind {
-            Kind::Length {
-                expected_mm,
-                unusual_mm,
-            } => {
-                if !(value.is_finite() && value > 0.0) {
-                    return Err(format!("{id}: {value} isn't a length").into());
-                }
-                let off_mm = (value - expected_mm).abs();
-                Ok(if off_mm > unusual_mm {
-                    Check::Unusual { off_mm }
-                } else {
-                    Check::Fine
-                })
-            }
-            Kind::Tooth { teeth, .. } => {
-                if value.fract() == 0.0 && (0.0..=teeth as f64).contains(&value) {
-                    Ok(Check::Fine)
-                } else {
-                    Err(
-                        format!("{id}: give the tooth, 1 to {teeth}, or 0 if none came free")
-                            .into(),
-                    )
-                }
-            }
-        }
+        self.reading(id)
+            .ok_or_else(|| Error::Reading(format!("{id} isn't a reading of this plan")))?
+            .check(value)
     }
 
     /// The cut sheet with `readings`: where its cuts went, by lowering the program with the
@@ -279,8 +194,28 @@ impl Plan {
         readings: HashMap<String, f64>,
     ) -> Result<Sheet, Error> {
         if let Some(id) = readings.keys().find(|id| self.reading(id).is_none()) {
-            return Err(format!("{id} isn't a reading of this plan").into());
+            return Err(Error::Reading(format!("{id} isn't a reading of this plan")));
         }
-        Sheet::lowered(label, self.program.clone(), &self.cut_with, readings)
+        Sheet::lowered(
+            label,
+            self.program.clone(),
+            &self.cut_with,
+            self.readings.clone(),
+            readings,
+        )
+    }
+
+    /// The plan with each length's expected value, by calibration `cal`, where its cuts go.
+    ///
+    /// # Errors
+    /// When the program doesn't lower.
+    pub(crate) fn expecting(mut self, cal: &Calibration) -> Result<Plan, Error> {
+        let expected = predict(&self.sheet("plan", HashMap::new())?, cal)?;
+        for r in &mut self.readings {
+            if let Kind::Length { expected_mm, .. } = &mut r.kind {
+                *expected_mm = expected.get(&r.id).copied();
+            }
+        }
+        Ok(self)
     }
 }

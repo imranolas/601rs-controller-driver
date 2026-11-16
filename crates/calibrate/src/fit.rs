@@ -1,73 +1,96 @@
-//! The fit (CALIBRATION.md §7). The model, per head, in carriage millimetres:
+//! The fit (CALIBRATION.md §7), in the tool model's own terms (`compiler::HeadCut`), per head,
+//! in carriage millimetres:
 //!
 //! - `P`: where the carriage puts the head's line on the corner where boards register, so a cut
 //!   commanded at carriage `c` runs along board `c − P`. One pair per head: only the sum of a
 //!   board origin and a head offset can be seen in a cut, so it is fitted as one;
-//! - `e`: where each side of the slit lands from the line, to the left and to the right of
-//!   travel, positive towards that side; for the bevel, separately on the back (as cut) and on
-//!   the face, which differ by the bevel's run;
-//! - the drag at the start and at the end of a cut (calibration 1's overrun readings).
+//! - the slit: its middle `s` left of the line on the back, its width `w`, and how far it moves
+//!   left per mm deeper, `r` (the tangent of the lean; none on the straight head). A depth `z`
+//!   below the back, its left side lies `s + z·r + w/2` left of the line, its right side
+//!   `w/2 − s − z·r` right of it;
+//! - how far a cut starts before its commanded start, and stops short of its commanded end, on
+//!   the back (calibration 1's overrun readings).
 //!
-//! An edge reading is `c − P + σe` (σ = ±1, the kept side along the axis), a width is two edges'
-//! difference (`P` cancels), an overrun is `overcut ± drag − e`. The combs are read by eye: the
-//! first tooth that reaches the reference gives an interval for the overcut a corner needs.
+//! An edge reading is `c − P + σe` (σ = ±1, the side read along the axis, `e` where that side
+//! lands), a width is two edges' difference (`P` cancels), an overrun is `overcut ± lead or
+//! shortfall − e`. Each is one linear row; the combs, read by eye, aren't fitted
+//! ([`crate::runons`]). Every unknown is the same on any board, so sheets cut on different
+//! boards fit together.
 
 use std::collections::HashMap;
 
+use compiler::Blade;
 use machine::{MachineMm, Profile};
 use nalgebra::{DMatrix, DVector};
-use program::{Cut, Head, Op, Program};
-use serde_json::Value;
+use program::{Head, Op, Program};
 
+use crate::key::{Axis, Surface};
+use crate::reading::{Edge, End, Kind, Reading, Side, Span};
 use crate::sent::{SentCut, cuts_from_lowering};
 use crate::{Calibration, Error};
-
-/// Which face of the board a slit edge is read on: the bevel's differ, by the bevel's run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Face {
-    Any,
-    Back,
-    Front,
-}
 
 /// One unknown of the fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unknown {
-    /// Head, axis: where the carriage puts the head's line on the registered corner.
-    P(Head, usize),
-    /// Head, kept side right?, face: where that side of the slit lands from the line.
-    E(Head, bool, Face),
-    /// Head, at the start?: the drag.
-    Drag(Head, bool),
+    /// Where the carriage puts the head's line on the registered corner, mm: the board origin
+    /// less the head's offset.
+    P(Head, Axis),
+    /// Where the slit's middle lies on the back, mm left of the line (`HeadCut::sideways_mm`).
+    Sideways(Head),
+    /// How far apart the slit's sides are, mm (`HeadCut::width_mm`).
+    Width(Head),
+    /// How far the slit moves left per mm deeper into the board: the tangent of the lean
+    /// (`HeadCut::run_per_mm`). The bevel's only.
+    Run(Head),
+    /// How far a cut starts before its commanded start, on the back, mm.
+    Lead(Head),
+    /// How far a cut stops short of its commanded end, on the back, mm.
+    Shortfall(Head),
 }
 
 impl Unknown {
     pub fn head(&self) -> Head {
         match *self {
-            Unknown::P(h, _) | Unknown::E(h, _, _) | Unknown::Drag(h, _) => h,
+            Unknown::P(h, _)
+            | Unknown::Sideways(h)
+            | Unknown::Width(h)
+            | Unknown::Run(h)
+            | Unknown::Lead(h)
+            | Unknown::Shortfall(h) => h,
         }
     }
-    fn order(&self) -> (u8, u8, u8, u8) {
+
+    fn order(&self) -> (u8, u8) {
         let h = u8::from(self.head() == Head::Bevel);
         match *self {
-            Unknown::P(_, a) => (h, 0, a as u8, 0),
-            Unknown::E(_, r, f) => (h, 1, u8::from(r), f as u8),
-            Unknown::Drag(_, s) => (h, 2, u8::from(!s), 0),
+            Unknown::P(_, a) => (h, a.index() as u8),
+            Unknown::Sideways(_) => (h, 2),
+            Unknown::Width(_) => (h, 3),
+            Unknown::Run(_) => (h, 4),
+            Unknown::Lead(_) => (h, 5),
+            Unknown::Shortfall(_) => (h, 6),
         }
     }
-    /// How the report names it: `Px`, `e left, back`, `drag start`.
+
+    /// How the report names it: `Px`, `sideways`, `run per mm`.
     pub fn label(&self) -> String {
         match *self {
-            Unknown::P(_, a) => format!("P{}", ["x", "y"][a]),
-            Unknown::E(_, r, f) => {
-                let side = if r { "right" } else { "left" };
-                match f {
-                    Face::Any => format!("e {side}"),
-                    Face::Back => format!("e {side}, back"),
-                    Face::Front => format!("e {side}, face"),
-                }
-            }
-            Unknown::Drag(_, s) => format!("drag {}", if s { "start" } else { "end" }),
+            Unknown::P(_, Axis::X) => "Px",
+            Unknown::P(_, Axis::Y) => "Py",
+            Unknown::Sideways(_) => "sideways",
+            Unknown::Width(_) => "slit width",
+            Unknown::Run(_) => "run per mm",
+            Unknown::Lead(_) => "lead, back",
+            Unknown::Shortfall(_) => "shortfall, back",
+        }
+        .to_owned()
+    }
+
+    /// Its unit: mm, or mm per mm of board for the run.
+    pub fn unit(&self) -> &'static str {
+        match self {
+            Unknown::Run(_) => "mm/mm",
+            _ => "mm",
         }
     }
 }
@@ -80,23 +103,19 @@ struct Row {
     sd: f64,
 }
 
-/// A comb read by eye: the first tooth that reached (0 for none).
-#[derive(Debug, Clone, PartialEq)]
-pub struct CombReading {
-    pub name: String,
-    pub head: Head,
-    pub at_start: bool,
-    pub tooth: usize,
-    /// Each tooth's overcut, least first, mm.
-    pub values: Vec<f64>,
-}
-
-fn head_of(s: &str) -> Result<Head, Error> {
-    match s {
-        "bevel" => Ok(Head::Bevel),
-        "straight" => Ok(Head::Straight),
-        _ => Err(format!("unknown head {s:?}").into()),
+/// Where `side` of `head`'s slit lands from its line, `depth_mm` below the back, mm toward
+/// that side: as terms in the unknowns. The straight head has no lean, so its sides are the
+/// same on either face.
+fn side_terms(head: Head, side: Side, depth_mm: f64) -> Vec<(Unknown, f64)> {
+    let k = match side {
+        Side::Left => 1.0,
+        Side::Right => -1.0,
+    };
+    let mut terms = vec![(Unknown::Sideways(head), k), (Unknown::Width(head), 0.5)];
+    if head == Head::Bevel {
+        terms.push((Unknown::Run(head), k * depth_mm));
     }
+    terms
 }
 
 /// A cut as the fit sees it: head, start, end, unit direction (along X or Y), all in carriage
@@ -116,7 +135,9 @@ impl Line {
         let len = (b[0] - a[0]).hypot(b[1] - a[1]);
         let d = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
         if d[0].abs() > 1e-6 && d[1].abs() > 1e-6 {
-            return Err(format!("{what}: calibration cuts run along X or Y").into());
+            return Err(Error::Sheet(format!(
+                "{what}: calibration cuts run along X or Y"
+            )));
         }
         Ok(Line {
             head: c.head,
@@ -126,197 +147,149 @@ impl Line {
             planned,
         })
     }
-    /// The kept side's direction along `axis`: ±1.
-    fn sigma(&self, kept_right: bool, axis: usize) -> f64 {
-        let dir = if kept_right {
-            [self.d[1], -self.d[0]]
-        } else {
-            [-self.d[1], self.d[0]]
+
+    /// The side's direction along `axis`: ±1.
+    fn sigma(&self, side: Side, axis: Axis) -> f64 {
+        let toward = match side {
+            Side::Right => [self.d[1], -self.d[0]],
+            Side::Left => [-self.d[1], self.d[0]],
         };
-        dir[axis].round()
-    }
-    fn e(&self, kept_right: bool, face: Face) -> Unknown {
-        let face = if self.head == Head::Straight {
-            Face::Any
-        } else {
-            face
-        };
-        Unknown::E(self.head, kept_right, face)
+        toward[axis.index()].round()
     }
 }
 
-fn face_of(v: Option<&str>) -> Face {
-    match v {
-        Some("face") => Face::Front,
-        Some("back") => Face::Back,
-        _ => Face::Any,
-    }
+/// What a caliper reading should show by the model: `Σ c·u + at`.
+struct Lin {
+    terms: Vec<(Unknown, f64)>,
+    at: f64,
 }
 
-fn text_of(v: &Value, k: &str) -> String {
-    v.get(k)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-/// The readings a calibration program lists (`meta.calibration.readings`), and whether in
-/// version 2's form; calibration 1 calls them `measurements`.
-fn listed(program: &Program) -> Option<(&Vec<Value>, bool)> {
-    let cal = program.meta.as_ref()?.get("calibration")?;
-    match (cal.get("readings"), cal.get("measurements")) {
-        (Some(Value::Array(a)), _) => Some((a, true)),
-        (_, Some(Value::Array(a))) => Some((a, false)),
-        _ => None,
-    }
-}
-
-/// One sheet's rows and comb readings.
-fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
-    let (program, cuts, label) = (&sheet.program, &sheet.cuts, &sheet.label);
-    let (list, v2) = listed(program)
-        .ok_or_else(|| format!("{label}: not a calibration sheet (no readings listed)"))?;
-    // The program's cuts in order, with their op indices, matched to the log's.
-    let ops: Vec<(usize, &Cut)> = program
+/// Every caliper reading `sheet` lists, as what the model says it reads, in the order listed.
+fn lengths(sheet: &Sheet) -> Result<Vec<(&Reading, Lin)>, Error> {
+    let label = &sheet.label;
+    let bad = |m: String| Error::Sheet(format!("{label}: {m}"));
+    // The program's cuts in order, matched to the cuts sent.
+    let planned: Vec<&program::Cut> = sheet
+        .program
         .ops
         .iter()
-        .enumerate()
-        .filter_map(|(i, o)| match o {
-            Op::Cut(c) => Some((i, c)),
+        .filter_map(|o| match o {
+            Op::Cut(c) => Some(c),
             _ => None,
         })
         .collect();
-    if ops.len() != cuts.len() {
-        return Err(format!(
-            "{label}: the log has {} cuts, the program {}: not this program's run, or it stopped",
-            cuts.len(),
-            ops.len()
-        )
-        .into());
+    if planned.len() != sheet.cuts.len() {
+        return Err(bad(format!(
+            "{} cuts were sent, the program has {}: not this program's run, or it stopped",
+            sheet.cuts.len(),
+            planned.len()
+        )));
     }
-    for (k, ((_, c), l)) in ops.iter().zip(cuts).enumerate() {
-        if c.head != l.head {
-            return Err(format!("{label}: cut {} is on another head in the log", k + 1).into());
+    for (k, (p, s)) in planned.iter().zip(&sheet.cuts).enumerate() {
+        if p.head != s.head {
+            return Err(bad(format!("cut {} was sent on the other head", k + 1)));
         }
     }
-    // v2 names cuts by id; v1 (calibration 1) by op index.
-    let line = |v: &Value, key: &str| -> Result<Line, Error> {
-        let k = match v.get(key) {
-            Some(Value::String(id)) => ops.iter().position(|(_, c)| c.id.as_deref() == Some(id)),
-            Some(Value::Number(n)) => ops.iter().position(|(i, _)| Some(*i as u64) == n.as_u64()),
-            _ => None,
-        }
-        .ok_or_else(|| format!("{label}: no cut {:?}", v.get(key)))?;
-        let planned = ops[k].1.path_mm.first().copied().unwrap_or_default();
-        Line::new(&cuts[k], planned, &format!("cut {k}"))
+    let line = |id: &str| -> Result<Line, Error> {
+        let k = planned
+            .iter()
+            .position(|c| c.id.as_deref() == Some(id))
+            .ok_or_else(|| bad(format!("there's no cut {id}")))?;
+        let start = planned[k].path_mm.first().copied().unwrap_or_default();
+        Line::new(&sheet.cuts[k], start, id)
     };
-    let names: Vec<String> = list.iter().map(|m| text_of(m, "name")).collect();
-    if let Some(unknown) = sheet.readings.keys().find(|k| !names.contains(k)) {
-        return Err(format!("{label}: {unknown} is not a reading of this sheet").into());
-    }
-    // An edge: its line, and the kept side's sigma and unknown.
-    let edge = |e: &Value, axis: usize| -> Result<(Line, f64, Unknown), Error> {
-        let l = line(e, "cut")?;
-        let right = text_of(e, "kept") == "right";
-        let sigma = l.sigma(right, axis);
-        let u = l.e(right, face_of(e.get("face").and_then(Value::as_str)));
-        Ok((l, sigma, u))
+    let thickness = sheet.program.board.thickness_mm;
+    // Where an edge lands from its line, toward its side.
+    let e = |head: Head, e: &Edge| {
+        let depth = match e.surface {
+            Surface::Back => 0.0,
+            Surface::Face => thickness,
+        };
+        side_terms(head, e.side, depth)
     };
-    let mut rows = Vec::new();
-    let mut combs = Vec::new();
-    for m in list {
-        let name = text_of(m, "name");
-        let Some(&value) = sheet.readings.get(&name) else {
+    let scaled =
+        |terms: Vec<(Unknown, f64)>, k: f64| terms.into_iter().map(move |(u, c)| (u, c * k));
+    let mut out = Vec::new();
+    for r in &sheet.listed {
+        let Kind::Length { span, .. } = &r.kind else {
             continue;
         };
-        let axis = usize::from(text_of(m, "axis") == "y");
-        match text_of(m, "kind").as_str() {
-            // v1 calls a position reading an edge, with the edge's fields inline.
-            "position" | "edge" => {
-                let spec = if v2 {
-                    m.get("edge").unwrap_or(&Value::Null)
-                } else {
-                    m
-                };
-                let (l, sigma, u) = edge(spec, axis)?;
-                rows.push(Row {
-                    name,
-                    terms: vec![(Unknown::P(l.head, axis), -1.0), (u, sigma)],
-                    rhs: value - l.a[axis],
-                    sd: 1.0,
-                });
-            }
-            "width" => {
-                let es = m
-                    .get("edges")
-                    .and_then(Value::as_array)
-                    .filter(|a| a.len() == 2)
-                    .ok_or_else(|| format!("{name}: a width needs two edges"))?;
-                let mut one = edge(&es[0], axis)?;
-                let mut two = edge(&es[1], axis)?;
-                if two.0.planned[axis] < one.0.planned[axis] {
-                    std::mem::swap(&mut one, &mut two);
-                }
-                let mut terms = vec![(two.2, two.1), (one.2, -one.1)];
-                if one.0.head != two.0.head {
-                    terms.push((Unknown::P(two.0.head, axis), -1.0));
-                    terms.push((Unknown::P(one.0.head, axis), 1.0));
-                }
-                rows.push(Row {
-                    name,
+        let lin = match span {
+            Span::FromStock { axis, edge } => {
+                let l = line(&edge.cut)?;
+                let mut terms = vec![(Unknown::P(l.head, *axis), -1.0)];
+                terms.extend(scaled(e(l.head, edge), l.sigma(edge.side, *axis)));
+                Lin {
                     terms,
-                    rhs: value - (two.0.a[axis] - one.0.a[axis]),
-                    sd: 1.0,
-                });
+                    at: l.a[axis.index()],
+                }
             }
-            "overrun" => {
-                let (l, c) = (line(m, "cut")?, line(m, "crossing")?);
+            Span::Between { axis, edges } => {
+                let i = axis.index();
+                let (mut one, mut two) = (&edges[0], &edges[1]);
+                let (mut l1, mut l2) = (line(&one.cut)?, line(&two.cut)?);
+                // As they lie on the board: in carriage mm the heads are their offset apart.
+                if l2.planned[i] < l1.planned[i] {
+                    (one, two, l1, l2) = (two, one, l2, l1);
+                }
+                let mut terms: Vec<(Unknown, f64)> =
+                    scaled(e(l2.head, two), l2.sigma(two.side, *axis)).collect();
+                terms.extend(scaled(e(l1.head, one), -l1.sigma(one.side, *axis)));
+                if l1.head != l2.head {
+                    terms.push((Unknown::P(l2.head, *axis), -1.0));
+                    terms.push((Unknown::P(l1.head, *axis), 1.0));
+                }
+                Lin {
+                    terms,
+                    at: l2.a[i] - l1.a[i],
+                }
+            }
+            Span::Overrun { cut, end, crossing } => {
+                let (l, c) = (line(cut)?, line(&crossing.cut)?);
                 let along = usize::from(l.d[1].abs() > 0.5);
                 let at = c.a[along];
-                let start = text_of(m, "end") == "start";
-                let overcut = if start {
-                    (at - l.a[along]) * l.d[along]
-                } else {
-                    (l.b[along] - at) * l.d[along]
+                let (overcut, mut terms) = match end {
+                    End::Start => (
+                        (at - l.a[along]) * l.d[along],
+                        vec![(Unknown::Lead(l.head), 1.0)],
+                    ),
+                    End::End => (
+                        (l.b[along] - at) * l.d[along],
+                        vec![(Unknown::Shortfall(l.head), -1.0)],
+                    ),
                 };
-                let right = text_of(m, "kept") == "right";
-                let face = face_of(m.get("face").and_then(Value::as_str));
-                rows.push(Row {
-                    name,
-                    terms: vec![
-                        (Unknown::Drag(l.head, start), if start { 1.0 } else { -1.0 }),
-                        (c.e(right, face), -1.0),
-                    ],
-                    rhs: value - overcut,
-                    sd: 1.0,
-                });
+                terms.extend(scaled(e(c.head, crossing), -1.0));
+                Lin { terms, at: overcut }
             }
-            "comb" => {
-                let values: Vec<f64> = m
-                    .get("values")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_f64).collect())
-                    .unwrap_or_default();
-                let tooth = value.round() as usize;
-                if value < 0.0 || tooth > values.len() || (value - value.round()).abs() > 1e-9 {
-                    return Err(format!(
-                        "{name}: give the tooth number, 1 to {} (0: none reached)",
-                        values.len()
-                    )
-                    .into());
-                }
-                combs.push(CombReading {
-                    name,
-                    head: head_of(&text_of(m, "head"))?,
-                    at_start: text_of(m, "at") == "start",
-                    tooth,
-                    values,
-                });
-            }
-            k => return Err(format!("{name}: unknown kind {k:?}").into()),
-        }
+        };
+        out.push((r, lin));
     }
-    Ok((rows, combs))
+    Ok(out)
+}
+
+/// The rows of the caliper readings taken on `sheet`.
+fn rows(sheet: &Sheet) -> Result<Vec<Row>, Error> {
+    if let Some(id) = sheet
+        .readings
+        .keys()
+        .find(|id| !sheet.listed.iter().any(|r| r.id == **id))
+    {
+        return Err(Error::Reading(format!(
+            "{}: {id} is not a reading of this sheet",
+            sheet.label
+        )));
+    }
+    Ok(lengths(sheet)?
+        .into_iter()
+        .filter_map(|(r, lin)| {
+            sheet.readings.get(&r.id).map(|value| Row {
+                name: r.id.clone(),
+                terms: lin.terms,
+                rhs: value - lin.at,
+                sd: 1.0,
+            })
+        })
+        .collect())
 }
 
 /// The least-squares solution of a set of rows, by singular value decomposition: each reading
@@ -485,9 +458,9 @@ impl Leftover {
 /// The fitted values: each unknown with its standard error (`None`: not determined).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fit {
-    /// Each unknown, its value (`None`: the readings don't fix it on its own) and its standard
-    /// error (NaN when not fixed).
-    pub values: Vec<(Unknown, Option<f64>, f64)>,
+    /// Each unknown, and its value and standard error if the readings fix it on its own (the
+    /// error NaN when no reading is spare).
+    pub values: Vec<(Unknown, Option<(f64, f64)>)>,
     /// Each reading less the model.
     pub leftovers: Vec<Leftover>,
     /// How far a caliper reading scatters about the model, mm (NaN: no readings to spare).
@@ -511,8 +484,8 @@ impl Fit {
     /// A head's offset as fitted, and its standard errors, mm: the board origin held where
     /// `profile` has it, the offset is what puts the head's fitted line there (`origin − P`).
     pub fn head_offset(&self, head: Head, profile: &Profile) -> Option<([f64; 2], [f64; 2])> {
-        let (px, sx) = self.get(Unknown::P(head, 0))?;
-        let (py, sy) = self.get(Unknown::P(head, 1))?;
+        let (px, sx) = self.get(Unknown::P(head, Axis::X))?;
+        let (py, sy) = self.get(Unknown::P(head, Axis::Y))?;
         let MachineMm([ox, oy]) = profile.board_origin_mm;
         Some(([ox - px, oy - py], [sx, sy]))
     }
@@ -537,8 +510,8 @@ impl Fit {
     pub fn get(&self, u: Unknown) -> Option<(f64, f64)> {
         self.values
             .iter()
-            .find(|(k, _, _)| *k == u)
-            .and_then(|(_, v, se)| v.map(|v| (v, *se)))
+            .find(|(k, _)| *k == u)
+            .and_then(|(_, fixed)| *fixed)
     }
 
     /// The readings worth taking again ([`Leftover::suspect`]), worst first.
@@ -552,7 +525,9 @@ impl Fit {
     }
 }
 
-fn fit_rows(rows: &[Row]) -> Fit {
+/// The fit of `rows`, the first `read` of them readings and the rest priors: only the readings
+/// count as readings and have leftovers.
+fn fit_rows(rows: &[Row], read: usize) -> Fit {
     let s = solve(rows);
     let m = rows.len();
     let dof = m.saturating_sub(s.rank);
@@ -565,7 +540,7 @@ fn fit_rows(rows: &[Row]) -> Fit {
     // sum of squares less its share. Judged by a scatter it is part of, a misread would hide
     // itself (that measure can't pass √dof, under 3 on most sheets).
     let ss: f64 = s.resid.iter().map(|r| r * r).sum();
-    let leftovers = rows
+    let leftovers = rows[..read]
         .iter()
         .enumerate()
         .map(|(i, r)| {
@@ -585,20 +560,13 @@ fn fit_rows(rows: &[Row]) -> Fit {
         .cols
         .iter()
         .enumerate()
-        .map(|(j, &u)| {
-            let se = if s.x[j].is_some() {
-                sigma * s.var[j].sqrt()
-            } else {
-                f64::NAN
-            };
-            (u, s.x[j], se)
-        })
+        .map(|(j, &u)| (u, s.x[j].map(|x| (x, sigma * s.var[j].sqrt()))))
         .collect();
     Fit {
         values,
         leftovers,
         sigma,
-        rows: m,
+        rows: read,
         tied: s.tied,
         model: s.model,
     }
@@ -621,6 +589,15 @@ pub struct Prior {
 }
 
 impl Prior {
+    /// `unknown` held at `value`: known to a micrometre.
+    pub fn held(unknown: Unknown, value: f64) -> Prior {
+        Prior {
+            unknown,
+            value,
+            se_mm: 0.001,
+        }
+    }
+
     fn row(&self) -> Row {
         Row {
             name: format!("known {}", self.unknown.label()),
@@ -668,11 +645,7 @@ impl Precision {
 /// # Errors
 /// When the sheet's cuts and readings don't agree with its program.
 pub fn precision(sheet: &Sheet, priors: &[Prior]) -> Result<Precision, Error> {
-    let zeroed = Sheet {
-        readings: sheet.readings.keys().map(|k| (k.clone(), 0.0)).collect(),
-        ..sheet.clone()
-    };
-    let (mut rows, _) = sheet_rows(&zeroed)?;
+    let mut rows = rows(sheet)?;
     let read = rows.len();
     rows.extend(priors.iter().map(Prior::row));
     let s = solve(&rows);
@@ -695,12 +668,16 @@ pub fn precision(sheet: &Sheet, priors: &[Prior]) -> Result<Precision, Error> {
     })
 }
 
-/// One sheet's data: the program, the cuts it sent, its readings.
+/// One cut sheet: its program, the cuts it sent, the readings its program lists, and those
+/// taken.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sheet {
     pub label: String,
     pub program: Program,
     pub cuts: Vec<SentCut>,
+    /// Every reading the sheet has, in order: what each measures.
+    pub listed: Vec<Reading>,
+    /// The readings taken, by id: mm, or a comb's tooth.
     pub readings: HashMap<String, f64>,
 }
 
@@ -714,6 +691,7 @@ impl Sheet {
         label: impl Into<String>,
         program: Program,
         cut_with: &Profile,
+        listed: Vec<Reading>,
         readings: HashMap<String, f64>,
     ) -> Result<Sheet, Error> {
         let cuts = cuts_from_lowering(&program, cut_with)?;
@@ -721,112 +699,85 @@ impl Sheet {
             label: label.into(),
             program,
             cuts,
+            listed,
             readings,
         })
     }
-}
 
-/// The combs read on `sheet`: each one's first tooth to come free.
-///
-/// # Errors
-/// When the sheet's cuts and readings don't agree with its program.
-pub fn comb_readings(sheet: &Sheet) -> Result<Vec<CombReading>, Error> {
-    Ok(sheet_rows(sheet)?.1)
-}
-
-/// What calibration `cal` says an unknown is, on board `thickness_mm` thick: where the carriage
-/// puts each head's line on the registered corner, where each side of each slit lands on each
-/// face (`compiler::HeadCut::sides`), and how far a cut starts early and stops short on the
-/// back (the drag).
-pub fn known(u: Unknown, cal: &Calibration, thickness_mm: f64) -> f64 {
-    let blade = cal.blade();
-    match u {
-        Unknown::P(h, axis) => {
-            let machine = cal.machine();
-            let MachineMm(origin) = machine.board_origin_mm;
-            origin[axis] - machine.head(h).offset_mm[axis]
-        }
-        Unknown::E(h, right, face) => {
-            let depth = if face == Face::Front {
-                thickness_mm
-            } else {
-                0.0
-            };
-            let [left, r] = blade.head(h).sides(depth);
-            if right { -r } else { left }
-        }
-        Unknown::Drag(h, true) => blade.head(h).lead_mm[0],
-        Unknown::Drag(h, false) => blade.head(h).shortfall_mm[0],
+    /// The readings taken, each with its value, in the order listed.
+    pub fn taken(&self) -> impl Iterator<Item = (&Reading, f64)> {
+        self.listed
+            .iter()
+            .filter_map(|r| self.readings.get(&r.id).map(|v| (r, *v)))
     }
 }
 
-/// What each reading `sheet`'s program lists should show by calibration `cal`, its cuts where
+/// What calibration `cal` says an unknown is: where the carriage puts each head's line on the
+/// registered corner, and the head's tool model (`compiler::HeadCut`).
+pub fn known(u: Unknown, cal: &Calibration) -> f64 {
+    known_in(u, &cal.blade(), &cal.machine())
+}
+
+fn known_in(u: Unknown, blade: &Blade, machine: &Profile) -> f64 {
+    let c = blade.head(u.head());
+    match u {
+        Unknown::P(h, axis) => {
+            let MachineMm(origin) = machine.board_origin_mm;
+            origin[axis.index()] - machine.head(h).offset_mm[axis.index()]
+        }
+        Unknown::Sideways(_) => c.sideways_mm,
+        Unknown::Width(_) => c.width_mm,
+        Unknown::Run(_) => c.run_per_mm(),
+        Unknown::Lead(_) => c.lead_mm[0],
+        Unknown::Shortfall(_) => c.shortfall_mm[0],
+    }
+}
+
+/// What each caliper reading `sheet` lists should show by calibration `cal`, its cuts where
 /// they went: a plan's expected values, and the readings the tests fit. The sheet's own
-/// readings are ignored; the combs, read by eye, aren't predicted.
+/// readings are ignored.
 ///
 /// # Errors
 /// When the sheet's cuts and readings don't agree with its program.
 pub fn predict(sheet: &Sheet, cal: &Calibration) -> Result<HashMap<String, f64>, Error> {
-    let names = listed(&sheet.program).map_or_else(Vec::new, |(list, _)| {
-        list.iter().map(|m| text_of(m, "name")).collect()
-    });
-    let zeroed = Sheet {
-        readings: names.into_iter().map(|n| (n, 0.0)).collect(),
-        ..sheet.clone()
-    };
-    let (rows, _) = sheet_rows(&zeroed)?;
-    let t = sheet.program.board.thickness_mm;
-    // A row reads `value − geometry = model`, so with the value at zero the reading is the
-    // model less the row's right-hand side.
-    Ok(rows
+    let (blade, machine) = (cal.blade(), cal.machine());
+    Ok(lengths(sheet)?
         .into_iter()
-        .map(|r| {
-            let model: f64 = r.terms.iter().map(|&(u, c)| c * known(u, cal, t)).sum();
-            (r.name, model - r.rhs)
+        .map(|(r, lin)| {
+            let model: f64 = lin
+                .terms
+                .iter()
+                .map(|&(u, c)| c * known_in(u, &blade, &machine))
+                .sum();
+            (r.id.clone(), model + lin.at)
         })
         .collect())
 }
 
-/// Fit every sheet's readings together.
+/// Fit every sheet's caliper readings together.
 ///
 /// # Errors
-/// When there's no sheet, the sheets are on boards of different thickness, or a sheet's cuts
-/// and readings don't agree with its program.
-pub fn fit_sheets(sheets: &[Sheet]) -> Result<(Fit, Vec<CombReading>), Error> {
+/// When there's no sheet, or a sheet's cuts and readings don't agree with its program.
+pub fn fit_sheets(sheets: &[Sheet]) -> Result<Fit, Error> {
     fit_sheets_with(sheets, &[])
 }
 
-/// Fit every sheet's readings together, with what is already known.
+/// Fit every sheet's caliper readings together, with what is already known. Sheets on boards
+/// of any thickness fit together: each reading's depth is its own board's.
 ///
 /// # Errors
 /// As [`fit_sheets`].
-pub fn fit_sheets_with(
-    sheets: &[Sheet],
-    priors: &[Prior],
-) -> Result<(Fit, Vec<CombReading>), Error> {
-    let Some(first) = sheets.first() else {
-        return Err("no sheets to fit".into());
-    };
-    let thick = first.program.board.thickness_mm;
-    if sheets
-        .iter()
-        .any(|s| (s.program.board.thickness_mm - thick).abs() > 1e-9)
-    {
-        return Err(
-            "the sheets are on boards of different thickness, where the bevel's face \
-                    edge differs: fit them separately"
-                .into(),
-        );
+pub fn fit_sheets_with(sheets: &[Sheet], priors: &[Prior]) -> Result<Fit, Error> {
+    if sheets.is_empty() {
+        return Err(Error::Sheet("no sheets to fit".to_owned()));
     }
-    let mut rows = Vec::new();
-    let mut combs = Vec::new();
+    let mut all = Vec::new();
     for s in sheets {
-        let (r, c) = sheet_rows(s)?;
-        rows.extend(r);
-        combs.extend(c);
+        all.extend(rows(s)?);
     }
-    rows.extend(priors.iter().map(Prior::row));
-    Ok((fit_rows(&rows), combs))
+    let read = all.len();
+    all.extend(priors.iter().map(Prior::row));
+    Ok(fit_rows(&all, read))
 }
 
 #[cfg(test)]
@@ -834,13 +785,20 @@ mod tests {
     use super::*;
     use crate::Calibration;
 
+    /// Calibration sheet 2, cut raw, with `readings`.
+    fn sheet_2(readings: HashMap<String, f64>) -> Sheet {
+        let profile = Profile::gunnar_601();
+        let p = crate::sheet::program(&profile);
+        let (_, listed) = crate::legacy::readings(&p).expect("listed");
+        Sheet::lowered("sheet 2", p, &profile.raw(), listed, readings).expect("lowers")
+    }
+
     /// Readings made up from known heads, worked out edge by edge from the sheet's own
     /// geometry, come back out of the fit.
     #[test]
     fn the_fit_recovers_known_heads() {
         let profile = Profile::gunnar_601();
-        let p = crate::sheet::program(&profile);
-        let sheet = Sheet::lowered("test", p, &profile.raw(), HashMap::new()).expect("lowers");
+        let sheet = sheet_2(HashMap::new());
         let start = |id: &str| -> [f64; 2] {
             let k = sheet
                 .program
@@ -878,22 +836,35 @@ mod tests {
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
         let sheet = Sheet { readings, ..sheet };
-        let (fit, combs) = fit_sheets(&[sheet]).expect("fits");
+        // Alone, the bevel's width, offset and lean are seen only together: held at none.
+        let fit = fit_sheets(std::slice::from_ref(&sheet)).expect("fits");
+        let (sb, wb, rb) = (
+            Unknown::Sideways(Head::Bevel),
+            Unknown::Width(Head::Bevel),
+            Unknown::Run(Head::Bevel),
+        );
+        assert_eq!(fit.tied, vec![vec![sb, wb, rb]]);
+        let fit =
+            fit_sheets_with(std::slice::from_ref(&sheet), &[Prior::held(wb, 0.0)]).expect("fits");
+        let combs = crate::combs(sheet.taken()).expect("combs");
         let near = |u: Unknown, want: f64| {
             let (v, _) = fit.get(u).expect("determined");
             assert!((v - want).abs() < 1e-6, "{u:?}: {v} against {want}");
         };
-        near(Unknown::P(Head::Straight, 0), sp[0]);
-        near(Unknown::P(Head::Straight, 1), sp[1]);
-        near(Unknown::E(Head::Straight, false, Face::Any), sl);
-        near(Unknown::E(Head::Straight, true, Face::Any), sr);
-        near(Unknown::P(Head::Bevel, 0), bp[0]);
-        near(Unknown::P(Head::Bevel, 1), bp[1]);
-        near(Unknown::E(Head::Bevel, false, Face::Back), back);
-        near(Unknown::E(Head::Bevel, true, Face::Front), -face);
+        let (s, b) = (Head::Straight, Head::Bevel);
+        near(Unknown::P(s, Axis::X), sp[0]);
+        near(Unknown::P(s, Axis::Y), sp[1]);
+        // The slit's middle half the difference of its sides left of the line, its width their sum.
+        near(Unknown::Sideways(s), (sl - sr) / 2.0);
+        near(Unknown::Width(s), sl + sr);
+        near(Unknown::P(b, Axis::X), bp[0]);
+        near(Unknown::P(b, Axis::Y), bp[1]);
+        // The back edge 0.4 out, the face edge 2.1: a run of 1.7 mm across the 1.5 mm board.
+        near(sb, back);
+        near(rb, (face - back) / 1.5);
         assert!(fit.sigma < 1e-6);
         assert_eq!(combs.len(), 1);
-        assert_eq!((combs[0].tooth, combs[0].at_start), (5, false));
+        assert_eq!((combs[0].tooth, combs[0].end), (5, End::End));
         // The board origin held, each head's offset is what puts its line at P.
         let MachineMm([ox, oy]) = profile.board_origin_mm;
         let (off, _) = fit.head_offset(Head::Bevel, &profile).expect("settled");
@@ -919,16 +890,17 @@ mod tests {
     #[test]
     fn a_sum_alone_fixes_neither_of_its_parts() {
         let (p, e) = (
-            Unknown::P(Head::Straight, 0),
-            Unknown::E(Head::Straight, true, Face::Any),
+            Unknown::P(Head::Straight, Axis::X),
+            Unknown::Sideways(Head::Straight),
         );
-        let q = Unknown::P(Head::Bevel, 0);
-        let fit = fit_rows(&[
+        let q = Unknown::P(Head::Bevel, Axis::X);
+        let rows = [
             row("a", &[(p, 1.0), (e, 1.0)], 1.0, 1.0),
             row("b", &[(p, 1.0), (e, 1.0)], 1.2, 1.0),
             row("c", &[(q, 1.0)], 5.0, 1.0),
             row("d", &[(q, 1.0)], 5.2, 1.0),
-        ]);
+        ];
+        let fit = fit_rows(&rows, rows.len());
         assert_eq!(fit.get(p), None);
         assert_eq!(fit.get(e), None);
         assert_eq!(fit.tied, vec![vec![p, e]]);
@@ -943,11 +915,12 @@ mod tests {
     /// A reading ten times less certain counts a hundred times less.
     #[test]
     fn a_reading_counts_by_how_well_it_is_known() {
-        let u = Unknown::P(Head::Bevel, 1);
-        let fit = fit_rows(&[
+        let u = Unknown::P(Head::Bevel, Axis::Y);
+        let rows = [
             row("calipers", &[(u, 1.0)], 1.0, 1.0),
             row("rule", &[(u, 1.0)], 2.0, 10.0),
-        ]);
+        ];
+        let fit = fit_rows(&rows, rows.len());
         let (v, _) = fit.get(u).expect("fixed");
         assert!((v - (1.0 + 2.0 / 100.0) / (1.0 + 1.0 / 100.0)).abs() < 1e-12);
     }
@@ -958,8 +931,6 @@ mod tests {
     /// The readings from the board's edges are each a head's only witness: nothing checks them.
     #[test]
     fn a_misread_stands_out_where_another_reading_checks_it() {
-        let profile = Profile::gunnar_601();
-        let p = crate::sheet::program(&profile);
         let names = [
             "SL.width",
             "SR.width",
@@ -973,7 +944,7 @@ mod tests {
             "D.width",
             "D.height",
         ];
-        let sheet = Sheet::lowered("test", p, &profile.raw(), HashMap::new()).expect("lowers");
+        let sheet = sheet_2(HashMap::new());
         let clean = predict(&sheet, &Calibration::new()).expect("predicted");
         // A fixed scatter of a few hundredths, as calipers give.
         let noise = [
@@ -985,7 +956,7 @@ mod tests {
             .map(|(n, d)| ((*n).to_owned(), clean[*n] + d))
             .collect();
         *readings.get_mut("W.width").expect("listed") += 0.5;
-        let (fit, _) = fit_sheets(&[Sheet { readings, ..sheet }]).expect("fits");
+        let fit = fit_sheets(&[Sheet { readings, ..sheet }]).expect("fits");
         let mut suspects: Vec<&str> = fit.suspects(3.5).iter().map(|l| l.name.as_str()).collect();
         suspects.sort_unstable();
         assert_eq!(suspects, ["W.height", "W.width"], "{:?}", fit.leftovers);
@@ -1005,8 +976,6 @@ mod tests {
     /// the one reading from the board's left edge and the straight head's X is no longer fixed.
     #[test]
     fn a_plan_says_what_its_readings_will_fix() {
-        let profile = Profile::gunnar_601();
-        let p = crate::sheet::program(&profile);
         let all = [
             "SL.width",
             "SR.width",
@@ -1020,17 +989,16 @@ mod tests {
             "D.width",
             "D.height",
         ];
-        let with = |names: &[&str]| {
-            let readings = names.iter().map(|n| ((*n).to_owned(), 0.0)).collect();
-            Sheet::lowered("plan", p.clone(), &profile.raw(), readings).expect("lowers")
-        };
-        let full = precision(&with(&all), &[]).expect("a plan");
-        assert_eq!(full.values.len(), 8);
+        let with = |names: &[&str]| sheet_2(names.iter().map(|n| ((*n).to_owned(), 0.0)).collect());
+        // The bevel's width held, as stage 1 holds it: its sides are read on different faces.
+        let held = Prior::held(Unknown::Width(Head::Bevel), 0.0);
+        let full = precision(&with(&all), &[held]).expect("a plan");
+        assert_eq!(full.values.len(), 9);
         assert!(full.values.iter().all(|(_, se)| se.is_some()), "{full:?}");
-        let px = Unknown::P(Head::Straight, 0);
+        let px = Unknown::P(Head::Straight, Axis::X);
         let without: Vec<&str> = all.iter().copied().filter(|n| *n != "S.left").collect();
         assert_eq!(
-            precision(&with(&without), &[]).expect("a plan").get(px),
+            precision(&with(&without), &[held]).expect("a plan").get(px),
             None
         );
         // Known from the calibration to 0.05 mm, the straight X needs no reading of its own.
@@ -1039,7 +1007,7 @@ mod tests {
             value: -6.19,
             se_mm: 0.05,
         };
-        let se = precision(&with(&without), &[known])
+        let se = precision(&with(&without), &[held, known])
             .expect("a plan")
             .get(px);
         assert!(se.is_some_and(|s| s <= 0.05), "{se:?}");

@@ -17,12 +17,11 @@
 use std::collections::HashMap;
 
 use program::Head;
-use serde_json::{Value, json};
 
-use crate::fit::CombReading;
 use crate::key::{BladeValue, Key, Surface};
-use crate::plan::{Kind, Line, Plan, Reading, Routine, Step, Stock, program};
+use crate::plan::{Line, Plan, Routine, Step, Stock, program};
 use crate::proposal::{Change, Proposal};
+use crate::reading::{Comb, CombReading, End, Kind, Reading, Tooth};
 use crate::{Calibration, Error};
 
 /// Each tooth's run-on less the prediction, mm, tooth 1 first: fine in the middle, coarse at the
@@ -37,11 +36,11 @@ const REFERENCE_PAST_MM: f64 = 3.0;
 /// The furthest a tooth may run on, mm, so neighbouring combs keep clear of each other.
 const MOST_MM: f64 = 7.0;
 /// Each head's end comb and start comb, and where their references lie on the board (Y, mm).
-const ROWS: [(Head, bool, f64); 4] = [
-    (Head::Bevel, false, 38.0),
-    (Head::Bevel, true, 66.0),
-    (Head::Straight, false, 94.0),
-    (Head::Straight, true, 122.0),
+const ROWS: [(Head, End, f64); 4] = [
+    (Head::Bevel, End::End, 38.0),
+    (Head::Bevel, End::Start, 66.0),
+    (Head::Straight, End::End, 94.0),
+    (Head::Straight, End::Start, 122.0),
 ];
 /// Where each row's two combs start (X, mm): the first with its teeth in front of the
 /// reference, the second with them behind it.
@@ -51,80 +50,58 @@ const STEP: &str = "Leave the board back up, as it lay on the machine. Flex it a
                     reference: a tooth whose cut has gone through to the reference comes free \
                     there. Count the teeth from the left: tooth 1 is the shortest.";
 
-fn head_word(h: Head) -> &'static str {
-    match h {
-        Head::Bevel => "bevel",
-        Head::Straight => "straight",
-    }
-}
-
-fn end_word(at_start: bool) -> &'static str {
-    if at_start { "start" } else { "end" }
-}
-
-/// One comb: its id, what it is, its teeth's run-ons and its cuts in the order they are made.
-struct Comb {
-    id: String,
-    head: Head,
-    at_start: bool,
-    prompt: String,
-    run_ons: [f64; 7],
+/// One comb's reading, and its cuts: the reference, and the teeth, tooth 1 first.
+struct Cut {
+    reading: Reading,
     reference: Line,
     teeth: Vec<Line>,
 }
 
-fn combs(cal: &Calibration, thickness_mm: f64) -> Result<Vec<Comb>, Error> {
+fn combs(cal: &Calibration, thickness_mm: f64) -> Result<Vec<Cut>, Error> {
     let blade = cal.blade();
     let mut out = Vec::new();
-    for (head, at_start, y) in ROWS {
-        let nominal = blade.head(head).run_on(thickness_mm)[usize::from(!at_start)];
+    for (head, end, y) in ROWS {
+        let nominal = blade.head(head).run_on(thickness_mm)[end.index()];
         let run_ons = GRADE.map(|g| ((nominal + g) * 1000.0).round() / 1000.0);
         if run_ons.iter().any(|r| r.abs() > MOST_MM) {
-            return Err(format!(
-                "the {} head's run-on at the {}, {nominal:.2} mm, is beyond what stage 2's combs \
-                 can show",
-                head_word(head),
-                end_word(at_start)
-            )
-            .into());
+            return Err(Error::Plan(format!(
+                "the {head} head's run-on at the {}, {nominal:.2} mm, is beyond what stage 2's \
+                 combs can show",
+                end.word()
+            )));
         }
         for (behind, x0) in SIDES {
             // A point `v` from the reference toward the teeth, at `x`.
             let at = |x: f64, v: f64| if behind { [x, y + v] } else { [x, y - v] };
             // The teeth run toward the back (+Y) at an end with them in front, or at a start
             // with them behind.
-            let to_back = behind == at_start;
-            let id = format!(
-                "{}.{}.{}",
-                if head == Head::Bevel { "B" } else { "S" },
-                end_word(at_start),
-                if to_back { "back" } else { "front" }
-            );
-            let what = format!(
-                "{} {} comb, teeth toward the {}",
-                head_word(head),
-                end_word(at_start),
-                if to_back { "back" } else { "front" }
-            );
-            let teeth = run_ons
+            let toward = if behind == (end == End::Start) {
+                "back"
+            } else {
+                "front"
+            };
+            let letter = if head == Head::Bevel { "B" } else { "S" };
+            let id = format!("{letter}.{}.{toward}", end.word());
+            let what = format!("{head} {} comb, teeth toward the {toward}", end.word());
+            let line = |suffix: &str, label: String, a, b| Line {
+                id: format!("{id}.{suffix}"),
+                label: format!("{what}, {label}"),
+                head,
+                a,
+                b,
+            };
+            let teeth: Vec<Line> = run_ons
                 .iter()
                 .enumerate()
                 .map(|(j, &r)| {
                     let x = x0 + PITCH_MM * j as f64;
                     // An end's tooth comes to the reference and runs on past it; a start's
                     // begins past it and runs away.
-                    let (a, b) = if at_start {
-                        (at(x, -r), at(x, TOOTH_MM))
-                    } else {
-                        (at(x, TOOTH_MM), at(x, -r))
+                    let (a, b) = match end {
+                        End::Start => (at(x, -r), at(x, TOOTH_MM)),
+                        End::End => (at(x, TOOTH_MM), at(x, -r)),
                     };
-                    Line {
-                        id: format!("{id}.{}", j + 1),
-                        label: format!("{what}, tooth {}", j + 1),
-                        head,
-                        a,
-                        b,
-                    }
+                    line(&(j + 1).to_string(), format!("tooth {}", j + 1), a, b)
                 })
                 .collect();
             // The teeth on the reference's right: it runs +X with them in front, −X behind.
@@ -133,22 +110,32 @@ fn combs(cal: &Calibration, thickness_mm: f64) -> Result<Vec<Comb>, Error> {
                 [x0 + PITCH_MM * 6.0 + REFERENCE_PAST_MM, y],
             );
             let (a, b) = if behind { (right, left) } else { (left, right) };
-            out.push(Comb {
+            let reference = line("ref", "reference".to_owned(), a, b);
+            let reading = Reading {
+                id: id.clone(),
                 prompt: format!(
                     "The {what}: the first tooth to come free at the reference (1 to 7; 0 if \
                      none)"
                 ),
-                reference: Line {
-                    id: format!("{id}.ref"),
-                    label: format!("{what}, reference"),
+                surface: Surface::Back,
+                kind: Kind::Tooth(Comb {
                     head,
-                    a,
-                    b,
-                },
-                id,
-                head,
-                at_start,
-                run_ons,
+                    end,
+                    reference: reference.id.clone(),
+                    teeth: teeth
+                        .iter()
+                        .zip(run_ons)
+                        .map(|(t, run_on_mm)| Tooth {
+                            cut: t.id.clone(),
+                            run_on_mm,
+                        })
+                        .collect(),
+                }),
+                dimension: [reference.a, reference.b],
+            };
+            out.push(Cut {
+                reading,
+                reference,
                 teeth,
             });
         }
@@ -167,27 +154,19 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
     let mut lines = Vec::new();
     for c in &combs {
         // Production's order: a start's reference before its teeth, an end's after.
-        if c.at_start {
+        let start = c.reading.comb().is_some_and(|c| c.end == End::Start);
+        if start {
             lines.push(c.reference.clone());
         }
         lines.extend(c.teeth.iter().cloned());
-        if !c.at_start {
+        if !start {
             lines.push(c.reference.clone());
         }
     }
-    let json: Vec<Value> = combs
-        .iter()
-        .map(|c| {
-            json!({
-                "name": c.id, "kind": "comb", "head": head_word(c.head),
-                "at": end_word(c.at_start), "values": c.run_ons,
-                "what": c.prompt, "step": STEP, "how": "by flexing the board",
-            })
-        })
-        .collect();
-    let program = program("stage_2", Routine::RunOns, stock, &lines, json);
+    let program = program("stage_2", Routine::RunOns, stock, &lines);
     let cut_with = cal.machine();
     machine::lower(&program, &cut_with)?;
+    let readings: Vec<Reading> = combs.into_iter().map(|c| c.reading).collect();
     Ok(Plan {
         routine: Routine::RunOns,
         board: stock.need(),
@@ -195,27 +174,9 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
         cut_with,
         steps: vec![Step {
             instruction: STEP.to_owned(),
-            readings: combs.iter().map(|c| c.id.clone()).collect(),
+            readings: readings.iter().map(|r| r.id.clone()).collect(),
         }],
-        readings: combs
-            .iter()
-            .map(|c| Reading {
-                id: c.id.clone(),
-                prompt: c.prompt.clone(),
-                surface: Surface::Back,
-                kind: Kind::Tooth {
-                    teeth: c.teeth.len(),
-                    cuts: c.teeth.iter().map(|t| t.id.clone()).collect(),
-                },
-                dimension: [c.reference.a, c.reference.b],
-                needs: c
-                    .teeth
-                    .iter()
-                    .chain([&c.reference])
-                    .map(|l| l.id.clone())
-                    .collect(),
-            })
-            .collect(),
+        readings,
     })
 }
 
@@ -225,31 +186,31 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
 /// a value a tooth away has moved and one on the same tooth is within the noise.
 fn freed(
     read: &[&CombReading],
-    at_start: bool,
+    end: End,
     what: &str,
     notes: &mut Vec<String>,
 ) -> Option<(f64, f64)> {
     let first = read.first()?;
-    let n = first.values.len();
+    let n = first.run_ons.len();
     let told: Vec<String> = read
         .iter()
         .map(|c| match c.tooth {
-            0 => format!("none on {}", c.name),
-            k => format!("tooth {k} on {}", c.name),
+            0 => format!("none on {}", c.id),
+            k => format!("tooth {k} on {}", c.id),
         })
         .collect();
     let told = told.join(", ");
     // A run-on in words: how far a cut starts before the corner, or runs past it.
-    let words = |r: f64| match (at_start, r >= 0.0) {
-        (true, true) => format!("a cut starting {r:.2} mm before it"),
-        (true, false) => format!("a cut starting {:.2} mm after it", -r),
-        (false, true) => format!("a cut running {r:.2} mm past it"),
-        (false, false) => format!("a cut stopping {:.2} mm short of it", -r),
+    let words = |r: f64| match (end, r >= 0.0) {
+        (End::Start, true) => format!("a cut starting {r:.2} mm before it"),
+        (End::Start, false) => format!("a cut starting {:.2} mm after it", -r),
+        (End::End, true) => format!("a cut running {r:.2} mm past it"),
+        (End::End, false) => format!("a cut stopping {:.2} mm short of it", -r),
     };
     if let Some(none) = read.iter().find(|c| c.tooth == 0) {
         // Every tooth too short: the next comb is centred past the last.
-        let last = none.values.last().copied()?;
-        let next = last + (last - none.values[n / 2]);
+        let last = none.run_ons.last().copied()?;
+        let next = last + (last - none.run_ons[n / 2]);
         notes.push(format!(
             "{what}: {told}. No tooth came free: the corner needs more than the longest, {}; \
              proposed {}, the middle of a comb past this one: cut stage 2 again.",
@@ -261,7 +222,7 @@ fn freed(
     // The run-on that freed the corner in every direction: the longest freeing tooth's.
     let frees = read
         .iter()
-        .map(|c| c.values[c.tooth - 1])
+        .map(|c| c.run_ons[c.tooth - 1])
         .fold(f64::NEG_INFINITY, f64::max);
     if read.iter().all(|c| c.tooth == 1) {
         notes.push(format!(
@@ -288,12 +249,12 @@ fn freed(
     // The step below the tooth that set it.
     let setter = read
         .iter()
-        .find(|c| c.values[c.tooth - 1] == frees)
+        .find(|c| c.run_ons[c.tooth - 1] == frees)
         .unwrap_or(first);
     let k = setter.tooth.max(2) - 1;
     Some((
         frees,
-        (setter.values[k] - setter.values[k - 1]) / 12f64.sqrt(),
+        (setter.run_ons[k] - setter.run_ons[k - 1]) / 12f64.sqrt(),
     ))
 }
 
@@ -305,13 +266,13 @@ pub fn propose(combs: &[CombReading], cal: &Calibration, thickness_mm: f64) -> P
     let blade = cal.blade();
     let mut changes = Vec::new();
     let mut notes = Vec::new();
-    for (head, at_start, _) in ROWS {
+    for (head, end, _) in ROWS {
         let read: Vec<&CombReading> = combs
             .iter()
-            .filter(|c| c.head == head && c.at_start == at_start)
+            .filter(|c| c.head == head && c.end == end)
             .collect();
-        let what = format!("The {} head's {}", head_word(head), end_word(at_start));
-        let Some((run_on, se)) = freed(&read, at_start, &what, &mut notes) else {
+        let what = format!("The {head} head's {}", end.word());
+        let Some((run_on, se)) = freed(&read, end, &what, &mut notes) else {
             continue;
         };
         let c = blade.head(head);
@@ -320,15 +281,18 @@ pub fn propose(combs: &[CombReading], cal: &Calibration, thickness_mm: f64) -> P
         let mut set = |value, v: f64| changes.push(Change::new(cal, key(value), Some((v, se))));
         // The compiler runs a cut on past a square corner until it meets the neighbouring
         // slit's far side on each face, less how early it starts or short it stops there.
-        if at_start {
-            set(BladeValue::Lead(Surface::Face), face - run_on);
-            if back - c.lead_mm[0] > run_on + 1e-9 {
-                set(BladeValue::Lead(Surface::Back), back - run_on);
+        match end {
+            End::Start => {
+                set(BladeValue::Lead(Surface::Face), face - run_on);
+                if back - c.lead_mm[0] > run_on + 1e-9 {
+                    set(BladeValue::Lead(Surface::Back), back - run_on);
+                }
             }
-        } else {
-            set(BladeValue::Shortfall(Surface::Face), run_on - face);
-            if back + c.shortfall_mm[0] > run_on + 1e-9 {
-                set(BladeValue::Shortfall(Surface::Back), run_on - back);
+            End::End => {
+                set(BladeValue::Shortfall(Surface::Face), run_on - face);
+                if back + c.shortfall_mm[0] > run_on + 1e-9 {
+                    set(BladeValue::Shortfall(Surface::Back), run_on - back);
+                }
             }
         }
     }
@@ -343,39 +307,20 @@ pub fn propose(combs: &[CombReading], cal: &Calibration, thickness_mm: f64) -> P
     .with_effects(cal, thickness_mm)
 }
 
-/// Each comb's first tooth to come free, if the corner frees at `need(head, at_start)` mm: the
+/// Each comb's first tooth to come free, if the corner frees at `need(head, end)` mm: the
 /// readings a machine would show. For the tests, and for trying a plan.
-pub fn simulate(plan: &Plan, need: impl Fn(Head, bool) -> f64) -> HashMap<String, f64> {
-    let listed = plan
-        .program
-        .meta
-        .as_ref()
-        .and_then(|m| m.pointer("/calibration/readings"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    listed
+pub fn simulate(plan: &Plan, need: impl Fn(Head, End) -> f64) -> HashMap<String, f64> {
+    plan.readings
         .iter()
-        .filter_map(|m| {
-            let name = m.get("name")?.as_str()?.to_owned();
-            let head = if m.get("head")?.as_str()? == "bevel" {
-                Head::Bevel
-            } else {
-                Head::Straight
-            };
-            let at_start = m.get("at")?.as_str()? == "start";
-            let values: Vec<f64> = m
-                .get("values")?
-                .as_array()?
+        .filter_map(|r| {
+            let c = r.comb()?;
+            let n = need(c.head, c.end);
+            let tooth = c
+                .teeth
                 .iter()
-                .filter_map(Value::as_f64)
-                .collect();
-            let n = need(head, at_start);
-            let tooth = values
-                .iter()
-                .position(|&r| r >= n - 1e-9)
+                .position(|t| t.run_on_mm >= n - 1e-9)
                 .map_or(0, |j| j + 1);
-            Some((name, tooth as f64))
+            Some((r.id.clone(), tooth as f64))
         })
         .collect()
 }
@@ -383,8 +328,8 @@ pub fn simulate(plan: &Plan, need: impl Fn(Head, bool) -> f64) -> HashMap<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::comb_readings;
     use crate::proposal::Verdict;
+    use crate::reading::combs;
     use crate::{Edit, Why};
 
     fn key(s: &str) -> Key {
@@ -393,9 +338,19 @@ mod tests {
 
     /// What `cal`'s compiler runs on by at a square corner on this board: the run-on that frees
     /// it, in the model.
-    fn need(cal: &Calibration, t: f64) -> impl Fn(Head, bool) -> f64 {
+    fn need(cal: &Calibration, t: f64) -> impl Fn(Head, End) -> f64 {
         let blade = cal.blade();
-        move |h, at_start| blade.head(h).run_on(t)[usize::from(!at_start)]
+        move |h, end: End| blade.head(h).run_on(t)[end.index()]
+    }
+
+    /// The combs as read with `values`.
+    fn read(p: &Plan, values: &HashMap<String, f64>) -> Vec<CombReading> {
+        combs(
+            p.readings
+                .iter()
+                .filter_map(|r| values.get(&r.id).map(|v| (r, *v))),
+        )
+        .expect("combs")
     }
 
     #[test]
@@ -424,14 +379,11 @@ mod tests {
             assert!(c.path_mm.iter().all(inside), "{:?}", c.path_mm);
         }
         // The bevel's end comb centred on its run-on on 1.5 mm board, 3.8 mm past the corner.
-        let sheet = p.sheet("plan", simulate(&p, |_, _| 0.0)).expect("a sheet");
-        let read = comb_readings(&sheet).expect("combs");
-        let b_end = read
-            .iter()
-            .find(|c| c.name == "B.end.back")
-            .expect("listed");
-        assert!((b_end.values[3] - 3.8).abs() < 1e-9, "{:?}", b_end.values);
-        assert!((b_end.values[0] - 2.6).abs() < 1e-9 && (b_end.values[6] - 5.0).abs() < 1e-9);
+        let combs = read(&p, &simulate(&p, |_, _| 0.0));
+        let b_end = combs.iter().find(|c| c.id == "B.end.back").expect("listed");
+        let r = &b_end.run_ons;
+        assert!((r[3] - 3.8).abs() < 1e-9, "{r:?}");
+        assert!((r[0] - 2.6).abs() < 1e-9 && (r[6] - 5.0).abs() < 1e-9);
         // An end comb's reference comes after its teeth, a start comb's before.
         let order: Vec<&str> = cuts.iter().filter_map(|c| c.id.as_deref()).collect();
         let at = |id: &str| order.iter().position(|o| *o == id).expect(id);
@@ -460,25 +412,17 @@ mod tests {
             .expect("a machine");
         let t = 1.5;
         let p = plan(&file, &Stock::offcut(t)).expect("a plan");
-        let sheet = p
-            .sheet("stage 2", simulate(&p, need(&truth, t)))
-            .expect("a sheet");
-        let proposal = propose(&comb_readings(&sheet).expect("combs"), &file, t);
+        let proposal = propose(&read(&p, &simulate(&p, need(&truth, t))), &file, t);
         assert!(proposal.changes.iter().all(|c| c.verdict != Verdict::Large));
         let applied = proposal
             .apply(&file, &proposal.chosen(), &why)
             .expect("applied");
         let (got, want) = (need(&applied, t), need(&truth, t));
-        for (h, at_start) in [
-            (Head::Bevel, false),
-            (Head::Bevel, true),
-            (Head::Straight, false),
-            (Head::Straight, true),
-        ] {
-            let (g, w) = (got(h, at_start), want(h, at_start));
+        for (h, end, _) in ROWS {
+            let (g, w) = (got(h, end), want(h, end));
             assert!(
                 g >= w - 1e-9 && g - w <= 0.3 + 1e-9,
-                "{h:?} start {at_start}: {g} against {w}"
+                "{h:?} {end:?}: {g} against {w}"
             );
         }
         assert_eq!(applied.history()[0].routine.as_deref(), Some("runons"));
@@ -500,15 +444,15 @@ mod tests {
         let file = Calibration::new();
         let p = plan(&file, &Stock::offcut(1.5)).expect("a plan");
         let base = need(&file, 1.5);
-        let short = p
-            .sheet(
-                "stage 2",
-                simulate(&p, |h, s| {
-                    base(h, s) + if h == Head::Bevel && !s { 2.0 } else { 0.0 }
-                }),
-            )
-            .expect("a sheet");
-        let proposal = propose(&comb_readings(&short).expect("combs"), &file, 1.5);
+        let short = simulate(&p, |h, end| {
+            base(h, end)
+                + if (h, end) == (Head::Bevel, End::End) {
+                    2.0
+                } else {
+                    0.0
+                }
+        });
+        let proposal = propose(&read(&p, &short), &file, 1.5);
         let c = proposal
             .changes
             .iter()

@@ -108,19 +108,6 @@ impl Change {
     }
 }
 
-fn head_name(h: Head) -> &'static str {
-    match h {
-        Head::Bevel => "the bevel head",
-        Head::Straight => "the straight head",
-    }
-}
-
-fn capitalised(s: &str) -> String {
-    let mut c = s.chars();
-    c.next()
-        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
-}
-
 /// What changing `key` from `before` to `after` means for the cuts on board `thickness_mm`
 /// thick, in words: where they land now, by the file, and what applying it changes.
 fn effect(cal: &Calibration, key: &Key, before: f64, after: f64, thickness_mm: f64) -> String {
@@ -138,9 +125,8 @@ fn effect(cal: &Calibration, key: &Key, before: f64, after: f64, thickness_mm: f
                 (Axis::Y, false) => "toward the front",
             };
             format!(
-                "By the file, {}'s cuts land {:.2} mm {dir} of where they should: this puts \
-                 them back.",
-                head_name(h),
+                "By the file, the {h} head's cuts land {:.2} mm {dir} of where they should: this \
+                 puts them back.",
                 d.abs()
             )
         }
@@ -159,9 +145,8 @@ fn effect(cal: &Calibration, key: &Key, before: f64, after: f64, thickness_mm: f
                 String::new()
             };
             format!(
-                "By the file, every edge {} cuts lands {:.2} mm {side} of where it should, as \
-                 the cut travels{windows}: this puts them back.",
-                head_name(h),
+                "By the file, every edge the {h} head cuts lands {:.2} mm {side} of where it should, \
+                 as the cut travels{windows}: this puts them back.",
                 d.abs()
             )
         }
@@ -169,9 +154,8 @@ fn effect(cal: &Calibration, key: &Key, before: f64, after: f64, thickness_mm: f
             head: h,
             value: BladeValue::Width,
         } => format!(
-            "{}'s slit is {:.2} mm {} than the file has it, so its pieces come out that much {} \
-             each way: this puts them back.",
-            capitalised(head_name(h)),
+            "The {h} head's slit is {:.2} mm {} than the file has it, so its pieces come out that \
+             much {} each way: this puts them back.",
             d.abs(),
             if d > 0.0 { "wider" } else { "narrower" },
             if d > 0.0 { "smaller" } else { "larger" }
@@ -212,12 +196,11 @@ fn effect(cal: &Calibration, key: &Key, before: f64, after: f64, thickness_mm: f
                     s + "."
                 }
                 BladeValue::Lead(_) | BladeValue::Shortfall(_) if both.is_empty() => format!(
-                    "No change on {t} mm board: the other face decides how far {}'s cuts run.",
-                    head_name(h)
+                    "No change on {t} mm board: the other face decides how far the {h} head's cuts \
+                     run."
                 ),
                 BladeValue::Lead(_) | BladeValue::Shortfall(_) => format!(
-                    "On {t} mm board, {}'s cuts {} at each corner.",
-                    head_name(h),
+                    "On {t} mm board, the {h} head's cuts {} at each corner.",
                     both.join(" and ")
                 ),
                 _ => String::new(),
@@ -264,10 +247,10 @@ impl Proposal {
                 .changes
                 .iter()
                 .find(|c| c.key == *key)
-                .ok_or_else(|| Error::File(format!("{key} isn't in this proposal")))?;
+                .ok_or_else(|| Error::Reading(format!("{key} isn't in this proposal")))?;
             let after = c
                 .after
-                .ok_or_else(|| Error::File(format!("{key}: the readings don't fix it")))?;
+                .ok_or_else(|| Error::Reading(format!("{key}: the readings don't fix it")))?;
             let edit = Edit::set(key.clone(), after);
             edits.push(match c.se {
                 Some(se) => edit.with_se(se),

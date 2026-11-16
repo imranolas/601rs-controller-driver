@@ -318,7 +318,7 @@ thickness, by calipers; stage 2 on it only if it misbehaves.
 alone along their own rails, so the angle between them is fixed by how the rails are mounted
 and doesn't drift; and the **scale**, GMC's 40 steps/mm, which its captures match.
 
-- **Stage 1** (`designs` example, "stage 1"): the window clockwise with the bevel, the outline
+- **Stage 1** (`calibrate::heads`): the window clockwise with the bevel, the outline
   anticlockwise with the straight head, so the mount stays on the blade's left all round. The
   mount's size reads one side of the straight cut, the frame's opening (inside jaws, the mount
   out) the other, the borders the bevel head against the straight with the cut's off-centre
@@ -378,8 +378,7 @@ pub fn runons::plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error>;
 pub struct Plan {
     pub routine: Routine,
     pub board: String,             // the board it needs, in words
-    pub program: Program,          // board frame, cut as any program; lists its readings in
-                                   // meta.calibration.readings, which the fit reads
+    pub program: Program,          // board frame, cut as any program
     pub cut_with: machine::Profile,// the calibration's machine it was placed with: lowering
                                    // the program with it gives where the carriage went
     pub steps: Vec<Step>,          // the readings, grouped by how the pieces are held
@@ -392,6 +391,8 @@ pub struct Step {
     pub readings: Vec<String>,     // reading ids, in order
 }
 
+// calibrate::reading: one reading, described once. The plan shows it, the session checks it,
+// the fit makes it a row, stage 2 reads its comb, `mc601 calibrate read` asks for it.
 pub struct Reading {
     pub id: String,                // "W.width"
     pub prompt: String,            // "The window, left to right (inside jaws)"
@@ -404,14 +405,27 @@ pub struct Reading {
 pub enum Kind {
     /// By calipers. Expected: by the calibration the plan was made with; further than
     /// `unusual_mm` from it, ask before keeping it.
-    Length { expected_mm: f64, unusual_mm: f64 },
-    /// A comb's first tooth to come free, by flexing the board: 1 to `teeth`, 0 for none;
-    /// its teeth are the program's cuts `cuts`, tooth 1 first.
-    Tooth { teeth: usize, cuts: Vec<String> },
+    Length { span: Span, expected_mm: Option<f64>, unusual_mm: f64 },
+    /// A comb's first tooth to come free, by flexing the board: 1 to its teeth, 0 for none.
+    Tooth(Comb),
+}
+
+pub enum Span {                    // what the calipers span
+    FromStock { axis: Axis, edge: Edge },          // the board's edge at the stops to an edge
+    Between { axis: Axis, edges: [Edge; 2] },
+    Overrun { cut: String, end: End, crossing: Edge },  // calibration 1's
+}
+pub struct Edge { pub cut: String, pub side: Side, pub surface: Surface }  // a side of a cut
+pub struct Comb { pub head: Head, pub end: End, pub reference: String, pub teeth: Vec<Tooth> }
+pub struct Tooth { pub cut: String, pub run_on_mm: f64 }  // tooth 1, the shortest, first
+
+impl Reading {
+    pub fn check(&self, value: f64) -> Result<Check, Error>;  // Fine | Unusual { off_mm }
+    pub fn needs(&self) -> Vec<&str>;                        // the cuts it reads
 }
 
 impl Plan {
-    pub fn check(&self, id: &str, value: f64) -> Result<Check, Error>;  // Fine | Unusual { off_mm }
+    pub fn check(&self, id: &str, value: f64) -> Result<Check, Error>;
     pub fn sheet(&self, label, readings) -> Result<Sheet, Error>;      // lowered with cut_with
 }
 ```
@@ -424,20 +438,29 @@ cuts of the program, so the drawing can mark each one.
 
 ```jsonc
 { "id": "W.width", "prompt": "The window, left to right (inside jaws)", "surface": "back",
-  "expected_mm": 50.905, "unusual_mm": 1.0,
+  "kind": { "length": {
+    "span": { "between": { "axis": "x", "edges": [
+      { "cut": "W.left", "side": "left", "surface": "back" },
+      { "cut": "W.right", "side": "left", "surface": "back" } ] } },
+    "expected_mm": 50.905, "unusual_mm": 1.0 } },
   "dimension": [[49.5475, 62.0], [100.4525, 62.0]] }
 ```
 
 ## 7. The fit
 
-The model is `mc601 calibrate`'s, unchanged. Per head, in carriage mm:
+*Rewritten 16 Nov in the tool model's own terms (§3), the readings' fit unchanged:* per head, in
+carriage mm,
 
 - `P`: where the carriage puts the head's line on the registered corner. A cut commanded at
   carriage `c` runs along board `c − P`.
-- `e`: where each side of the slit lands from the line. It is positive towards that side. For
-  the bevel it is separate on the back and on the face.
+- The slit: its middle `s` left of the line on the back, its width `w`, and `r`, how far it
+  moves left per mm deeper (tan of the lean; none on the straight head). At a depth `z` below
+  the back, its left side lies `e = s + z·r + w/2` left of the line, its right side
+  `e = w/2 − s − z·r` right of it.
+- On the back, how far a cut starts before its commanded start and stops short of its end
+  (calibration 1's overruns).
 
-A position reading is `c − P + σe`, where σ = ±1 is the kept side along the axis. A width is
+A position reading is `c − P + σe`, where σ = ±1 is the side read along the axis. A width is
 two edges' difference, so `P` cancels unless the heads differ. Each is one linear row. The rows
 are solved by least squares, with each unknown's standard error and the scatter of the readings
 about the model. An unknown the readings don't settle is reported as such and left alone.
@@ -499,12 +522,15 @@ about the model. An unknown the readings don't settle is reported as such and le
 ```rust
 /// What a calibration says each unknown is, and so what each reading should show: a plan's
 /// expected values, and the synthetic readings the tests fit.
-pub fn known(u: Unknown, cal: &Calibration, thickness_mm: f64) -> f64;
+pub fn known(u: Unknown, cal: &Calibration) -> f64;
 pub fn predict(sheet: &Sheet, cal: &Calibration) -> Result<HashMap<String, f64>, Error>;
 
-/// Stage 1's fit as changes to the file: each head's offset, the straight slit's sideways
-/// offset and width, the bevel's sideways offset and lean (its width held: its two sides are
-/// read on different faces).
+/// Stage 1's fit, holding the bevel's width (`heads::priors`): its two sides are read on
+/// different faces, so the readings see it only with its offset and lean.
+pub fn heads::fit(sheets: &[Sheet], cal: &Calibration) -> Result<Fit, Error>;
+/// Stage 1's fit as changes to the file: each head's offset and slit's sideways offset, the
+/// straight slit's width, the bevel's lean: each unknown is a key's value, the lean its run's
+/// arctangent.
 pub fn heads::propose(fit: &Fit, cal: &Calibration, thickness_mm: f64) -> Proposal;
 
 pub struct Proposal {
@@ -561,7 +587,7 @@ the session folder as `routine.json`, beside the program (`stage_1.json`, `stage
 run's log and the fit with its proposal (`fit.txt`).
 
 ```rust
-pub struct Session {                      // format "601rs-calibration-session", version 1
+pub struct Session {                      // format "601rs-calibration-session", version 2
     pub id: String,                       // given by the caller: "2026-11-16 10.31.02 calibrate stage_1"
     pub revision: u32,                    // the calibration the plan was made with
     pub plan: Plan,                       // as cut, with the profile it was placed with
@@ -594,8 +620,8 @@ readings whose cuts were made; `calibrate fit DIR DIR …` fits stage 1 sessions
    the front-left stops"), and the drawing of what will be cut.
 2. **Cut.** The plan's program goes to the station like any sheet: `station.run(program)`.
    Load, Run, pause, stop, the safe state: the app's own screens and the runner's rules, unchanged.
-   A stop keeps the session: readings that need an op that never finished drop out
-   (`needs_ops`). The rest can still be read and fitted.
+   A stop keeps the session: readings that need a cut that never finished drop out
+   (`Reading::needs`). The rest can still be read and fitted.
 3. **Measure.** One step at a time (`steps`), one reading at a time. The drawing shows which
    piece to hold, which face up, and the dimension to take. The expected value is faint beside
    the field. Each value is checked as it is typed and saved at once. They can be taken in any

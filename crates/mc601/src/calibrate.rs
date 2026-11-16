@@ -13,11 +13,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use ::calibrate::key::Surface;
 use ::calibrate::proposal::{Proposal, SUSPECT_T, Verdict};
 use ::calibrate::session::Session as RoutineSession;
-use ::calibrate::{
-    CombReading, Face, Fit, Routine, SentCut, Sheet, Stock, Unknown, Why, fit_sheets,
-};
+use ::calibrate::{Check, CombReading, Fit, Reading, Routine, SentCut, Sheet, Stock, Unknown, Why};
 use link::Direction;
 use machine::Profile;
 use program::{Head, Program};
@@ -168,10 +167,12 @@ fn load_sheet(program: &Path, log: &Path, readings: &Path, profile: &Profile) ->
         std::fs::read_to_string(program).map_err(|e| format!("{}: {e}", program.display()))?;
     let parsed = Program::from_json(&text).map_err(|e| format!("{}: {e}", program.display()))?;
     let log_text = std::fs::read_to_string(log).map_err(|e| format!("{}: {e}", log.display()))?;
+    let (_, listed) = ::calibrate::legacy::readings(&parsed)?;
     Ok(Sheet {
         label: tidy(program),
-        program: parsed,
         cuts: cuts_from_log(&log_text, profile),
+        program: parsed,
+        listed,
         readings: read_readings(readings)?,
     })
 }
@@ -247,77 +248,41 @@ pub fn sessions_with_readings(data: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn text_of(v: &Value, k: &str) -> String {
-    v.get(k)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-/// Which face a reading is taken on, from its edges.
-fn face_note(m: &Value) -> &'static str {
-    let faces: Vec<String> = m
-        .get("edges")
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| m.get("edge").cloned().map(|e| vec![e]))
-        .unwrap_or_default()
-        .iter()
-        .map(|e| text_of(e, "face"))
-        .collect();
-    // A straight cut's edge is the same on either face, so it doesn't decide.
-    let (back, face) = (
-        faces.iter().any(|f| f == "back"),
-        faces.iter().any(|f| f == "face"),
-    );
-    if text_of(m, "kind") == "comb" {
-        "by eye, face up"
-    } else if back && !face {
-        "on the back"
-    } else if face && !back {
-        "face up"
-    } else {
-        "either face"
-    }
-}
-
-/// How far a reading may stray from its expected value before it is questioned, mm, unless the
-/// sheet says (`unusual`).
-const NEAR_MM: f64 = 1.5;
-
 /// `mc601 calibrate read`: take a session's readings one by one (each saved as it is given),
-/// then fit them and keep the fit and a fitted profile in the session. For a routine with a
-/// plan (stage 1), the fit's proposal for the calibration file, applied if the operator says so.
+/// then fit them and keep the fit and a fitted profile in the session. For a stage, the
+/// proposal for the calibration file, applied if the operator says so.
 pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     let (_, program, log) = session_files(dir)?;
     let mut routine = load_routine(dir)?;
-    let mut list: Vec<Value> = program
-        .meta
-        .as_ref()
-        .and_then(|m| {
-            m.pointer("/calibration/readings")
-                .or_else(|| m.pointer("/calibration/measurements"))
-        })
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    // A stage's steps and readings are its plan's; the record's raw sheets list their own.
+    let (steps, listed) = match &routine {
+        Some(r) => (r.plan.steps.clone(), r.plan.readings.clone()),
+        None => ::calibrate::legacy::readings(&program)?,
+    };
     // A stage's readings whose cuts didn't all finish can't be taken.
-    if let Some(r) = &routine {
-        let all = list.len();
-        list.retain(|m| r.is_available(&text_of(m, "name")));
-        if list.len() < all {
-            anstream::println!(
-                "{}",
-                paint(
-                    WARN,
-                    format!(
-                        "{} of {all} readings can't be taken: the cut stopped before their cuts \
-                         were made",
-                        all - list.len()
-                    )
+    let list: Vec<(&str, &Reading)> = steps
+        .iter()
+        .flat_map(|s| {
+            s.readings
+                .iter()
+                .filter_map(|id| listed.iter().find(|r| r.id == *id))
+                .map(|r| (s.instruction.as_str(), r))
+        })
+        .filter(|(_, r)| routine.as_ref().is_none_or(|s| s.is_available(&r.id)))
+        .collect();
+    if list.len() < listed.len() {
+        anstream::println!(
+            "{}",
+            paint(
+                WARN,
+                format!(
+                    "{} of {} readings can't be taken: the cut stopped before their cuts were \
+                     made",
+                    listed.len() - list.len(),
+                    listed.len()
                 )
-            );
-        }
+            )
+        );
     }
     let file = match &routine {
         Some(_) => dir.join(ROUTINE_FILE),
@@ -328,8 +293,8 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         None if file.exists() => read_readings(&file)?,
         None => HashMap::new(),
     };
-    let combs = if list.iter().any(|m| text_of(m, "kind") == "comb") {
-        " (a comb: the first tooth that reached, 0 for none)"
+    let combs = if list.iter().any(|(_, r)| r.comb().is_some()) {
+        " (a comb: the first tooth to come free, 0 for none)"
     } else {
         ""
     };
@@ -349,47 +314,39 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
             program.id,
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         );
-        for m in &list {
-            let name = text_of(m, "name");
-            if let Some(v) = readings.get(&name) {
-                let _ = writeln!(text, "{name} {v}");
+        for r in &listed {
+            if let Some(v) = readings.get(&r.id) {
+                let _ = writeln!(text, "{} {v}", r.id);
             }
         }
         std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
         Ok(())
     };
-    let mut step = String::new();
-    'readings: for (i, m) in list.iter().enumerate() {
-        let name = text_of(m, "name");
-        if !text_of(m, "step").is_empty() && text_of(m, "step") != step {
-            step = text_of(m, "step");
-            anstream::println!("\n{}", paint(BOLD, &step));
+    let mut shown_step = "";
+    'readings: for (i, &(step, r)) in list.iter().enumerate() {
+        if !step.is_empty() && step != shown_step {
+            shown_step = step;
+            anstream::println!("\n{}", paint(BOLD, step));
         }
-        let comb = text_of(m, "kind") == "comb";
-        let about = m.get("about").and_then(Value::as_f64);
-        let near = m.get("unusual").and_then(Value::as_f64).unwrap_or(NEAR_MM);
-        let how = m
-            .get("how")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| face_note(m));
-        let teeth = m
-            .get("values")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
+        let how = match r.surface {
+            Surface::Back => "back up",
+            Surface::Face => "face up",
+        };
+        let hint = match (r.comb(), r.expected_mm()) {
+            (Some(c), _) => format!("tooth 1 to {}, 0: none", c.teeth.len()),
+            (None, Some(e)) => format!("about {e:.2}"),
+            (None, None) => String::new(),
+        };
         loop {
             let shown = readings
-                .get(&name)
+                .get(&r.id)
                 .map_or_else(String::new, |v| format!(" [{v}]"));
-            let hint = if comb {
-                format!("tooth 1 to {teeth}, 0: none")
-            } else {
-                about.map_or_else(String::new, |a| format!("about {a}"))
-            };
             let question = format!(
-                "[{:>2}/{}] {name:10} {}  {}{shown} >",
+                "[{:>2}/{}] {:10} {}  {}{shown} >",
                 i + 1,
                 list.len(),
-                text_of(m, "what"),
+                r.id,
+                r.prompt,
                 paint(DIM, format!("{how} · {hint}"))
             );
             let Some(answer) = op.ask(&question) else {
@@ -406,26 +363,24 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 anstream::println!("  {}", paint(WARN, format!("{answer:?} is not a number")));
                 continue;
             };
-            if comb && (v < 0.0 || v > teeth as f64 || v.fract() != 0.0) {
-                anstream::println!(
-                    "  {}",
-                    paint(WARN, format!("give a tooth number, 0 to {teeth}"))
-                );
-                continue;
-            }
-            if let (false, Some(a)) = (comb, about) {
-                if (v - a).abs() > near {
+            match r.check(v) {
+                Err(e) => {
+                    anstream::println!("  {}", paint(WARN, e.to_string()));
+                    continue;
+                }
+                Ok(Check::Unusual { off_mm }) => {
                     let keep = op.ask(&format!(
-                        "{} {v} is {:.1} mm from the {a} expected. Keep it? (y/n)",
+                        "{} {v} is {off_mm:.1} mm from the {:.2} expected. Keep it? (y/n)",
                         paint(WARN, "check:"),
-                        (v - a).abs()
+                        r.expected_mm().unwrap_or(f64::NAN)
                     ));
                     if keep.as_deref() != Some("y") {
                         continue;
                     }
                 }
+                Ok(Check::Fine) => {}
             }
-            readings.insert(name.clone(), v);
+            readings.insert(r.id.clone(), v);
             save(&readings, &mut routine)?;
             break;
         }
@@ -447,8 +402,8 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
             (proposal_text(&p), None, Some(p))
         }
         Some(r) => {
-            let (fit, combs) = fit_sheets(&[r.sheet()?])?;
-            let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
+            let fit = ::calibrate::heads::fit(&[r.sheet()?], &cal)?;
+            let (mut out, fitted) = report(&fit, &[], thickness, &profile);
             let p = r.propose(&cal)?;
             out.push_str(&proposal_text(&p));
             (out, Some(fitted), Some(p))
@@ -458,12 +413,13 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 std::fs::read_to_string(&log).map_err(|e| format!("{}: {e}", log.display()))?;
             let sheet = Sheet {
                 label: tidy(dir),
-                program,
                 cuts: cuts_from_log(&text, &profile),
+                program,
+                listed,
                 readings,
             };
-            let (fit, combs) = fit_sheets(&[sheet])?;
-            let (out, fitted) = report(&fit, &combs, thickness, &profile);
+            let fit = ::calibrate::heads::fit(std::slice::from_ref(&sheet), &cal)?;
+            let (out, fitted) = report(&fit, &combs_of(&sheet)?, thickness, &profile);
             (out, Some(fitted), None)
         }
     };
@@ -473,6 +429,11 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         offer(p, dir, op)?;
     }
     Ok(true)
+}
+
+/// The combs read on `sheet`.
+fn combs_of(sheet: &Sheet) -> Res<Vec<CombReading>> {
+    Ok(::calibrate::combs(sheet.taken())?)
 }
 
 fn verdict_word(v: Verdict) -> String {
@@ -630,7 +591,8 @@ pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>
     for [p, l, r] in sheets {
         all.push(load_sheet(p, l, r, &profile)?);
     }
-    let (fit, combs) = fit_sheets(&all)?;
+    let fit = ::calibrate::heads::fit(&all, &crate::calibration::current())?;
+    let combs: Vec<CombReading> = all.iter().map(combs_of).collect::<Res<Vec<_>>>()?.concat();
     let thickness = all[0].program.board.thickness_mm;
     let (out, fitted) = report(&fit, &combs, thickness, &profile);
     anstream::println!(
@@ -659,13 +621,6 @@ pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>
     Ok(true)
 }
 
-fn head_name(h: Head) -> &'static str {
-    match h {
-        Head::Bevel => "bevel",
-        Head::Straight => "straight",
-    }
-}
-
 /// The fit, as text for the terminal (styled; strip it for a file), and the profile with the
 /// fitted head offsets.
 fn report(
@@ -688,20 +643,17 @@ fn report(
     );
     let fitted = fit.profile(profile);
     for h in [Head::Straight, Head::Bevel] {
-        if !fit.values.iter().any(|(u, _, _)| u.head() == h) {
+        if !fit.values.iter().any(|(u, _)| u.head() == h) {
             continue;
         }
-        let _ = writeln!(
-            o,
-            "\n{}",
-            paint(crate::style::BOLD, format!("{} head", head_name(h)))
-        );
-        for (u, v, se) in fit.values.iter().filter(|(u, _, _)| u.head() == h) {
-            let _ = match v {
-                Some(v) => writeln!(
+        let _ = writeln!(o, "\n{}", paint(crate::style::BOLD, format!("{h} head")));
+        for (u, fixed) in fit.values.iter().filter(|(u, _)| u.head() == h) {
+            let _ = match fixed {
+                Some((v, se)) => writeln!(
                     o,
-                    "  {:16} {v:+9.3} mm  {}",
+                    "  {:16} {v:+9.3} {:5} {}",
                     u.label(),
+                    u.unit(),
                     paint(DIM, format!("± {se:.3}"))
                 ),
                 None => writeln!(
@@ -712,32 +664,14 @@ fn report(
                 ),
             };
         }
-        let g = |u| fit.get(u);
-        if h == Head::Straight {
-            if let (Some((l, _)), Some((r, _))) = (
-                g(Unknown::E(h, false, Face::Any)),
-                g(Unknown::E(h, true, Face::Any)),
-            ) {
-                let _ = writeln!(
-                    o,
-                    "  slit {:.3} mm wide, its middle {:+.3} mm right of the line",
-                    l + r,
-                    (r - l) / 2.0
-                );
-            }
-        } else if let (Some((back, _)), Some((face, _))) = (
-            g(Unknown::E(h, false, Face::Back)),
-            g(Unknown::E(h, true, Face::Front)),
-        ) {
-            // A window's mat edge lies `back` outside its line on the back; on the face, where
-            // the drop-out's face edge is, `-face` outside it.
-            let run = -face - back;
+        if let Some((run, se)) = fit.get(Unknown::Run(h)) {
+            let lean = run.atan();
             let _ = writeln!(
                 o,
-                "  a window's edge {back:+.3} mm outside its line on the back, {:+.3} on the face: \
-                 a bevel of {run:.2} mm across {thickness} mm board, {:.1}° from vertical",
-                -face,
-                (run / thickness).atan().to_degrees()
+                "  a lean of {:.1}° ± {:.1}° from vertical: {:.2} mm across {thickness} mm board",
+                lean.to_degrees(),
+                (se * lean.cos().powi(2)).to_degrees(),
+                run * thickness
             );
         }
         if let Some((new, [sx, sy])) = fit.head_offset(h, profile) {
@@ -771,7 +705,7 @@ fn report(
             )
         );
         for c in combs {
-            let v = &c.values;
+            let v = &c.run_ons;
             let range = match c.tooth {
                 0 => paint(
                     WARN,
@@ -793,9 +727,9 @@ fn report(
             let _ = writeln!(
                 o,
                 "  {:8} {:5} {range}  {}",
-                head_name(c.head),
-                if c.at_start { "start" } else { "end" },
-                paint(DIM, &c.name)
+                c.head,
+                c.end.word(),
+                paint(DIM, &c.id)
             );
         }
     }
@@ -818,7 +752,7 @@ fn report(
     for group in &fit.tied {
         let names: Vec<String> = group
             .iter()
-            .map(|u| format!("{} {}", head_name(u.head()), u.label()))
+            .map(|u| format!("{} {}", u.head(), u.label()))
             .collect();
         let _ = writeln!(
             o,
@@ -833,6 +767,7 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::calibrate::fit_sheets;
 
     const RECORD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/calibration");
 
@@ -925,7 +860,8 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.clone(), (v * 100.0).round() / 100.0))
             .collect();
-        let (fit, _) = fit_sheets(&[plan.sheet("sim", readings).expect("a sheet")]).expect("fits");
+        let sheet = plan.sheet("sim", readings).expect("a sheet");
+        let fit = ::calibrate::heads::fit(&[sheet], &file).expect("fits");
         let p = ::calibrate::heads::propose(&fit, &file, 1.5);
         assert!(p.suspects.is_empty(), "{:?}", p.suspects);
         assert_eq!(p.chosen().len(), 8, "{:?}", p.changes);
@@ -950,7 +886,7 @@ mod tests {
     /// and never short; and the proposal, applied, makes the file say so.
     #[test]
     fn stage_2_runs_on_the_simulator_and_finds_the_machines_reach() {
-        use ::calibrate::{Calibration, Edit, runons};
+        use ::calibrate::{Calibration, Edit, End, runons};
         let file = Calibration::new();
         let t = 1.5;
         let plan = runons::plan(&file, &Stock::offcut(t)).expect("a plan");
@@ -968,21 +904,24 @@ mod tests {
             .expect("a machine");
         let need = |cal: &Calibration| {
             let b = cal.blade();
-            move |h, at_start: bool| b.head(h).run_on(t)[usize::from(!at_start)]
+            move |h, end: End| b.head(h).run_on(t)[end.index()]
         };
         let readings = runons::simulate(&plan, need(&truth));
-        let combs = ::calibrate::comb_readings(&plan.sheet("sim", readings).expect("a sheet"))
-            .expect("combs");
+        let taken = plan
+            .readings
+            .iter()
+            .filter_map(|r| readings.get(&r.id).map(|v| (r, *v)));
+        let combs = ::calibrate::combs(taken).expect("combs");
         let p = runons::propose(&combs, &file, t);
         assert!(proposal_text(&p).contains("blade.bevel.shortfall.face"));
         let applied = p.apply(&file, &p.chosen(), &why).expect("applied");
         let (got, want) = (need(&applied), need(&truth));
         for h in [Head::Bevel, Head::Straight] {
-            for at_start in [false, true] {
-                let (g, w) = (got(h, at_start), want(h, at_start));
+            for end in End::BOTH {
+                let (g, w) = (got(h, end), want(h, end));
                 assert!(
                     g >= w - 1e-9 && g - w <= 0.3 + 1e-9,
-                    "{h:?} {at_start}: {g} against {w}"
+                    "{h:?} {end:?}: {g} against {w}"
                 );
             }
         }
@@ -1028,86 +967,91 @@ mod tests {
     }
 
     /// The record's fit, from its log and from its lowering alike, is what `mc601 calibrate
-    /// fit` printed before the fit moved into the `calibrate` crate (15 Nov). The readings are
+    /// fit` printed before the fit moved into the `calibrate` crate (15 Nov), now in the tool
+    /// model's terms. The readings are
     /// in hundredths, so every value is an exact half-thousandth: printed to three places, a
     /// value such as -0.1025 shows as -0.102 or -0.103 by the last bit, so they're held exactly.
     #[test]
     fn the_record_fits_as_it_did() {
+        use ::calibrate::key::Axis;
         let readings =
             read_readings(&Path::new(RECORD).join("calibration_1.readings.txt")).expect("readings");
         let cut_with = cut_with_on_10_nov();
         let p = program("calibration_1.json");
+        let (_, listed) = ::calibrate::legacy::readings(&p).expect("listed");
         let from_log = Sheet {
             label: "calibration_1".into(),
             program: p.clone(),
             cuts: cuts_from_log(&record("calibration_1.run.log"), &cut_with),
+            listed: listed.clone(),
             readings: readings.clone(),
         };
-        let lowered = Sheet::lowered("calibration_1", p, &cut_with, readings).expect("lowers");
-        let (fit, _) = fit_sheets(&[from_log]).expect("fits");
-        let (again, _) = fit_sheets(&[lowered]).expect("fits");
+        let lowered =
+            Sheet::lowered("calibration_1", p, &cut_with, listed, readings).expect("lowers");
+        let fit = fit_sheets(std::slice::from_ref(&from_log)).expect("fits");
+        let again = fit_sheets(&[lowered]).expect("fits");
         assert_eq!(fit, again);
-
-        assert_eq!((fit.rows, fit.values.len()), (20, 12));
+        assert_eq!((fit.rows, fit.values.len()), (20, 13));
+        assert!((fit.sigma - 0.112361).abs() < 1e-6, "scatter {}", fit.sigma);
+        // It reads the bevel's sides on different faces: its width, offset and lean only together.
+        let (s, b) = (Head::Straight, Head::Bevel);
+        assert_eq!(
+            fit.tied,
+            vec![vec![
+                Unknown::Sideways(b),
+                Unknown::Width(b),
+                Unknown::Run(b)
+            ]]
+        );
+        // With the bevel's width held, as stage 1 holds it, the scatter is the same and every
+        // value is fixed: the tool's values the record gives (CALIBRATION.md §3).
+        let fit =
+            ::calibrate::heads::fit(&[from_log], &::calibrate::Calibration::new()).expect("fits");
         assert!((fit.sigma - 0.112361).abs() < 1e-6, "scatter {}", fit.sigma);
         assert!(fit.tied.is_empty());
-        let (s, b) = (Head::Straight, Head::Bevel);
         for (u, want, se) in [
-            (Unknown::P(s, 0), -6.1875, 0.05618),
-            (Unknown::P(s, 1), -2.1425, 0.05618),
-            (Unknown::E(s, false, Face::Any), -0.1025, 0.05618),
-            (Unknown::E(s, true, Face::Any), 0.0875, 0.05618),
-            (Unknown::Drag(s, true), 1.9675, 0.12562),
-            (Unknown::Drag(s, false), 1.2025, 0.12562),
-            (Unknown::P(b, 0), 71.6775, 0.05618),
-            (Unknown::P(b, 1), -2.3075, 0.05618),
-            (Unknown::E(b, false, Face::Back), 0.4525, 0.05618),
-            (Unknown::E(b, true, Face::Front), -2.1625, 0.05618),
-            (Unknown::Drag(b, true), 2.2225, 0.12562),
-            (Unknown::Drag(b, false), 0.6475, 0.12562),
+            (Unknown::P(s, Axis::X), -6.1875, Some(0.05618)),
+            (Unknown::P(s, Axis::Y), -2.1425, Some(0.05618)),
+            (Unknown::Sideways(s), -0.095, None),
+            (Unknown::Width(s), -0.015, None),
+            (Unknown::Lead(s), 1.9675, Some(0.12562)),
+            (Unknown::Shortfall(s), 1.2025, Some(0.12562)),
+            (Unknown::P(b, Axis::X), 71.6775, Some(0.05618)),
+            (Unknown::P(b, Axis::Y), -2.3075, Some(0.05618)),
+            (Unknown::Sideways(b), 0.4525, Some(0.05618)),
+            (Unknown::Run(b), 1.71 / 1.5, None),
+            (Unknown::Lead(b), 2.2225, Some(0.12562)),
+            (Unknown::Shortfall(b), 0.6475, Some(0.12562)),
         ] {
             let (v, e) = fit.get(u).expect("settled");
             assert!((v - want).abs() < 1e-6, "{u:?}: {v} against {want}");
-            assert!((e - se).abs() < 1e-5, "{u:?}: ± {e} against {se}");
+            if let Some(se) = se {
+                assert!((e - se).abs() < 1e-5, "{u:?}: ± {e} against {se}");
+            }
         }
-        // The tool's values the record fixes (CALIBRATION.md §3): the straight slit's width and
-        // sideways offset, the bevel's run across the 1.5 mm board, and each head's plunge (how
-        // much further back a cut starts than it falls short at its end, on the back).
-        let el = Unknown::E(s, false, Face::Any);
-        let er = Unknown::E(s, true, Face::Any);
-        let (ef, eb) = (
-            Unknown::E(b, true, Face::Front),
-            Unknown::E(b, false, Face::Back),
-        );
-        for (what, c, want) in [
-            ("slit width", vec![(el, 1.0), (er, 1.0)], -0.015),
-            ("sideways", vec![(er, 0.5), (el, -0.5)], 0.095),
-            ("bevel run", vec![(ef, -1.0), (eb, -1.0)], 1.71),
-            (
-                "straight plunge",
-                vec![
-                    (Unknown::Drag(s, true), 1.0),
-                    (Unknown::Drag(s, false), -1.0),
-                ],
-                0.765,
-            ),
-            (
-                "bevel plunge",
-                vec![
-                    (Unknown::Drag(b, true), 1.0),
-                    (Unknown::Drag(b, false), -1.0),
-                ],
-                1.575,
-            ),
-        ] {
-            let (v, _) = fit.combination(&c).expect("fixed");
-            assert!((v - want).abs() < 1e-6, "{what}: {v} against {want}");
+        // Each head's plunge: how much further back a cut starts than it falls short at its end,
+        // on the back.
+        for (h, want) in [(s, 0.765), (b, 1.575)] {
+            let plunge = [(Unknown::Lead(h), 1.0), (Unknown::Shortfall(h), -1.0)];
+            let (v, _) = fit.combination(&plunge).expect("fixed");
+            assert!((v - want).abs() < 1e-6, "{h} plunge: {v} against {want}");
         }
-        // The profile written with `--profile`, to the micrometre: 6.4125 rounds up there, though
-        // the report prints it as 6.412.
-        let fitted = fit.profile(&Profile::gunnar_601());
-        assert_eq!(fitted.straight.offset_mm, [6.413, 1.868]);
-        assert_eq!(fitted.bevel.offset_mm, [-71.452, 2.032]);
+        // The head offsets, the board origin less each P. The readings are in hundredths, so each
+        // is an exact half-micrometre, and the profile written with `--profile`, to the
+        // micrometre, rounds each tie whichever way the last bit falls.
+        let profile = Profile::gunnar_601();
+        let fitted = fit.profile(&profile);
+        for (h, want) in [(s, [6.4125, 1.8675]), (b, [-71.4525, 2.0325])] {
+            let (got, _) = fit.head_offset(h, &profile).expect("settled");
+            let written = fitted.head(h).offset_mm;
+            for i in 0..2 {
+                assert!((got[i] - want[i]).abs() < 1e-9, "{h}: {got:?}");
+                assert!(
+                    (written[i] - want[i]).abs() <= 0.0005 + 1e-9,
+                    "{h}: {written:?}"
+                );
+            }
+        }
     }
 
     /// The record's fitted head offsets, written into the calibration file, are the machine
@@ -1118,14 +1062,11 @@ mod tests {
         use ::calibrate::{Calibration, Edit, Key, Why};
         let readings =
             read_readings(&Path::new(RECORD).join("calibration_1.readings.txt")).expect("readings");
-        let sheet = Sheet::lowered(
-            "calibration_1",
-            program("calibration_1.json"),
-            &cut_with_on_10_nov(),
-            readings,
-        )
-        .expect("lowers");
-        let (fit, _) = fit_sheets(&[sheet]).expect("fits");
+        let p = program("calibration_1.json");
+        let (_, listed) = ::calibrate::legacy::readings(&p).expect("listed");
+        let sheet = Sheet::lowered("calibration_1", p, &cut_with_on_10_nov(), listed, readings)
+            .expect("lowers");
+        let fit = fit_sheets(&[sheet]).expect("fits");
         let cal = Calibration::new();
         let mut edits = Vec::new();
         for h in [Head::Straight, Head::Bevel] {

@@ -17,7 +17,7 @@ use program::{BladeOffsets, Head, Material};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::key::{Axis, BladeValue, HEADS, Key, ProfileValue, Surface, Trim, Val};
+use crate::key::{Axis, BladeValue, Key, ProfileValue, Surface, Trim, Val};
 
 pub const FORMAT: &str = "601rs-calibration";
 pub const VERSION: u32 = 1;
@@ -182,13 +182,6 @@ pub(crate) fn blade_value(c: &mut HeadCut, value: BladeValue) -> &mut f64 {
 /// The driver's default for a blade value: the shop's 601 as fitted.
 fn blade_default(head: Head, value: BladeValue) -> f64 {
     *blade_value(Blade::fitted().head_mut(head), value)
-}
-
-fn axis_index(a: Axis) -> usize {
-    match a {
-        Axis::X => 0,
-        Axis::Y => 1,
-    }
 }
 
 impl Default for Calibration {
@@ -361,7 +354,7 @@ impl Calibration {
         }
         let n = |v: f64| Ok(Val::Num(v));
         match key {
-            Key::HeadOffset(h, a) => n(Profile::gunnar_601().head(*h).offset_mm[axis_index(*a)]),
+            Key::HeadOffset(h, a) => n(Profile::gunnar_601().head(*h).offset_mm[a.index()]),
             Key::Scale(Axis::X) => n(Profile::gunnar_601().scale.x_steps_per_mm),
             Key::Scale(Axis::Y) => n(Profile::gunnar_601().scale.y_steps_per_mm),
             Key::Blade { head, value } => n(blade_default(*head, *value)),
@@ -394,7 +387,7 @@ impl Calibration {
     pub fn machine(&self) -> Profile {
         let mut p = Profile::gunnar_601();
         let num = |k: Key| self.num(&k).unwrap_or_default();
-        for h in HEADS {
+        for h in Head::ALL {
             let offset = [
                 num(Key::HeadOffset(h, Axis::X)),
                 num(Key::HeadOffset(h, Axis::Y)),
@@ -424,7 +417,7 @@ impl Calibration {
     /// the board's thickness.
     pub fn blade(&self) -> Blade {
         let mut b = Blade::fitted();
-        for head in HEADS {
+        for head in Head::ALL {
             for value in BladeValue::ALL {
                 if let Some(v) = self.raw(&Key::Blade { head, value }).and_then(Val::num) {
                     *blade_value(b.head_mut(head), value) = v;

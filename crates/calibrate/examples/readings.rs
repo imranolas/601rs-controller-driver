@@ -28,13 +28,9 @@ const READINGS: [&str; 11] = [
 fn sheet(names: &[&str]) -> Sheet {
     let profile = Profile::gunnar_601();
     let readings: HashMap<String, f64> = names.iter().map(|n| ((*n).to_owned(), 0.0)).collect();
-    Sheet::lowered(
-        "sheet 2",
-        calibrate::sheet::program(&profile),
-        &profile.raw(),
-        readings,
-    )
-    .expect("lowers")
+    let program = calibrate::sheet::program(&profile);
+    let (_, listed) = calibrate::legacy::readings(&program).expect("listed");
+    Sheet::lowered("sheet 2", program, &profile.raw(), listed, readings).expect("lowers")
 }
 
 fn name(u: Unknown) -> String {
@@ -53,7 +49,9 @@ fn row(p: &Precision, order: &[Unknown]) -> String {
 }
 
 fn main() {
-    let all = precision(&sheet(&READINGS), &[]).expect("a plan");
+    // The bevel's width held, as stage 1 holds it: the sheet reads its sides on different faces.
+    let held = calibrate::heads::priors(&calibrate::Calibration::new());
+    let all = precision(&sheet(&READINGS), &held).expect("a plan");
     let order: Vec<Unknown> = all.values.iter().map(|(u, _)| *u).collect();
     println!("caliper readings scattering {CALIPER_SD_MM} mm; standard errors, mm\n");
     for (i, u) in order.iter().enumerate() {
@@ -71,18 +69,22 @@ fn main() {
             .copied()
             .filter(|n| *n != left_out)
             .collect();
-        let p = precision(&sheet(&rest), &[]).expect("a plan");
+        let p = precision(&sheet(&rest), &held).expect("a plan");
         println!("{:22} {}", format!("without {left_out}"), row(&p, &order));
     }
-    // A check: the slit edges known from the calibration to ±0.03 mm, only the four head
-    // positions read.
+    // A check: the slits known from the calibration to ±0.03 mm (the bevel's run to 0.02 per
+    // mm), only the four head positions read.
     let known: Vec<Prior> = order
         .iter()
-        .filter(|u| matches!(u, Unknown::E(..)))
+        .filter(|u| !matches!(u, Unknown::P(..)))
         .map(|&u| Prior {
             unknown: u,
             value: 0.0,
-            se_mm: 0.03,
+            se_mm: if matches!(u, Unknown::Run(_)) {
+                0.02
+            } else {
+                0.03
+            },
         })
         .collect();
     let four = ["S.left", "S.front", "W.left", "W.front"];

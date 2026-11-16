@@ -10,13 +10,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fit::{comb_readings, fit_sheets};
-use crate::plan::{Check, Plan, Reading, Routine};
+use crate::plan::{Plan, Routine};
 use crate::proposal::Proposal;
+use crate::reading::{Check, Reading, combs};
 use crate::{Calibration, Error, Sheet, heads, runons};
 
 pub const FORMAT: &str = "601rs-calibration-session";
-pub const VERSION: u32 = 1;
+/// 2: each reading says what it measures (`Kind::Length::span`, `Kind::Tooth` a comb), and no
+/// longer lists its cuts.
+pub const VERSION: u32 = 2;
 
 /// One run of a routine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,12 +88,12 @@ impl Session {
         match self.cut {
             Cut::NotYet => false,
             Cut::Done => true,
-            Cut::Stopped { ops_done } => r.needs.iter().all(|cut| {
+            Cut::Stopped { ops_done } => r.needs().into_iter().all(|cut| {
                 self.plan
                     .program
                     .ops
                     .iter()
-                    .position(|op| op.id() == Some(cut.as_str()))
+                    .position(|op| op.id() == Some(cut))
                     .is_some_and(|k| k < ops_done)
             }),
         }
@@ -113,7 +115,9 @@ impl Session {
     pub fn check(&self, id: &str, value: f64) -> Result<Check, Error> {
         let check = self.plan.check(id, value)?;
         if !self.is_available(id) {
-            return Err(format!("{id} can't be taken: not all its cuts were made").into());
+            return Err(Error::Reading(format!(
+                "{id} can't be taken: not all its cuts were made"
+            )));
         }
         Ok(check)
     }
@@ -131,6 +135,14 @@ impl Session {
     /// Drop reading `id`, to take it again.
     pub fn forget(&mut self, id: &str) {
         self.readings.remove(id);
+    }
+
+    /// The readings taken that can be, each with its value, in the plan's order.
+    pub fn taken(&self) -> impl Iterator<Item = (&Reading, f64)> {
+        self.plan.readings.iter().filter_map(|r| {
+            let v = self.readings.get(&r.id)?;
+            self.is_available(&r.id).then_some((r, *v))
+        })
     }
 
     /// The cut sheet with the readings taken: where its cuts went, by lowering the plan's
@@ -154,16 +166,12 @@ impl Session {
     /// When there are no readings yet, or they can't be fitted.
     pub fn propose(&self, cal: &Calibration) -> Result<Proposal, Error> {
         if self.readings.is_empty() {
-            return Err(format!("{}: no readings yet", self.id).into());
+            return Err(Error::Reading(format!("{}: no readings yet", self.id)));
         }
-        let sheet = self.sheet()?;
         let t = self.plan.program.board.thickness_mm;
         let mut p = match self.plan.routine {
-            Routine::Heads => {
-                let (fit, _) = fit_sheets(&[sheet])?;
-                heads::propose(&fit, cal, t)
-            }
-            Routine::RunOns => runons::propose(&comb_readings(&sheet)?, cal, t),
+            Routine::Heads => heads::propose(&heads::fit(&[self.sheet()?], cal)?, cal, t),
+            Routine::RunOns => runons::propose(&combs(self.taken())?, cal, t),
         };
         if cal.revision() != self.revision {
             p.notes.push(format!(

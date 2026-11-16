@@ -11,18 +11,21 @@
 //!   and bounds.
 //! - [`store`]: where the file lives, shared by `mc601` and apps, and reading and writing it
 //!   without one overwriting the other's change.
-//! - [`plan`]: a routine as data: the program to cut, the steps and readings, what each should
-//!   read and where it is taken; [`heads`] (stage 1) and [`runons`] (stage 2) make them.
+//! - [`reading`]: one reading, described once: what it measures, what it should read, where it
+//!   is taken, and whether a value can be it.
+//! - [`plan`]: a routine as data: the program to cut, and the readings to take off it in steps;
+//!   [`heads`] (stage 1) and [`runons`] (stage 2) make them.
 //! - [`session`]: one run of a routine, kept as a file: how far it was cut, the readings so far.
-//! - [`fit`]: the readings as linear rows in each head's unknowns (where its line lands on the
-//!   registered corner, where each side of its slit lands, its drag), solved by least squares
-//!   with each unknown's standard error; the combs read by eye; and what a calibration predicts.
-//! - [`proposal`]: what a fit proposes for the file, each change with its verdict and its
-//!   effect in words, applied as one revision.
+//! - [`fit`]: the caliper readings as linear rows in each head's unknowns (where its line lands
+//!   on the registered corner, where each side of its slit lands, its drag), solved by least
+//!   squares with each unknown's standard error; and what a calibration predicts.
+//! - [`proposal`]: what a routine's readings propose for the file, each change with its verdict
+//!   and its effect in words, applied as one revision.
 //! - [`sent`]: the cuts a program sent, in carriage millimetres, from the bytes on the line or
 //!   from lowering the program again with the profile it was cut with. Lowering is pure, so an
 //!   app that keeps no log still knows where every cut went.
-//! - [`sheet`]: calibration sheet 2, the record's, in carriage coordinates.
+//! - [`legacy`] and [`sheet`]: the record's calibration sheets, cut raw before the routines:
+//!   their readings as their programs list them, and calibration sheet 2 itself.
 //!
 //! Depends on `compiler`, `machine` and `program`.
 
@@ -30,8 +33,10 @@ pub mod calibration;
 pub mod fit;
 pub mod heads;
 pub mod key;
+pub mod legacy;
 pub mod plan;
 pub mod proposal;
+pub mod reading;
 pub mod runons;
 pub mod sent;
 pub mod session;
@@ -40,12 +45,13 @@ pub mod store;
 
 pub use calibration::{Calibration, Change, Edit, Entry, Last, ValueState, Why};
 pub use fit::{
-    CALIPER_SD_MM, CombReading, Face, Fit, Leftover, Precision, Prior, Sheet, Unknown,
-    comb_readings, fit_sheets, fit_sheets_with, known, precision, predict,
+    CALIPER_SD_MM, Fit, Leftover, Precision, Prior, Sheet, Unknown, fit_sheets, fit_sheets_with,
+    known, precision, predict,
 };
 pub use key::{Key, Val};
-pub use plan::{Check, Kind, Plan, Reading, Routine, Step, Stock};
+pub use plan::{Plan, Routine, Step, Stock};
 pub use proposal::{Proposal, Verdict};
+pub use reading::{Check, Comb, CombReading, Edge, End, Kind, Reading, Side, Span, Tooth, combs};
 pub use sent::{SentCut, cuts_from_bytes, cuts_from_lowering};
 pub use session::Session;
 
@@ -63,22 +69,16 @@ pub enum Error {
     Moved { read: u32, now: u32 },
     #[error("{path}: {message}")]
     Io { path: String, message: String },
+    /// A routine can't be planned on this board, or with this calibration.
+    #[error("{0}")]
+    Plan(String),
+    /// A reading isn't one of the plan's, can't be taken yet, or a value can't be it.
+    #[error("{0}")]
+    Reading(String),
     /// The sheet, its cuts and its readings don't agree; the message says how.
     #[error("{0}")]
     Sheet(String),
     /// The sheet can't be lowered with the profile it was cut with.
     #[error("the sheet can't be lowered: {0}")]
     Lower(#[from] machine::Error),
-}
-
-impl From<String> for Error {
-    fn from(message: String) -> Self {
-        Error::Sheet(message)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(message: &str) -> Self {
-        Error::Sheet(message.to_owned())
-    }
 }

@@ -10,15 +10,14 @@
 //! They fix each head's position, the straight slit's sideways offset and width, and the bevel's
 //! sideways offset on the back and its lean.
 
-use std::collections::HashMap;
-
+use compiler::Blade;
 use program::Head;
-use serde_json::{Value, json};
 
-use crate::fit::{Face, Fit, Unknown, known, predict};
+use crate::fit::{Fit, Prior, Unknown, fit_sheets_with};
 use crate::key::{Axis, BladeValue, Key, Surface};
-use crate::plan::{Kind, Line, Plan, Reading, Routine, Step, Stock, program};
+use crate::plan::{Line, Plan, Routine, Step, Stock, program};
 use crate::proposal::{Change, Proposal, SUSPECT_T};
+use crate::reading::{Edge, Kind, Reading, Side, Span};
 use crate::{Calibration, Error, Sheet};
 
 /// The mount and the window, `[x0, y0, x1, y1]` on the board, mm.
@@ -31,60 +30,49 @@ const MARGIN_MM: f64 = 1.0;
 /// of a board not against the stops.
 const UNUSUAL_MM: f64 = 1.0;
 
-/// A side of a cut a reading is taken from: the cut, whether the piece is on its right as it
-/// travels, and the board's side up.
+/// An [`Edge`], as the table below writes it: the cut, the side of it the piece read lies on,
+/// and the board's side up.
 #[derive(Debug, Clone, Copy)]
-struct Edge {
-    cut: &'static str,
-    right: bool,
-    surface: Surface,
+struct E(&'static str, Side, Surface);
+
+impl E {
+    fn edge(self) -> Edge {
+        Edge {
+            cut: self.0.to_owned(),
+            side: self.1,
+            surface: self.2,
+        }
+    }
 }
 
 /// The mount's side of an outline cut, the frame's, the mount's side of a window cut on the
 /// back, the drop-out's on its face.
-fn mount(cut: &'static str) -> Edge {
-    Edge {
-        cut,
-        right: false,
-        surface: Surface::Back,
-    }
+const fn mount(cut: &'static str) -> E {
+    E(cut, Side::Left, Surface::Back)
 }
 
-fn frame(cut: &'static str) -> Edge {
-    Edge {
-        right: true,
-        ..mount(cut)
-    }
+const fn frame(cut: &'static str) -> E {
+    E(cut, Side::Right, Surface::Back)
 }
 
-fn window(cut: &'static str) -> Edge {
+const fn window(cut: &'static str) -> E {
     mount(cut)
 }
 
-fn drop_out(cut: &'static str) -> Edge {
-    Edge {
-        cut,
-        right: true,
-        surface: Surface::Face,
-    }
+const fn drop_out(cut: &'static str) -> E {
+    E(cut, Side::Right, Surface::Face)
 }
 
 /// What a reading spans: two edges, or the stock edge (against the stops) to one.
 #[derive(Debug, Clone, Copy)]
-enum Span {
-    Width(Edge, Edge),
-    FromStock(Edge),
+enum S {
+    Between(E, E),
+    FromStock(E),
 }
 
-struct Spec {
-    id: &'static str,
-    prompt: &'static str,
-    step: usize,
-    axis: Axis,
-    /// Where along the other axis it is taken, mm on the board.
-    at: f64,
-    span: Span,
-}
+/// A reading: its id, the step it is taken in, its axis, where along the other axis it is
+/// taken (mm on the board), what it spans, and its prompt.
+struct Spec(&'static str, usize, Axis, f64, S, &'static str);
 
 const STEPS: [&str; 3] = [
     "Lift the mount out of the frame, push the window's drop-out out of it, and lay the mount \
@@ -93,156 +81,46 @@ const STEPS: [&str; 3] = [
     "Turn the drop-out face up.",
 ];
 
-fn specs() -> Vec<Spec> {
+#[rustfmt::skip]
+const SPECS: [Spec; 16] = {
     use Axis::{X, Y};
-    use Span::{FromStock, Width};
-    let spec = |id, prompt, step, axis, at, span| Spec {
-        id,
-        prompt,
-        step,
-        axis,
-        at,
-        span,
-    };
-    vec![
-        spec(
-            "B.left",
-            "The mount's left border, its edge to the window's (outside jaws)",
-            0,
-            X,
-            75.0,
-            Width(mount("O.left"), window("W.left")),
-        ),
-        spec(
-            "B.right",
-            "The mount's right border",
-            0,
-            X,
-            75.0,
-            Width(window("W.right"), mount("O.right")),
-        ),
-        spec(
-            "B.front",
-            "The mount's front border",
-            0,
-            Y,
-            75.0,
-            Width(mount("O.front"), window("W.front")),
-        ),
-        spec(
-            "B.back",
-            "The mount's back border",
-            0,
-            Y,
-            75.0,
-            Width(window("W.back"), mount("O.back")),
-        ),
-        spec(
-            "W.width",
-            "The window, left to right (inside jaws)",
-            0,
-            X,
-            62.0,
-            Width(window("W.left"), window("W.right")),
-        ),
-        spec(
-            "W.height",
-            "The window, front to back (inside jaws)",
-            0,
-            Y,
-            62.0,
-            Width(window("W.front"), window("W.back")),
-        ),
-        spec(
-            "M.width",
-            "The mount, left to right (outside jaws)",
-            0,
-            X,
-            112.0,
-            Width(mount("O.left"), mount("O.right")),
-        ),
-        spec(
-            "M.height",
-            "The mount, front to back (outside jaws)",
-            0,
-            Y,
-            112.0,
-            Width(mount("O.front"), mount("O.back")),
-        ),
-        spec(
-            "F.width",
-            "The frame's opening, left to right (inside jaws)",
-            1,
-            X,
-            88.0,
-            Width(frame("O.left"), frame("O.right")),
-        ),
-        spec(
-            "F.height",
-            "The frame's opening, front to back (inside jaws)",
-            1,
-            Y,
-            88.0,
-            Width(frame("O.front"), frame("O.back")),
-        ),
-        spec(
-            "S.left",
-            "The frame's left side near the front: the board's edge to the opening",
-            1,
-            X,
-            35.0,
-            FromStock(frame("O.left")),
-        ),
-        spec(
-            "S.left2",
-            "The frame's left side near the back",
-            1,
-            X,
-            115.0,
-            FromStock(frame("O.left")),
-        ),
-        spec(
-            "S.front",
-            "The frame's front side near the left: the board's edge to the opening",
-            1,
-            Y,
-            35.0,
-            FromStock(frame("O.front")),
-        ),
-        spec(
-            "S.front2",
-            "The frame's front side near the right",
-            1,
-            Y,
-            115.0,
-            FromStock(frame("O.front")),
-        ),
-        spec(
-            "D.width",
-            "The drop-out, left to right, face up (outside jaws)",
-            2,
-            X,
-            85.0,
-            Width(drop_out("W.left"), drop_out("W.right")),
-        ),
-        spec(
-            "D.height",
-            "The drop-out, front to back, face up (outside jaws)",
-            2,
-            Y,
-            85.0,
-            Width(drop_out("W.front"), drop_out("W.back")),
-        ),
+    use S::{Between as W, FromStock as F};
+    [
+        Spec("B.left",   0, X,  75.0, W(mount("O.left"), window("W.left")),
+             "The mount's left border, its edge to the window's (outside jaws)"),
+        Spec("B.right",  0, X,  75.0, W(window("W.right"), mount("O.right")), "The mount's right border"),
+        Spec("B.front",  0, Y,  75.0, W(mount("O.front"), window("W.front")), "The mount's front border"),
+        Spec("B.back",   0, Y,  75.0, W(window("W.back"), mount("O.back")),   "The mount's back border"),
+        Spec("W.width",  0, X,  62.0, W(window("W.left"), window("W.right")),
+             "The window, left to right (inside jaws)"),
+        Spec("W.height", 0, Y,  62.0, W(window("W.front"), window("W.back")),
+             "The window, front to back (inside jaws)"),
+        Spec("M.width",  0, X, 112.0, W(mount("O.left"), mount("O.right")),
+             "The mount, left to right (outside jaws)"),
+        Spec("M.height", 0, Y, 112.0, W(mount("O.front"), mount("O.back")),
+             "The mount, front to back (outside jaws)"),
+        Spec("F.width",  1, X,  88.0, W(frame("O.left"), frame("O.right")),
+             "The frame's opening, left to right (inside jaws)"),
+        Spec("F.height", 1, Y,  88.0, W(frame("O.front"), frame("O.back")),
+             "The frame's opening, front to back (inside jaws)"),
+        Spec("S.left",   1, X,  35.0, F(frame("O.left")),
+             "The frame's left side near the front: the board's edge to the opening"),
+        Spec("S.left2",  1, X, 115.0, F(frame("O.left")),  "The frame's left side near the back"),
+        Spec("S.front",  1, Y,  35.0, F(frame("O.front")),
+             "The frame's front side near the left: the board's edge to the opening"),
+        Spec("S.front2", 1, Y, 115.0, F(frame("O.front")), "The frame's front side near the right"),
+        Spec("D.width",  2, X,  85.0, W(drop_out("W.left"), drop_out("W.right")),
+             "The drop-out, left to right, face up (outside jaws)"),
+        Spec("D.height", 2, Y,  85.0, W(drop_out("W.front"), drop_out("W.back")),
+             "The drop-out, front to back, face up (outside jaws)"),
     ]
-}
+};
 
 /// The window clockwise, then the outline anticlockwise, each line on its design and run on
 /// past its corners by the calibration's run-ons on this board, and [`MARGIN_MM`] more.
 fn lines(cal: &Calibration, thickness_mm: f64) -> Vec<Line> {
     let blade = cal.blade();
     let ends = |h: Head| blade.head(h).run_on(thickness_mm).map(|r| r + MARGIN_MM);
-    let ([s, e], b) = (ends(Head::Bevel), Head::Bevel);
-    let [x0, y0, x1, y1] = WINDOW;
     let line = |id: &str, label: &str, head, a, b| Line {
         id: id.to_owned(),
         label: label.to_owned(),
@@ -250,111 +128,91 @@ fn lines(cal: &Calibration, thickness_mm: f64) -> Vec<Line> {
         a,
         b,
     };
-    let mut out = vec![
-        line(
-            "W.right",
-            "window, right edge",
-            b,
-            [x1, y1 + s],
-            [x1, y0 - e],
-        ),
-        line(
-            "W.front",
-            "window, front edge",
-            b,
-            [x1 + s, y0],
-            [x0 - e, y0],
-        ),
-        line("W.left", "window, left edge", b, [x0, y0 - s], [x0, y1 + e]),
-        line("W.back", "window, back edge", b, [x0 - s, y1], [x1 + e, y1]),
-    ];
-    let ([s, e], h) = (ends(Head::Straight), Head::Straight);
+    let (b, [bs, be]) = (Head::Bevel, ends(Head::Bevel));
+    let (h, [hs, he]) = (Head::Straight, ends(Head::Straight));
+    let [wx0, wy0, wx1, wy1] = WINDOW;
     let [x0, y0, x1, y1] = MOUNT;
-    out.extend([
-        line(
-            "O.front",
-            "mount, front edge",
-            h,
-            [x0 - s, y0],
-            [x1 + e, y0],
-        ),
-        line(
-            "O.right",
-            "mount, right edge",
-            h,
-            [x1, y0 - s],
-            [x1, y1 + e],
-        ),
-        line("O.back", "mount, back edge", h, [x1 + s, y1], [x0 - e, y1]),
-        line("O.left", "mount, left edge", h, [x0, y1 + s], [x0, y0 - e]),
-    ]);
+    #[rustfmt::skip]
+    let out = vec![
+        line("W.right", "window, right edge", b, [wx1, wy1 + bs], [wx1, wy0 - be]),
+        line("W.front", "window, front edge", b, [wx1 + bs, wy0], [wx0 - be, wy0]),
+        line("W.left",  "window, left edge",  b, [wx0, wy0 - bs], [wx0, wy1 + be]),
+        line("W.back",  "window, back edge",  b, [wx0 - bs, wy1], [wx1 + be, wy1]),
+        line("O.front", "mount, front edge",  h, [x0 - hs, y0],   [x1 + he, y0]),
+        line("O.right", "mount, right edge",  h, [x1, y0 - hs],   [x1, y1 + he]),
+        line("O.back",  "mount, back edge",   h, [x1 + hs, y1],   [x0 - he, y1]),
+        line("O.left",  "mount, left edge",   h, [x0, y1 + hs],   [x0, y0 - he]),
+    ];
     out
 }
 
-fn edge_json(lines: &[Line], e: Edge) -> Value {
-    let face = match (head_of(lines, e.cut), e.surface) {
-        (Head::Straight, _) => "any",
-        (Head::Bevel, Surface::Back) => "back",
-        (Head::Bevel, Surface::Face) => "face",
-    };
-    json!({ "cut": e.cut, "kept": if e.right { "right" } else { "left" }, "face": face })
-}
-
-fn head_of(lines: &[Line], cut: &str) -> Head {
-    lines
-        .iter()
-        .find(|l| l.id == cut)
-        .map_or(Head::Straight, |l| l.head)
-}
-
-/// The readings as the fit reads them (`meta.calibration.readings`), each with what it should
-/// read if that is known.
-fn readings_json(lines: &[Line], expected: &HashMap<String, f64>) -> Vec<Value> {
-    specs()
-        .iter()
-        .map(|s| {
-            let axis = if s.axis == Axis::X { "x" } else { "y" };
-            let mut v = match s.span {
-                Span::Width(a, b) => json!({
-                    "name": s.id, "kind": "width", "axis": axis,
-                    "edges": [edge_json(lines, a), edge_json(lines, b)],
-                }),
-                Span::FromStock(e) => json!({
-                    "name": s.id, "kind": "position", "axis": axis,
-                    "edge": edge_json(lines, e),
-                }),
-            };
-            v["what"] = json!(s.prompt);
-            v["step"] = json!(STEPS[s.step]);
-            v["unusual"] = json!(UNUSUAL_MM);
-            if let Some(x) = expected.get(s.id) {
-                v["about"] = json!((x * 100.0).round() / 100.0);
-            }
-            v
-        })
-        .collect()
-}
-
-/// Where an edge lies on the board, by the calibration, mm along `axis`.
-fn edge_at(lines: &[Line], e: Edge, axis: Axis, cal: &Calibration, thickness_mm: f64) -> f64 {
-    let Some(l) = lines.iter().find(|l| l.id == e.cut) else {
+/// Where an edge lies on the board by the tool model, mm along `axis`.
+fn edge_at(lines: &[Line], e: E, axis: Axis, blade: &Blade, thickness_mm: f64) -> f64 {
+    let Some(l) = lines.iter().find(|l| l.id == e.0) else {
         return f64::NAN;
     };
-    let i = usize::from(axis == Axis::Y);
     let len = (l.b[0] - l.a[0]).hypot(l.b[1] - l.a[1]);
     let d = [(l.b[0] - l.a[0]) / len, (l.b[1] - l.a[1]) / len];
-    // Toward the kept side: right of travel, or left.
-    let toward = if e.right {
-        [d[1], -d[0]]
-    } else {
-        [-d[1], d[0]]
+    // Toward the side read, and how far that side of the slit lies from the line that way.
+    let depth = match e.2 {
+        Surface::Back => 0.0,
+        Surface::Face => thickness_mm,
     };
-    let face = match e.surface {
-        Surface::Face if l.head == Head::Bevel => Face::Front,
-        Surface::Back if l.head == Head::Bevel => Face::Back,
-        _ => Face::Any,
+    let [left, right] = blade.head(l.head).sides(depth);
+    let (toward, out) = match e.1 {
+        Side::Right => ([d[1], -d[0]], -right),
+        Side::Left => ([-d[1], d[0]], left),
     };
-    l.a[i] + toward[i].round() * known(Unknown::E(l.head, e.right, face), cal, thickness_mm)
+    let i = axis.index();
+    l.a[i] + toward[i].round() * out
+}
+
+impl Spec {
+    /// The reading, with where it is taken on the board by the tool model; what it should read
+    /// is the plan's to work out ([`Plan::expecting`]).
+    fn reading(&self, lines: &[Line], blade: &Blade, thickness_mm: f64) -> Reading {
+        let Spec(id, _, axis, along, span, prompt) = *self;
+        let at = |e| edge_at(lines, e, axis, blade, thickness_mm);
+        let (from, to, span) = match span {
+            S::Between(a, b) => (
+                at(a),
+                at(b),
+                Span::Between {
+                    axis,
+                    edges: [a.edge(), b.edge()],
+                },
+            ),
+            S::FromStock(e) => (
+                0.0,
+                at(e),
+                Span::FromStock {
+                    axis,
+                    edge: e.edge(),
+                },
+            ),
+        };
+        let point = |v| match axis {
+            Axis::X => [v, along],
+            Axis::Y => [along, v],
+        };
+        let face_up = matches!(span, Span::Between { ref edges, .. }
+            if edges.iter().any(|e| e.surface == Surface::Face));
+        Reading {
+            id: id.to_owned(),
+            prompt: prompt.to_owned(),
+            surface: if face_up {
+                Surface::Face
+            } else {
+                Surface::Back
+            },
+            kind: Kind::Length {
+                span,
+                expected_mm: None,
+                unusual_mm: UNUSUAL_MM,
+            },
+            dimension: [point(from), point(to)],
+        }
+    }
 }
 
 /// Stage 1's plan on `stock`, placed and predicted with calibration `cal`.
@@ -364,122 +222,80 @@ fn edge_at(lines: &[Line], e: Edge, axis: Axis, cal: &Calibration, thickness_mm:
 pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
     stock.check()?;
     let t = stock.thickness_mm;
-    let cut_with = cal.machine();
     let lines = lines(cal, t);
-    let program = |readings| program("stage_1", Routine::Heads, stock, &lines, readings);
-    let unplaced = program(readings_json(&lines, &HashMap::new()));
-    let sheet = Sheet::lowered("stage 1", unplaced, &cut_with, HashMap::new())?;
-    let expected = predict(&sheet, cal)?;
-    let readings: Vec<Reading> = specs()
-        .iter()
-        .map(|s| {
-            let at = |e| edge_at(&lines, e, s.axis, cal, t);
-            let (from, to) = match s.span {
-                Span::Width(a, b) => (at(a), at(b)),
-                Span::FromStock(e) => (0.0, at(e)),
-            };
-            let point = |v| match s.axis {
-                Axis::X => [v, s.at],
-                Axis::Y => [s.at, v],
-            };
-            let surface = match s.span {
-                Span::Width(a, b) if a.surface == Surface::Face || b.surface == Surface::Face => {
-                    Surface::Face
-                }
-                _ => Surface::Back,
-            };
-            Reading {
-                id: s.id.to_owned(),
-                prompt: s.prompt.to_owned(),
-                surface,
-                kind: Kind::Length {
-                    expected_mm: expected.get(s.id).copied().unwrap_or(f64::NAN),
-                    unusual_mm: UNUSUAL_MM,
-                },
-                dimension: [point(from), point(to)],
-                needs: match s.span {
-                    Span::Width(a, b) => vec![a.cut.to_owned(), b.cut.to_owned()],
-                    Span::FromStock(e) => vec![e.cut.to_owned()],
-                },
-            }
-        })
-        .collect();
-    let steps = STEPS
-        .iter()
-        .enumerate()
-        .map(|(k, instruction)| Step {
-            instruction: (*instruction).to_owned(),
-            readings: specs()
-                .iter()
-                .filter(|s| s.step == k)
-                .map(|s| s.id.to_owned())
-                .collect(),
-        })
-        .collect();
-    Ok(Plan {
+    let blade = cal.blade();
+    Plan {
         routine: Routine::Heads,
         board: stock.need(),
-        program: program(readings_json(&lines, &expected)),
-        cut_with,
-        steps,
-        readings,
-    })
+        program: program("stage_1", Routine::Heads, stock, &lines),
+        cut_with: cal.machine(),
+        steps: STEPS
+            .iter()
+            .enumerate()
+            .map(|(k, instruction)| Step {
+                instruction: (*instruction).to_owned(),
+                readings: SPECS
+                    .iter()
+                    .filter(|s| s.1 == k)
+                    .map(|s| s.0.to_owned())
+                    .collect(),
+            })
+            .collect(),
+        readings: SPECS.iter().map(|s| s.reading(&lines, &blade, t)).collect(),
+    }
+    .expecting(cal)
 }
 
-/// What stage 1's fit proposes for `cal`: each head's offset, the straight slit's sideways
-/// offset and width, the bevel's sideways offset on the back and its lean across board
-/// `thickness_mm` thick. The bevel's slit width is held: its two sides are read on different
-/// faces, so only their sum with the lean shows.
+/// What stage 1 takes as known: the bevel's slit width, where `cal` has it. Its two sides are
+/// read on different faces, so the readings see the width only together with its sideways
+/// offset and lean.
+pub fn priors(cal: &Calibration) -> Vec<Prior> {
+    vec![Prior::held(
+        Unknown::Width(Head::Bevel),
+        cal.blade().bevel.width_mm,
+    )]
+}
+
+/// Stage 1's fit of `sheets` (or the record's), with what it takes as known ([`priors`]).
+///
+/// # Errors
+/// As [`fit_sheets_with`].
+pub fn fit(sheets: &[Sheet], cal: &Calibration) -> Result<Fit, Error> {
+    fit_sheets_with(sheets, &priors(cal))
+}
+
+/// What stage 1's fit proposes for `cal`: each head's offset and slit's sideways offset, the
+/// straight slit's width, and the bevel's lean, read on board `thickness_mm` thick.
 pub fn propose(fit: &Fit, cal: &Calibration, thickness_mm: f64) -> Proposal {
     let (s, b) = (Head::Straight, Head::Bevel);
     let machine = cal.machine();
     let mut changes = Vec::new();
     for h in [s, b] {
         let offset = fit.head_offset(h, &machine);
-        for (i, axis) in [Axis::X, Axis::Y].into_iter().enumerate() {
-            let fitted = offset.map(|(v, se)| (v[i], se[i]));
+        for axis in Axis::BOTH {
+            let fitted = offset.map(|(v, se)| (v[axis.index()], se[axis.index()]));
             changes.push(Change::new(cal, Key::HeadOffset(h, axis), fitted));
         }
     }
-    let blade = |head, value| Key::Blade { head, value };
-    let (left, right) = (
-        Unknown::E(s, false, Face::Any),
-        Unknown::E(s, true, Face::Any),
-    );
-    changes.push(Change::new(
-        cal,
-        blade(s, BladeValue::Sideways),
-        fit.combination(&[(left, 0.5), (right, -0.5)]),
-    ));
-    changes.push(Change::new(
-        cal,
-        blade(s, BladeValue::Width),
-        fit.combination(&[(left, 1.0), (right, 1.0)]),
-    ));
-    let width = cal.blade().bevel.width_mm;
-    let (back, face) = (
-        Unknown::E(b, false, Face::Back),
-        Unknown::E(b, true, Face::Front),
-    );
-    changes.push(Change::new(
-        cal,
-        blade(b, BladeValue::Sideways),
-        fit.get(back).map(|(v, se)| (v - width / 2.0, se)),
-    ));
-    let run = fit
-        .combination(&[(face, -1.0), (back, -1.0)])
-        .map(|(v, se)| (v + width, se));
-    let t = thickness_mm;
-    let lean = run.map(|(run, se)| {
-        let r = (run / t).atan();
-        (r.to_degrees(), (se / t * r.cos().powi(2)).to_degrees())
+    let mut set = |head, value, fitted| {
+        changes.push(Change::new(cal, Key::Blade { head, value }, fitted));
+    };
+    set(s, BladeValue::Sideways, fit.get(Unknown::Sideways(s)));
+    set(s, BladeValue::Width, fit.get(Unknown::Width(s)));
+    set(b, BladeValue::Sideways, fit.get(Unknown::Sideways(b)));
+    let run = fit.get(Unknown::Run(b));
+    let lean = run.map(|(r, se)| {
+        let a = r.atan();
+        (a.to_degrees(), (se * a.cos().powi(2)).to_degrees())
     });
-    changes.push(Change::new(cal, blade(b, BladeValue::Lean), lean));
+    set(b, BladeValue::Lean, lean);
+    let t = thickness_mm;
     let mut notes = Vec::new();
-    if let (Some((run, _)), Some((deg, se))) = (run, lean) {
+    if let (Some((r, _)), Some((deg, se))) = (run, lean) {
         notes.push(format!(
-            "The bevel runs {run:.2} mm across the {t} mm board: {deg:.1}° ± {se:.1}° from \
-             vertical."
+            "The bevel runs {:.2} mm across the {t} mm board: {deg:.1}° ± {se:.1}° from \
+             vertical.",
+            r * t
         ));
     }
     Proposal {
@@ -495,8 +311,10 @@ pub fn propose(fit: &Fit, cal: &Calibration, thickness_mm: f64) -> Proposal {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::fit::{fit_sheets, precision};
+    use crate::fit::{precision, predict};
     use crate::{Edit, Why};
 
     fn key(s: &str) -> Key {
@@ -537,16 +355,20 @@ mod tests {
         assert_eq!(stepped.len(), 16);
         let all: HashMap<String, f64> = p.readings.iter().map(|r| (r.id.clone(), 0.0)).collect();
         let sheet = p.sheet("plan", all).expect("a sheet");
-        let pr = precision(&sheet, &[]).expect("a precision");
+        let pr = precision(&sheet, &priors(&Calibration::new())).expect("a precision");
         assert!(pr.unchecked.is_empty(), "{:?}", pr.unchecked);
         assert!(pr.tied.is_empty(), "{:?}", pr.tied);
         // For caliper readings scattering 0.11 mm: the straight head's position to 0.087 mm,
-        // the bevel's to 0.117 (the borders' scatter added to the straight's), each slit side to
-        // under 0.04, and the window's place on the mount across to under 0.09.
+        // the bevel's to 0.117 (the borders' scatter added to the straight's); each slit's
+        // middle to under 0.04, the straight slit's width to 0.052 (each side to 0.036), the
+        // bevel's run to 0.035 per mm of board, its width held; and the window's place on the
+        // mount across to under 0.09.
         for (u, se) in &pr.values {
             let most = match u {
                 Unknown::P(Head::Straight, _) => 0.09,
                 Unknown::P(Head::Bevel, _) => 0.12,
+                Unknown::Width(Head::Straight) => 0.06,
+                Unknown::Width(Head::Bevel) => 0.002,
                 _ => 0.04,
             };
             assert!(se.is_some_and(|se| se < most), "{u:?}: {se:?}");
@@ -554,10 +376,9 @@ mod tests {
         let (s, b) = (Head::Straight, Head::Bevel);
         let across = pr
             .combination(&[
-                (Unknown::P(b, 0), 1.0),
-                (Unknown::P(s, 0), -1.0),
-                (Unknown::E(s, true, Face::Any), 0.5),
-                (Unknown::E(s, false, Face::Any), -0.5),
+                (Unknown::P(b, Axis::X), 1.0),
+                (Unknown::P(s, Axis::X), -1.0),
+                (Unknown::Sideways(s), -1.0),
             ])
             .expect("fixed");
         assert!(across < 0.09, "{across}");
@@ -644,7 +465,7 @@ mod tests {
             .zip(noise)
             .map(|(r, n)| (r.id.clone(), clean[&r.id] + n))
             .collect();
-        let (fit, _) = fit_sheets(&[p.sheet("stage 1", readings).expect("a sheet")]).expect("fits");
+        let fit = fit(&[p.sheet("stage 1", readings).expect("a sheet")], &file).expect("fits");
         let proposal = propose(&fit, &file, 1.4);
         assert!(proposal.suspects.is_empty(), "{:?}", proposal.suspects);
         for c in &proposal.changes {
@@ -696,7 +517,7 @@ mod tests {
             .map(|(r, n)| (r.id.clone(), clean[&r.id] + n))
             .collect();
         *readings.get_mut("S.left").expect("listed") += 0.5;
-        let (fit, _) = fit_sheets(&[p.sheet("stage 1", readings).expect("a sheet")]).expect("fits");
+        let fit = fit(&[p.sheet("stage 1", readings).expect("a sheet")], &file).expect("fits");
         let proposal = propose(&fit, &file, 1.5);
         let named: Vec<&str> = proposal.suspects.iter().map(|l| l.name.as_str()).collect();
         assert!(named.contains(&"S.left"), "{named:?}");
