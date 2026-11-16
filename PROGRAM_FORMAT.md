@@ -256,7 +256,7 @@ profile.
 
 Board 200 × 310 mm, 1.5 mm, profile C10. Bevel opening 100 × 200 mm with borders
 50 left, 50 right, 50 top, 60 bottom → opening from (50, 60) to (150, 260). Interior first, outer edge last.
-Bevel overcut ≈ 1.5 × tan 42° ≈ 1.35 mm at each end. The `.gcf` trims are left out here for readability.
+Bevel overcut ≈ 1.5 mm at each end, the board's thickness, as GMC extends a cut at a square corner (protocol reference §7). The `.gcf` trims are left out here for readability.
 
 ```json
 {

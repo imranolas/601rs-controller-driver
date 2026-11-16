@@ -30,7 +30,10 @@ pub mod sheet;
 pub mod store;
 
 pub use calibration::{Calibration, Change, Edit, Entry, Last, ValueState, Why};
-pub use fit::{CombReading, Face, Fit, Sheet, Unknown, fit_sheets};
+pub use fit::{
+    CALIPER_SD_MM, CombReading, Face, Fit, Leftover, Precision, Prior, Sheet, Unknown, fit_sheets,
+    fit_sheets_with, precision,
+};
 pub use key::{Key, Val};
 pub use sent::{SentCut, cuts_from_bytes, cuts_from_lowering};
 

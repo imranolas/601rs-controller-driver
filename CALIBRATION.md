@@ -343,8 +343,31 @@ about the model. An unknown the readings don't settle is reported as such and le
   interval: past the previous tooth, up to this one. The setting is this tooth's value: the
   least run-on known to free the corner. The uncertainty is half the step. Tooth 1, or none,
   means the comb missed: the proposal says so and plans a wider comb next time.
-- **Suspects.** After the fit, a reading more than 3 scatters off the model is named: "measure
-  W.front again". One bad reading among 13 shouldn't move a head.
+- **The solve is an SVD** (`nalgebra`, built at step 3), not the normal equations. It says
+  which unknowns the readings fix each on its own; unknowns seen only as a sum or a difference
+  are reported tied (`Fit::tied`), never one of them fixed at the sum's value, as the normal
+  equations did. Each reading is weighed by its uncertainty (a steel rule's against
+  calipers'). On a sheet that fixes everything, the numbers are the normal equations'.
+- **Priors.** What the calibration already knows of an unknown, its value and standard error,
+  is one more reading of it (`Prior`, weighed against a caliper reading's 0.11 mm scatter,
+  calibration 1's). A routine reads only what it means to check and takes the rest as known.
+- **Precision before cutting.** `precision(sheet, priors)` gives each unknown's standard
+  error from which readings a plan takes, before any is read: what a plan can promise, and
+  what leaving a reading out costs (`cargo run -p calibrate --example readings`).
+- **Suspects.** After the fit, each reading's residual in units of what it should scatter,
+  judged by the other readings and allowing for how much it decides alone (externally
+  studentised, `Leftover::t`). Beyond 3.5 it is named: "measure W.width again". A reading
+  that is an unknown's only witness has no `t`: nothing can check it, and the plan should say
+  so. (Judged by a scatter it is part of, a misread would hide: that measure can't pass √dof,
+  under 3 on most sheets.)
+- **What calibration sheet 2 shows** (15 Nov, from `precision`): its 11 strip and window
+  readings fix 8 unknowns. The four readings from the board's edges (`S.left`, `S.front`,
+  `W.left`, `W.front`) and `SR.width` are each an unknown's only witness, so a misread there
+  moves a head unseen; the spare readings come in twins (`W.width` and `W.height`, `D.width`
+  and `D.height`, `SL.width` and `SL.length`), so a misread is caught but not told from its
+  twin. Each head offset is good to about ±0.12 mm, set by its one position reading. With the
+  slit edges known from the file (±0.03 mm), the four position readings alone fix the head
+  offsets to ±0.114 mm: a `check` needs four readings, not eleven.
 - **Verdicts.** Each change is *within the noise* (|Δ| ≤ 2 se: the value is kept unless chosen),
   *moved* (proposed), or *large* (beyond a plausible bound, which needs confirming). The bounds
   start at: head offset 1 mm, scale 0.5 %, edge 0.5 mm, run-on 1.5 mm. A
@@ -480,7 +503,8 @@ Each step passes `cargo test` and stops for review.
    shows it, sets and unsets values, removes a profile, lists the history and reverts. Golden,
    in `mc601`: calibration 1's fitted head offsets, set in the file, resolve to the profile its
    fit writes. Writing a fit into the file from `mc601 calibrate` is step 3's proposal.
-3. **Plans, sessions, proposals.** `heads` and `overcut` as plans in the board frame, with
+3. **Plans, sessions, proposals.** *The fit's part built, 15 Nov:* the SVD solve, what is
+   tied, weights, priors, `precision`, studentised suspects; the record's fit unchanged. `heads` and `overcut` as plans in the board frame, with
    steps, drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, suspects,
    `apply`. Synthetic recovery tests. `mc601 calibrate heads|overcut` on the sim, end to end.
 4. **The runner.** `set_profile`.

@@ -218,6 +218,10 @@ fn face_note(m: &Value) -> &'static str {
     }
 }
 
+/// A reading this many of its own scatters off the model, judged by the rest, is likely a
+/// misread (`calibrate::Leftover::t`).
+const SUSPECT_T: f64 = 3.5;
+
 /// How far a reading may stray from its expected value before it is questioned, mm.
 const NEAR_MM: f64 = 1.5;
 
@@ -559,13 +563,28 @@ fn report(
         "\n{}",
         paint(crate::style::BOLD, "leftovers (reading less model)")
     );
-    for (name, r) in &fit.leftovers {
-        let flag = if r.abs() > (2.0 * fit.sigma).max(0.15) {
+    for l in &fit.leftovers {
+        // Studentised: in units of what the reading should scatter, given the rest.
+        let t =
+            l.t.map_or_else(|| "    –".to_owned(), |t| format!("{t:+5.1}"));
+        let flag = if l.t.is_some_and(|t| t.abs() > SUSPECT_T) {
             paint(WARN, "  look again")
         } else {
             String::new()
         };
-        let _ = writeln!(o, "  {name:14} {r:+.3}{flag}");
+        let _ = writeln!(o, "  {:14} {:+.3}  {}{flag}", l.name, l.mm, paint(DIM, t));
+    }
+    for group in &fit.tied {
+        let names: Vec<String> = group
+            .iter()
+            .map(|u| format!("{} {}", head_name(u.head()), u.label()))
+            .collect();
+        let _ = writeln!(
+            o,
+            "\n{} {}",
+            paint(WARN, "fixed only together, not each on its own:"),
+            names.join(", ")
+        );
     }
     (o, fitted)
 }
@@ -634,7 +653,9 @@ mod tests {
     }
 
     /// The record's fit, from its log and from its lowering alike, is what `mc601 calibrate
-    /// fit` printed before the fit moved into the `calibrate` crate (15 Nov).
+    /// fit` printed before the fit moved into the `calibrate` crate (15 Nov). The readings are
+    /// in hundredths, so every value is an exact half-thousandth: printed to three places, a
+    /// value such as -0.1025 shows as -0.102 or -0.103 by the last bit, so they're held exactly.
     #[test]
     fn the_record_fits_as_it_did() {
         let readings =
@@ -653,24 +674,26 @@ mod tests {
         assert_eq!(fit, again);
 
         assert_eq!((fit.rows, fit.values.len()), (20, 12));
-        assert!((fit.sigma - 0.112).abs() < 0.0005, "scatter {}", fit.sigma);
+        assert!((fit.sigma - 0.112361).abs() < 1e-6, "scatter {}", fit.sigma);
+        assert!(fit.tied.is_empty());
         let (s, b) = (Head::Straight, Head::Bevel);
-        for (u, want) in [
-            (Unknown::P(s, 0), -6.188),
-            (Unknown::P(s, 1), -2.143),
-            (Unknown::E(s, false, Face::Any), -0.102),
-            (Unknown::E(s, true, Face::Any), 0.087),
-            (Unknown::Drag(s, true), 1.968),
-            (Unknown::Drag(s, false), 1.202),
-            (Unknown::P(b, 0), 71.677),
-            (Unknown::P(b, 1), -2.307),
-            (Unknown::E(b, false, Face::Back), 0.453),
-            (Unknown::E(b, true, Face::Front), -2.162),
-            (Unknown::Drag(b, true), 2.223),
-            (Unknown::Drag(b, false), 0.647),
+        for (u, want, se) in [
+            (Unknown::P(s, 0), -6.1875, 0.05618),
+            (Unknown::P(s, 1), -2.1425, 0.05618),
+            (Unknown::E(s, false, Face::Any), -0.1025, 0.05618),
+            (Unknown::E(s, true, Face::Any), 0.0875, 0.05618),
+            (Unknown::Drag(s, true), 1.9675, 0.12562),
+            (Unknown::Drag(s, false), 1.2025, 0.12562),
+            (Unknown::P(b, 0), 71.6775, 0.05618),
+            (Unknown::P(b, 1), -2.3075, 0.05618),
+            (Unknown::E(b, false, Face::Back), 0.4525, 0.05618),
+            (Unknown::E(b, true, Face::Front), -2.1625, 0.05618),
+            (Unknown::Drag(b, true), 2.2225, 0.12562),
+            (Unknown::Drag(b, false), 0.6475, 0.12562),
         ] {
-            let (v, _) = fit.get(u).expect("settled");
-            assert!((v - want).abs() < 0.0005, "{u:?}: {v} against {want}");
+            let (v, e) = fit.get(u).expect("settled");
+            assert!((v - want).abs() < 1e-6, "{u:?}: {v} against {want}");
+            assert!((e - se).abs() < 1e-5, "{u:?}: ± {e} against {se}");
         }
         // The profile written with `--profile`, to the micrometre: 6.4125 rounds up there, though
         // the report prints it as 6.412.

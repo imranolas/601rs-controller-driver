@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use machine::{MachineMm, Profile};
+use nalgebra::{DMatrix, DVector};
 use program::{Cut, Head, Op, Program};
 use serde_json::Value;
 
@@ -76,6 +77,8 @@ struct Row {
     name: String,
     terms: Vec<(Unknown, f64)>,
     rhs: f64,
+    /// The reading's uncertainty relative to a caliper reading's: 1 for calipers.
+    sd: f64,
 }
 
 /// A comb read by eye: the first tooth that reached (0 for none).
@@ -233,6 +236,7 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
                     name,
                     terms: vec![(Unknown::P(l.head, axis), -1.0), (u, sigma)],
                     rhs: value - l.a[axis],
+                    sd: 1.0,
                 });
             }
             "width" => {
@@ -255,6 +259,7 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
                     name,
                     terms,
                     rhs: value - (two.0.a[axis] - one.0.a[axis]),
+                    sd: 1.0,
                 });
             }
             "overrun" => {
@@ -276,6 +281,7 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
                         (c.e(right, face), -1.0),
                     ],
                     rhs: value - overcut,
+                    sd: 1.0,
                 });
             }
             "comb" => {
@@ -306,63 +312,183 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
     Ok((rows, combs))
 }
 
-/// Solve the normal equations by Gauss–Jordan with partial pivoting; also returns the inverse
-/// (for the uncertainties). `None` for a column the readings don't determine.
-fn solve(ata: &[Vec<f64>], atb: &[f64]) -> (Vec<Option<f64>>, Vec<Vec<f64>>) {
-    let n = atb.len();
-    let mut m: Vec<Vec<f64>> = (0..n)
-        .map(|i| {
-            let mut row = ata[i].clone();
-            row.extend((0..n).map(|j| f64::from(u8::from(i == j))));
-            row.push(atb[i]);
-            row
-        })
-        .collect();
-    let scale = (0..n).map(|i| ata[i][i].abs()).fold(0.0, f64::max).max(1.0);
-    let mut solved = vec![true; n];
-    for col in 0..n {
-        let pivot = (col..n)
-            .max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))
-            .unwrap_or(col);
-        if m[pivot][col].abs() < 1e-9 * scale {
-            solved[col] = false;
-            continue;
-        }
-        m.swap(col, pivot);
-        let p = m[col][col];
-        for v in &mut m[col] {
-            *v /= p;
-        }
-        for row in 0..n {
-            if row != col {
-                let f = m[row][col];
-                if f != 0.0 {
-                    for k in 0..m[row].len() {
-                        m[row][k] -= f * m[col][k];
-                    }
-                }
+/// The least-squares solution of a set of rows, by singular value decomposition: each reading
+/// divided by its uncertainty (weighted least squares), so a reading counts by how well it is
+/// known. Unlike the normal equations, it says which unknowns the readings fix on their own and
+/// which only in combination ([`Fit::tied`]).
+struct Solved {
+    cols: Vec<Unknown>,
+    /// Each unknown's value, if the readings fix it on its own.
+    x: Vec<Option<f64>>,
+    /// Each unknown's variance, in units of a caliper reading's variance.
+    var: Vec<f64>,
+    /// Each reading less the model, in units of the reading's own uncertainty.
+    resid: Vec<f64>,
+    /// Each reading's leverage: how much of the model it alone decides, 0 to 1.
+    leverage: Vec<f64>,
+    rank: usize,
+    tied: Vec<Vec<Unknown>>,
+    model: Model,
+}
+
+/// What the readings reach, for any combination of the unknowns: the least-squares solution
+/// (the shortest, where unknowns are tied), its covariance per unit of a caliper reading's
+/// variance, and the projector onto the combinations the readings fix.
+#[derive(Debug, Clone, PartialEq)]
+struct Model {
+    cols: Vec<Unknown>,
+    x: DVector<f64>,
+    cov: DMatrix<f64>,
+    reach: DMatrix<f64>,
+}
+
+impl Model {
+    /// The combination `Σ c·u` as a vector over the columns; none if it names an unknown the
+    /// readings never see.
+    fn vector(&self, c: &[(Unknown, f64)]) -> Option<DVector<f64>> {
+        let mut v = DVector::<f64>::zeros(self.cols.len());
+        for &(u, k) in c {
+            match self.cols.iter().position(|x| *x == u) {
+                Some(j) => v[j] += k,
+                None if k != 0.0 => return None,
+                None => {}
             }
         }
+        // Fixed when it lies wholly in what the readings reach.
+        let off = (&self.reach * &v - &v).norm();
+        (off <= 1e-9 * v.norm().max(1.0)).then_some(v)
     }
-    let x = (0..n).map(|i| solved[i].then(|| m[i][2 * n])).collect();
-    let inv = (0..n).map(|i| m[i][n..2 * n].to_vec()).collect();
-    (x, inv)
+
+    /// The combination's value and variance per unit of a caliper reading's variance.
+    fn combination(&self, c: &[(Unknown, f64)]) -> Option<(f64, f64)> {
+        let v = self.vector(c)?;
+        Some((v.dot(&self.x), (v.transpose() * &self.cov * &v)[(0, 0)]))
+    }
+}
+
+/// Below this, relative to the largest, a singular value is none: the readings don't reach that
+/// combination of unknowns.
+const RANK_TOL: f64 = 1e-9;
+
+fn solve(rows: &[Row]) -> Solved {
+    let mut cols: Vec<Unknown> = rows
+        .iter()
+        .flat_map(|r| r.terms.iter().map(|t| t.0))
+        .collect();
+    cols.sort_by_key(Unknown::order);
+    cols.dedup();
+    let (m, n) = (rows.len(), cols.len());
+    // At least as many rows as unknowns (the extra ones zero), so the SVD gives the whole of V,
+    // the combinations the readings don't reach included.
+    let k = m.max(n);
+    let mut a = DMatrix::<f64>::zeros(k, n);
+    let mut b = DVector::<f64>::zeros(k);
+    for (i, r) in rows.iter().enumerate() {
+        for &(u, c) in &r.terms {
+            let j = cols.iter().position(|x| *x == u).unwrap_or_default();
+            a[(i, j)] += c / r.sd;
+        }
+        b[i] = r.rhs / r.sd;
+    }
+    let svd = a.clone().svd(true, true);
+    let s = &svd.singular_values;
+    let (Some(u), Some(v_t)) = (svd.u.as_ref(), svd.v_t.as_ref()) else {
+        unreachable!("U and Vᵀ were asked for")
+    };
+    let tol = s.max() * RANK_TOL;
+    let kept: Vec<usize> = (0..s.len()).filter(|&i| s[i] > tol).collect();
+    let mut x = DVector::<f64>::zeros(n);
+    let mut cov = DMatrix::<f64>::zeros(n, n);
+    let mut reach = DMatrix::<f64>::zeros(n, n);
+    for &i in &kept {
+        let v = v_t.row(i).transpose();
+        x += &v * (u.column(i).dot(&b) / s[i]);
+        let outer = &v * v.transpose();
+        cov += &outer / s[i].powi(2);
+        reach += outer;
+    }
+    // An unknown is fixed on its own when its axis lies wholly in the space the readings reach.
+    let fixed = |j: usize| reach[(j, j)] > 1.0 - 1e-9;
+    let var: Vec<f64> = (0..n).map(|j| cov[(j, j)]).collect();
+    let model = &a * &x;
+    let resid = (0..m).map(|i| b[i] - model[i]).collect();
+    let leverage = (0..m)
+        .map(|r| kept.iter().map(|&i| u[(r, i)].powi(2)).sum())
+        .collect();
+    // The combinations the readings don't reach: unknowns that share one are tied.
+    let mut tied: Vec<Vec<Unknown>> = Vec::new();
+    for i in (0..n).filter(|i| !kept.contains(i)) {
+        let mut group: Vec<Unknown> = (0..n)
+            .filter(|&j| v_t[(i, j)].abs() > 1e-6)
+            .map(|j| cols[j])
+            .collect();
+        if let Some(t) = tied
+            .iter_mut()
+            .find(|t| t.iter().any(|u| group.contains(u)))
+        {
+            t.append(&mut group);
+            t.sort_by_key(Unknown::order);
+            t.dedup();
+        } else if !group.is_empty() {
+            tied.push(group);
+        }
+    }
+    Solved {
+        x: (0..n).map(|j| fixed(j).then(|| x[j])).collect(),
+        var,
+        resid,
+        leverage,
+        rank: kept.len(),
+        tied,
+        model: Model {
+            cols: cols.clone(),
+            x,
+            cov,
+            reach,
+        },
+        cols,
+    }
+}
+
+/// One reading less the model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Leftover {
+    pub name: String,
+    /// mm.
+    pub mm: f64,
+    /// In units of what this reading should scatter, judged by the other readings and allowing
+    /// for how much it decides on its own (externally studentised): beyond about 3.5, more
+    /// likely a misread than scatter. None when nothing else checks it: it alone decides what
+    /// it reads, or no other reading is spare.
+    pub t: Option<f64>,
 }
 
 /// The fitted values: each unknown with its standard error (`None`: not determined).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fit {
-    /// Each unknown, its value (`None`: the readings don't settle it) and its standard error.
+    /// Each unknown, its value (`None`: the readings don't fix it on its own) and its standard
+    /// error (NaN when not fixed).
     pub values: Vec<(Unknown, Option<f64>, f64)>,
-    /// Each reading less the model, mm.
-    pub leftovers: Vec<(String, f64)>,
-    /// How far the readings scatter about the model, mm (NaN: no readings to spare).
+    /// Each reading less the model.
+    pub leftovers: Vec<Leftover>,
+    /// How far a caliper reading scatters about the model, mm (NaN: no readings to spare).
     pub sigma: f64,
     /// How many readings were fitted.
     pub rows: usize,
+    /// Unknowns the readings fix only together (a sum, a difference), each group once.
+    pub tied: Vec<Vec<Unknown>>,
+    model: Model,
 }
 
 impl Fit {
+    /// A combination of unknowns, `Σ c·u`, and its standard error, if the readings fix it:
+    /// fixed even when its parts are tied (the bevel head's line less the straight head's, say,
+    /// when only the borders of a mount were read).
+    pub fn combination(&self, c: &[(Unknown, f64)]) -> Option<(f64, f64)> {
+        let (v, var) = self.model.combination(c)?;
+        Some((v, self.sigma * var.sqrt()))
+    }
+
     /// A head's offset as fitted, and its standard errors, mm: the board origin held where
     /// `profile` has it, the offset is what puts the head's fitted line there (`origin − P`).
     pub fn head_offset(&self, head: Head, profile: &Profile) -> Option<([f64; 2], [f64; 2])> {
@@ -395,62 +521,163 @@ impl Fit {
             .find(|(k, _, _)| *k == u)
             .and_then(|(_, v, se)| v.map(|v| (v, *se)))
     }
+
+    /// The readings worth taking again: studentised beyond `t`, worst first.
+    pub fn suspects(&self, t: f64) -> Vec<&Leftover> {
+        let mut out: Vec<&Leftover> = self
+            .leftovers
+            .iter()
+            .filter(|l| l.t.is_some_and(|v| v.abs() > t))
+            .collect();
+        out.sort_by(|a, b| {
+            let key = |l: &Leftover| l.t.map_or(0.0, f64::abs);
+            key(b).total_cmp(&key(a))
+        });
+        out
+    }
 }
 
 fn fit_rows(rows: &[Row]) -> Fit {
-    let mut cols: Vec<Unknown> = rows
-        .iter()
-        .flat_map(|r| r.terms.iter().map(|t| t.0))
-        .collect();
-    cols.sort_by_key(Unknown::order);
-    cols.dedup();
-    let (m, n) = (rows.len(), cols.len());
-    let a: Vec<Vec<f64>> = rows
-        .iter()
-        .map(|r| {
-            let mut v = vec![0.0; n];
-            for &(k, c) in &r.terms {
-                v[cols.iter().position(|x| *x == k).expect("a column")] += c;
-            }
-            v
-        })
-        .collect();
-    let y: Vec<f64> = rows.iter().map(|r| r.rhs).collect();
-    let ata: Vec<Vec<f64>> = (0..n)
-        .map(|i| {
-            (0..n)
-                .map(|j| (0..m).map(|k| a[k][i] * a[k][j]).sum())
-                .collect()
-        })
-        .collect();
-    let atb: Vec<f64> = (0..n)
-        .map(|i| (0..m).map(|k| a[k][i] * y[k]).sum())
-        .collect();
-    let (x, inv) = solve(&ata, &atb);
-    let p: Vec<f64> = x.iter().map(|v| v.unwrap_or(0.0)).collect();
-    let leftovers: Vec<(String, f64)> = (0..m)
-        .map(|k| {
-            let model: f64 = (0..n).map(|j| a[k][j] * p[j]).sum();
-            (rows[k].name.clone(), y[k] - model)
-        })
-        .collect();
-    let dof = m.saturating_sub(x.iter().filter(|v| v.is_some()).count());
+    let s = solve(rows);
+    let m = rows.len();
+    let dof = m.saturating_sub(s.rank);
     let sigma = if dof > 0 {
-        (leftovers.iter().map(|(_, r)| r * r).sum::<f64>() / dof as f64).sqrt()
+        (s.resid.iter().map(|r| r * r).sum::<f64>() / dof as f64).sqrt()
     } else {
         f64::NAN
     };
-    let values = cols
+    // Each reading judged by the scatter of the others: the scatter without it is the whole
+    // sum of squares less its share. Judged by a scatter it is part of, a misread would hide
+    // itself (that measure can't pass √dof, under 3 on most sheets).
+    let ss: f64 = s.resid.iter().map(|r| r * r).sum();
+    let leftovers = rows
         .iter()
         .enumerate()
-        .map(|(j, &u)| (u, x[j], sigma * inv[j][j].max(0.0).sqrt()))
+        .map(|(i, r)| {
+            let (e, h) = (s.resid[i], s.leverage[i]);
+            let t = (dof > 1 && h < 1.0 - 1e-9).then(|| {
+                let rest = (ss - e * e / (1.0 - h)).max(0.0) / (dof - 1) as f64;
+                e / (rest * (1.0 - h)).sqrt()
+            });
+            Leftover {
+                name: r.name.clone(),
+                mm: e * r.sd,
+                t: t.map(|t| if t.is_nan() { 0.0 } else { t }),
+            }
+        })
+        .collect();
+    let values = s
+        .cols
+        .iter()
+        .enumerate()
+        .map(|(j, &u)| {
+            let se = if s.x[j].is_some() {
+                sigma * s.var[j].sqrt()
+            } else {
+                f64::NAN
+            };
+            (u, s.x[j], se)
+        })
         .collect();
     Fit {
         values,
         leftovers,
         sigma,
         rows: m,
+        tied: s.tied,
+        model: s.model,
     }
+}
+
+/// How far a caliper reading scatters, mm: calibration 1's readings about the model (0.112
+/// mm, 20 readings, 10 Nov). It weighs a prior against the readings, and turns a plan's
+/// precision into millimetres before anything is read.
+pub const CALIPER_SD_MM: f64 = 0.11;
+
+/// What is already known of an unknown, from the calibration: its value and standard error.
+/// In a fit it is one more reading, of that unknown alone, weighed by its standard error
+/// against [`CALIPER_SD_MM`]. A routine can then read only what it means to check and take
+/// the rest as known.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Prior {
+    pub unknown: Unknown,
+    pub value: f64,
+    pub se_mm: f64,
+}
+
+impl Prior {
+    fn row(&self) -> Row {
+        Row {
+            name: format!("known {}", self.unknown.label()),
+            terms: vec![(self.unknown, 1.0)],
+            rhs: self.value,
+            sd: (self.se_mm / CALIPER_SD_MM).max(1e-6),
+        }
+    }
+}
+
+/// How precisely a set of readings would fix each unknown, before any is taken.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Precision {
+    /// Each unknown's standard error, mm, for caliper readings scattering [`CALIPER_SD_MM`]
+    /// (`None`: these readings don't fix it on its own).
+    pub values: Vec<(Unknown, Option<f64>)>,
+    pub tied: Vec<Vec<Unknown>>,
+    /// The readings, priors not counted.
+    pub rows: usize,
+    /// The readings that are an unknown's only witness: nothing would catch a misread.
+    pub unchecked: Vec<String>,
+    model: Model,
+}
+
+impl Precision {
+    pub fn get(&self, u: Unknown) -> Option<f64> {
+        self.values
+            .iter()
+            .find(|(k, _)| *k == u)
+            .and_then(|(_, se)| *se)
+    }
+
+    /// A combination's standard error, mm, if the readings would fix it.
+    pub fn combination(&self, c: &[(Unknown, f64)]) -> Option<f64> {
+        self.model
+            .combination(c)
+            .map(|(_, var)| CALIPER_SD_MM * var.sqrt())
+    }
+}
+
+/// How precisely `sheet`'s readings, with `priors`, would fix each unknown, from which readings
+/// are taken (their values are ignored): what a plan can promise before it is cut, and what a
+/// reading left out would cost.
+///
+/// # Errors
+/// When the sheet's cuts and readings don't agree with its program.
+pub fn precision(sheet: &Sheet, priors: &[Prior]) -> Result<Precision, Error> {
+    let zeroed = Sheet {
+        readings: sheet.readings.keys().map(|k| (k.clone(), 0.0)).collect(),
+        ..sheet.clone()
+    };
+    let (mut rows, _) = sheet_rows(&zeroed)?;
+    let read = rows.len();
+    rows.extend(priors.iter().map(Prior::row));
+    let s = solve(&rows);
+    Ok(Precision {
+        values: s
+            .cols
+            .iter()
+            .enumerate()
+            .map(|(j, &u)| (u, s.x[j].map(|_| CALIPER_SD_MM * s.var[j].sqrt())))
+            .collect(),
+        tied: s.tied,
+        rows: read,
+        unchecked: rows[..read]
+            .iter()
+            .zip(&s.leverage)
+            .filter(|(_, h)| **h > 1.0 - 1e-9)
+            .map(|(r, _)| r.name.clone())
+            .collect(),
+        model: s.model,
+    })
 }
 
 /// One sheet's data: the program, the cuts it sent, its readings.
@@ -490,6 +717,17 @@ impl Sheet {
 /// When there's no sheet, the sheets are on boards of different thickness, or a sheet's cuts
 /// and readings don't agree with its program.
 pub fn fit_sheets(sheets: &[Sheet]) -> Result<(Fit, Vec<CombReading>), Error> {
+    fit_sheets_with(sheets, &[])
+}
+
+/// Fit every sheet's readings together, with what is already known.
+///
+/// # Errors
+/// As [`fit_sheets`].
+pub fn fit_sheets_with(
+    sheets: &[Sheet],
+    priors: &[Prior],
+) -> Result<(Fit, Vec<CombReading>), Error> {
     let Some(first) = sheets.first() else {
         return Err("no sheets to fit".into());
     };
@@ -511,12 +749,14 @@ pub fn fit_sheets(sheets: &[Sheet]) -> Result<(Fit, Vec<CombReading>), Error> {
         rows.extend(r);
         combs.extend(c);
     }
+    rows.extend(priors.iter().map(Prior::row));
     Ok((fit_rows(&rows), combs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Calibration;
 
     /// Readings made up from known heads, worked out edge by edge from the sheet's own
     /// geometry, come back out of the fit.
@@ -587,6 +827,176 @@ mod tests {
             fitted.straight.offset_mm,
             [ox - sp[0], oy - sp[1]].map(|v| (v * 1000.0).round() / 1000.0)
         );
+    }
+
+    fn row(name: &str, terms: &[(Unknown, f64)], rhs: f64, sd: f64) -> Row {
+        Row {
+            name: name.into(),
+            terms: terms.to_vec(),
+            rhs,
+            sd,
+        }
+    }
+
+    /// Readings that only ever see two unknowns as a sum fix neither: the normal equations
+    /// reported the first as fixed (and the sum as its value).
+    #[test]
+    fn a_sum_alone_fixes_neither_of_its_parts() {
+        let (p, e) = (
+            Unknown::P(Head::Straight, 0),
+            Unknown::E(Head::Straight, true, Face::Any),
+        );
+        let q = Unknown::P(Head::Bevel, 0);
+        let fit = fit_rows(&[
+            row("a", &[(p, 1.0), (e, 1.0)], 1.0, 1.0),
+            row("b", &[(p, 1.0), (e, 1.0)], 1.2, 1.0),
+            row("c", &[(q, 1.0)], 5.0, 1.0),
+            row("d", &[(q, 1.0)], 5.2, 1.0),
+        ]);
+        assert_eq!(fit.get(p), None);
+        assert_eq!(fit.get(e), None);
+        assert_eq!(fit.tied, vec![vec![p, e]]);
+        let (v, _) = fit.get(q).expect("fixed");
+        assert!((v - 5.1).abs() < 1e-12);
+        // The sum itself is fixed; a difference isn't.
+        let (sum, _) = fit.combination(&[(p, 1.0), (e, 1.0)]).expect("fixed");
+        assert!((sum - 1.1).abs() < 1e-12);
+        assert_eq!(fit.combination(&[(p, 1.0), (e, -1.0)]), None);
+    }
+
+    /// A reading ten times less certain counts a hundred times less.
+    #[test]
+    fn a_reading_counts_by_how_well_it_is_known() {
+        let u = Unknown::P(Head::Bevel, 1);
+        let fit = fit_rows(&[
+            row("calipers", &[(u, 1.0)], 1.0, 1.0),
+            row("rule", &[(u, 1.0)], 2.0, 10.0),
+        ]);
+        let (v, _) = fit.get(u).expect("fixed");
+        assert!((v - (1.0 + 2.0 / 100.0) / (1.0 + 1.0 / 100.0)).abs() < 1e-12);
+    }
+
+    /// Readings with a caliper's scatter, one misread by half a millimetre. On calibration sheet
+    /// 2 a width has one twin (the window across and along both read the bevel's back edge), so
+    /// a misread width is caught but not told from its twin: both stand out, and nothing else.
+    /// The readings from the board's edges are each a head's only witness: nothing checks them.
+    #[test]
+    fn a_misread_stands_out_where_another_reading_checks_it() {
+        let profile = Profile::gunnar_601();
+        let p = crate::sheet::program(&profile);
+        let names = [
+            "SL.width",
+            "SR.width",
+            "SL.length",
+            "S.left",
+            "S.front",
+            "W.left",
+            "W.width",
+            "W.front",
+            "W.height",
+            "D.width",
+            "D.height",
+        ];
+        let sheet = Sheet::lowered("test", p, &profile.raw(), HashMap::new()).expect("lowers");
+        let clean = expected(&sheet, &names, &Calibration::new());
+        // A fixed scatter of a few hundredths, as calipers give.
+        let noise = [
+            0.03, -0.02, 0.01, -0.04, 0.02, 0.0, -0.01, 0.03, -0.03, 0.02, -0.01,
+        ];
+        let mut readings: HashMap<String, f64> = names
+            .iter()
+            .zip(noise)
+            .map(|(n, d)| ((*n).to_owned(), clean[*n] + d))
+            .collect();
+        *readings.get_mut("W.width").expect("listed") += 0.5;
+        let (fit, _) = fit_sheets(&[Sheet { readings, ..sheet }]).expect("fits");
+        let mut suspects: Vec<&str> = fit.suspects(3.5).iter().map(|l| l.name.as_str()).collect();
+        suspects.sort_unstable();
+        assert_eq!(suspects, ["W.height", "W.width"], "{:?}", fit.leftovers);
+        let unchecked: Vec<&str> = fit
+            .leftovers
+            .iter()
+            .filter(|l| l.t.is_none())
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(
+            unchecked,
+            ["SR.width", "S.left", "S.front", "W.left", "W.front"]
+        );
+    }
+
+    /// What each reading of calibration sheet 2's strips and window would show, by a known
+    /// calibration: the slit edges and head offsets put the cuts' edges where they land.
+    fn expected(sheet: &Sheet, names: &[&str], truth: &Calibration) -> HashMap<String, f64> {
+        let zeroed = Sheet {
+            readings: names.iter().map(|n| ((*n).to_owned(), 0.0)).collect(),
+            ..sheet.clone()
+        };
+        let (rows, _) = sheet_rows(&zeroed).expect("rows");
+        let machine = truth.machine();
+        let MachineMm([ox, oy]) = machine.board_origin_mm;
+        let edge = |h: Head, right: bool| {
+            let b = compiler::Blade::fitted();
+            b.head(h).edge_mm[usize::from(right)]
+        };
+        let value = |u: Unknown| match u {
+            Unknown::P(h, 0) => ox - machine.head(h).offset_mm[0],
+            Unknown::P(h, _) => oy - machine.head(h).offset_mm[1],
+            Unknown::E(h, right, Face::Front) => -edge(h, right) - 1.7,
+            Unknown::E(h, right, _) => edge(h, right),
+            Unknown::Drag(..) => 0.0,
+        };
+        rows.iter()
+            .map(|r| {
+                let model: f64 = r.terms.iter().map(|&(u, c)| c * value(u)).sum();
+                // A row reads `value − geometry = model`, so the reading is model + geometry.
+                (r.name.clone(), model - r.rhs)
+            })
+            .collect()
+    }
+
+    /// Calibration sheet 2's strips and window fix both heads' lines and slit edges; leave out
+    /// the one reading from the board's left edge and the straight head's X is no longer fixed.
+    #[test]
+    fn a_plan_says_what_its_readings_will_fix() {
+        let profile = Profile::gunnar_601();
+        let p = crate::sheet::program(&profile);
+        let all = [
+            "SL.width",
+            "SR.width",
+            "SL.length",
+            "S.left",
+            "S.front",
+            "W.left",
+            "W.width",
+            "W.front",
+            "W.height",
+            "D.width",
+            "D.height",
+        ];
+        let with = |names: &[&str]| {
+            let readings = names.iter().map(|n| ((*n).to_owned(), 0.0)).collect();
+            Sheet::lowered("plan", p.clone(), &profile.raw(), readings).expect("lowers")
+        };
+        let full = precision(&with(&all), &[]).expect("a plan");
+        assert_eq!(full.values.len(), 8);
+        assert!(full.values.iter().all(|(_, se)| se.is_some()), "{full:?}");
+        let px = Unknown::P(Head::Straight, 0);
+        let without: Vec<&str> = all.iter().copied().filter(|n| *n != "S.left").collect();
+        assert_eq!(
+            precision(&with(&without), &[]).expect("a plan").get(px),
+            None
+        );
+        // Known from the calibration to 0.05 mm, the straight X needs no reading of its own.
+        let known = Prior {
+            unknown: px,
+            value: -6.19,
+            se_mm: 0.05,
+        };
+        let se = precision(&with(&without), &[known])
+            .expect("a plan")
+            .get(px);
+        assert!(se.is_some_and(|s| s <= 0.05), "{se:?}");
     }
 
     #[test]

@@ -25,6 +25,11 @@ pub struct Profile {
     /// captures lie at X 601–602 and Y 761–762 steps (protocol reference §4.2), so the corner is
     /// 21 mm short of them. A window cut there landed where this puts it, to 0.2 mm (calipers,
     /// 2026-11-10).
+    ///
+    /// The (0.225, −0.275) is GMC's straight head's sideways shift, `NC` ÷ 2 = 0.25 mm to the
+    /// right of travel, less a step's rounding (protocol reference §7), not a property of the
+    /// corner: GMC's straight strokes run only +X and +Y, so the shift shows as a translation.
+    /// The fitted head offsets absorb it.
     pub board_origin_mm: MachineMm,
     /// On a machine whose clamp pads aren't given ([`Profile::clamp_pads`] empty), the nearest
     /// a cut may come to the board's left and front edges, mm: GMC's minimum borders ([GCF]
