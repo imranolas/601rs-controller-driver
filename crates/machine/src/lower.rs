@@ -564,6 +564,12 @@ impl Lowering<'_> {
 
         self.head = Some(kind);
         let settle = m.head_settle_ms;
+        // On a closed curve the blade may still be coming down as the cut starts.
+        let settle_down = if closed {
+            head.closed_settle_ms.unwrap_or(settle)
+        } else {
+            settle
+        };
         let cut_ramp = p.ramp_ms(p.accel.cut);
         let feed = p.speed(speed);
         for stroke in strokes {
@@ -601,11 +607,11 @@ impl Lowering<'_> {
                 if !self.caps.travel_entry {
                     settings(self);
                 }
-                self.head_to(self.clamps | down, settle);
+                self.head_to(self.clamps | down, settle_down);
             } else {
                 self.travel(At::Op(op), steps[0], z[0], deg(0))?;
                 self.set(Setting::RampMs(cut_ramp));
-                self.head_to(self.clamps | down, settle);
+                self.head_to(self.clamps | down, settle_down);
                 settings(self);
             }
             for q in &steps[1..] {
@@ -644,8 +650,9 @@ impl Lowering<'_> {
     }
 
     /// The cut's ramp and start speed where they differ from the usual (protocol reference
-    /// §3.3): GMC's soft start for the straight head by the board's thickness, and its longer
-    /// ramp for a cut whose first segment runs off the axes [GMC].
+    /// §3.3): the soft start by the board's thickness ([`SoftStart`]: GMC's for the straight
+    /// head, a gentler start speed for the bevel), and GMC's longer ramp for a cut whose first
+    /// segment runs off the axes [GMC].
     fn start(&self, kind: HeadKind, first_deg: f64, cut_ramp: u16) -> (Option<u16>, Option<u32>) {
         let p = self.profile;
         let cut = f64::from(cut_ramp);
@@ -655,11 +662,17 @@ impl Lowering<'_> {
             (cut * (1.0 + d) / factor).min(f64::from(p.max_diagonal_ramp_ms))
         };
         let diagonal_ramp = (d != 0.0).then(diagonal);
+        let s = p.soft_start;
+        let t = self.program.board.thickness_mm;
         match kind {
-            HeadKind::Bevel => (diagonal_ramp.map(|r| r as u16), None),
+            HeadKind::Bevel => {
+                let f = ((t - s.thin_mm) / (s.thick_mm - s.thin_mm)).clamp(0.0, 1.0);
+                let start = f64::from(p.start_speed);
+                let speed = (s.bevel && f > 0.0)
+                    .then(|| (start - (start - f64::from(s.slow_speed)) * f) as u32);
+                (diagonal_ramp.map(|r| r as u16), speed)
+            }
             HeadKind::Straight => {
-                let s = p.soft_start;
-                let t = self.program.board.thickness_mm;
                 if t < s.thin_mm {
                     return (diagonal_ramp.map(|r| r as u16), Some(s.thin_speed));
                 }

@@ -158,17 +158,36 @@ fn op_name(op: &Op) -> String {
     }
 }
 
+/// How a run sends its cuts, where it differs from the machine profile: to compare with GMC's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Form {
+    /// Each cut as GMC sends it: settings, head and path as separate steps.
+    pub gmc: bool,
+    /// Bevel cuts started as GMC starts them, at full start speed on thick board, not softly.
+    pub gmc_bevel_start: bool,
+    /// An oval's blade let settle fully before it moves, not GMC's 100 ms.
+    pub oval_settle: bool,
+}
+
 /// Cut `files` in `session`: each program is copied into the session folder first, and a
 /// calibration sheet that finishes offers to take its readings there and then.
-pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> Res<bool> {
-    let profile = Profile {
-        capabilities: if gmc_form {
+pub fn run(port: &str, files: &[PathBuf], session: &Session, form: Form) -> Res<bool> {
+    let mut profile = Profile {
+        capabilities: if form.gmc {
             Capabilities::default()
         } else {
             Capabilities::all()
         },
         ..crate::calibration::machine()
     };
+    if form.gmc_bevel_start {
+        profile.soft_start.bevel = false;
+        println!("bevel cuts start as GMC's: at full start speed, whatever the board");
+    }
+    if form.oval_settle {
+        profile.bevel.closed_settle_ms = None;
+        println!("an oval's blade settles fully before it moves");
+    }
     let programs: Vec<Program> = files.iter().map(|f| read(f)).collect::<Res<_>>()?;
     let raw = programs.iter().filter(|p| is_raw(p)).count();
     if raw > 0 && raw < programs.len() {
@@ -194,7 +213,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
         std::fs::copy(f, &to).map_err(|e| format!("{}: {e}", f.display()))?;
     }
     let checked = profile.clone();
-    let form = if gmc_form { "GMC's form" } else { "streamed" };
+    let form = if form.gmc { "GMC's form" } else { "streamed" };
     let profile = if raw > 0 {
         println!(
             "{form}, raw: points are carriage positions; no offset, trim or clamp border is applied"

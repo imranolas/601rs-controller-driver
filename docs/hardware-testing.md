@@ -102,3 +102,23 @@ mc601 calibration history                # what was written, when, by which sess
 - The record's raw sheets still fit: `mc601 calibrate fit --sheet PROGRAM LOG READINGS`
   (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`, `.readings.txt`), and
   `mc601 calibrate fit --all` pools sessions.
+
+## Starting cuts on thick board
+
+Before stage 2's combs (CALIBRATION.md §5), since how a cut starts changes how far it reaches,
+compare the driver's start with GMC's. GMC's own jobs are ready as programs:
+
+```sh
+mc601 run testdata/programs/g_multi_C12.json                     # twin windows, MSK_4.1: the bevel starts at 10 mm/s
+mc601 run testdata/programs/g_multi_C12.json --gmc-bevel-start   # the same, as GMC: the bevel jumps to 100 mm/s
+mc601 run testdata/programs/g_oval_mount.json                    # the oval moves off 100 ms after its blade starts down, as GMC
+mc601 run testdata/programs/g_oval_mount.json --oval-settle      # the same, the blade fully down first
+```
+
+- The windows on MSK_4.1 (at least 371 × 321 mm), into the front-left stops as GMC lays them.
+  Look at the start of each bevel edge on the face: the wobble, if any, and whether the corners
+  come free. Note which run was which.
+- The oval on any 1.5 mm board (at least 201 × 291 mm): look at the join where the cut started,
+  on the face.
+- Keep the better of each pair by leaving its switch off (the default) or saying so: the
+  defaults are the driver's soft start and GMC's oval entry.

@@ -207,6 +207,13 @@ pub struct Head {
     /// enters the board gradually while the carriage moves, since on a closed curve it goes in
     /// on the edge that shows (protocol reference §2.5).
     pub down_closed: Option<u8>,
+    /// How long to wait after lowering it for a closed curve before moving off, ms, if not the
+    /// material's head settle: GMC waits only the head's `HDSleep` (100 ms on the bevel), so the
+    /// blade is still coming down through the throttle as the cut starts, and the overlap cuts
+    /// back over its entry (protocol reference §7.1). Waiting the whole settle would let it go in
+    /// at one place on the edge that shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_settle_ms: Option<u32>,
     /// The outputs that take the blade out of the board before the head goes up, if the head
     /// does that in two steps (the bevel head: `i_b` and `i_t` off).
     pub lift: Option<u8>,
@@ -313,10 +320,16 @@ pub struct Accel {
     pub max_ramp_ms: u16,
 }
 
-/// GMC's soft start for the straight head on thick board (protocol reference §3.3): from
-/// `thin_mm` up, the ramp lengthens toward `max_ramp_ms` and `#S` falls toward `slow_speed`,
-/// by the factor thickness ÷ (`thin_mm` + `thick_mm`), or fully above `thick_mm`. Below
-/// `thin_mm`, `#S` is `thin_speed`. The bevel head gets none.
+/// Starting a cut gently on thick board (protocol reference §3.3).
+///
+/// - **The straight head**, as GMC: from `thin_mm` up, the ramp lengthens toward
+///   `max_ramp_ms` and `#S` falls toward `slow_speed`, by the factor thickness ÷ (`thin_mm` +
+///   `thick_mm`), or fully above `thick_mm`. Below `thin_mm`, `#S` is `thin_speed`.
+/// - **The bevel head**, if `bevel` (GMC gives it none, and its cuts jump to 100 mm/s with the
+///   blade in the board, the likeliest cause of the wobble operators see on thick board): `#S`
+///   falls from the head's start speed to `slow_speed` in proportion as the board goes from
+///   `thin_mm` to `thick_mm` (GMC's rule without its jump at `thick_mm`), and stays there on
+///   thicker board. The ramp stays the cut's, so travel isn't slowed.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoftStart {
@@ -326,6 +339,9 @@ pub struct SoftStart {
     pub slow_speed: u32,
     /// `#S` below `thin_mm`, steps/s (GMC's `CBStartStop`, for drawn shapes).
     pub thin_speed: u32,
+    /// Soften the bevel head's start too. A profile written without it: no, as GMC.
+    #[serde(default)]
+    pub bevel: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -402,6 +418,8 @@ impl Profile {
                 blade_mount_deg: 0.0,
                 down: 0x05,
                 down_closed: Some(0x01),
+                // [GCF] the bevel head's HDSleep.
+                closed_settle_ms: Some(100),
                 lift: Some(0x00),
                 up: 0x02,
             },
@@ -410,6 +428,7 @@ impl Profile {
                 blade_mount_deg: 180.0,
                 down: 0x0A,
                 down_closed: None,
+                closed_settle_ms: None,
                 lift: None,
                 up: 0x02,
             },
@@ -437,6 +456,7 @@ impl Profile {
                 thick_mm: 3.5,
                 slow_speed: 400,
                 thin_speed: 1000,
+                bevel: true,
             },
             // [GCF] DiagonalRampeSmoother true, DiagonalRampeSmoothFactor 1; GMC's cap.
             diagonal_ramp_factor: Some(1.0),

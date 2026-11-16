@@ -117,6 +117,12 @@ struct RunArgs {
     /// Send each cut as GMC does (settings, head and path as separate steps)
     #[arg(long)]
     gmc: bool,
+    /// Start bevel cuts as GMC does, at full start speed on thick board, not softly: to compare
+    #[arg(long)]
+    gmc_bevel_start: bool,
+    /// Let an oval's blade settle fully before it moves, not GMC's 100 ms: to compare
+    #[arg(long)]
+    oval_settle: bool,
 }
 
 #[derive(Args)]
@@ -374,7 +380,12 @@ fn run(a: RunArgs) -> Res<bool> {
         .collect();
     let (port, session) = open_session("run", &what.join(" "), &a.machine, false)?;
     require_terminal(&port, "run")?;
-    finish(&session, cut::run(&port, &a.programs, &session, a.gmc))
+    let form = cut::Form {
+        gmc: a.gmc,
+        gmc_bevel_start: a.gmc_bevel_start,
+        oval_settle: a.oval_settle,
+    };
+    finish(&session, cut::run(&port, &a.programs, &session, form))
 }
 
 /// Record how a session ended, and pass the result on.

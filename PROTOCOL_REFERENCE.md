@@ -662,8 +662,10 @@ between a window's edges with only the blade out (`$A40`), as the C10 capture sh
 Operators see a wobble at the start of cuts on thick board that changes with the cutting speed.
 The profile's speed % is the only start setting that varies with thickness for the bevel, so
 that fits. Whether the cause is the jump, the acceleration or the blade trim (§3.2) is open
-(§10). The machine layer's plan: a start speed scaled with thickness for both heads, and a slow
-lead-in if needed (`crates/machine/src/lib.rs`, "Starting a cut").
+(§10). The driver softens the bevel's start too (16 Nov): `#S` from 4000 down to 400 as the
+board goes from 2 to 3.5 mm, and 400 on thicker board, the ramp unchanged
+(`machine::SoftStart::bevel`; `crates/machine/src/lib.rs`, "Starting a cut"). `mc601 run
+--gmc-bevel-start` cuts as GMC does, to compare.
 
 ---
 
@@ -1183,7 +1185,8 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
 | Does `i_b` bypass the Z head's throttle (§2.5: `01` is the throttled, delayed blade entry for curves)? | **yes**: blades out, `$01` brought the bevel head down slowly and `$05` fast; the lift `$00` after `$05` raised the blade with the head still down; `$0A` lowered the straight head alone (stage 8, 2026-11-10, operator watching) | stage 8 |
 | The right trim per material on this machine and blade (it corrects hooked corners, §3.2) | GMC's per-profile trims (§8) | GMC's procedure: a test rectangle per profile, the corners checked [HELP CA 3800] |
-| The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: `#S4000` against `#S400`, with and without a slow lead-in, trim 0 against the profile's |
+| The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: the driver's soft start (`#S400` on 4.6 mm) against GMC's (`mc601 run --gmc-bevel-start`, `#S4000`), then if needed a slow lead-in, trim 0 against the profile's |
+| An oval's entry: does moving off 100 ms after the slow head-down, as GMC does, leave a cleaner join than letting the blade settle? | — | an oval window cut both ways, `mc601 run` and `mc601 run --oval-settle` |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
 | `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |

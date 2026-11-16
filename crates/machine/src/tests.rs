@@ -328,6 +328,60 @@ fn the_straight_head_starts_softly_on_thick_board() {
     assert!(has(4.6, &[Setting::RampMs(700), Setting::StartSpeed(400)]));
 }
 
+#[test]
+fn the_bevel_starts_softly_on_thick_board_unless_switched_off() {
+    let edge = [[0.0, 0.0], [200.0, 0.0]];
+    let job = |p: &Profile, t: f64| {
+        lower(&program(t, vec![clamp(), cut(HeadKind::Bevel, &edge)]), p).expect("lowers")
+    };
+    let starts = |p: &Profile, t: f64| -> Vec<u32> {
+        job(p, t)
+            .commands()
+            .filter_map(|c| match c {
+                Command::Set(Setting::StartSpeed(s)) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    };
+    let ramps = |p: &Profile, t: f64| -> Vec<u16> {
+        job(p, t)
+            .commands()
+            .filter_map(|c| match c {
+                Command::Set(Setting::RampMs(r)) => Some(*r),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = p601();
+    // Below 2 mm, as GMC: the head's start speed. Halfway from 2 to 3.5 mm, halfway from 100 to
+    // 10 mm/s; from 3.5 mm, 10 mm/s. The ramp stays the cut's.
+    assert!(starts(&p, 1.5).iter().all(|&s| s == 4000));
+    assert!(starts(&p, 2.75).contains(&2200));
+    assert!(starts(&p, 4.6).contains(&400));
+    assert_eq!(ramps(&p, 4.6), ramps(&p, 1.5));
+    // Switched off, GMC's: every bevel cut starts at 100 mm/s.
+    let mut gmc = p601();
+    gmc.soft_start.bevel = false;
+    assert!(starts(&gmc, 4.6).iter().all(|&s| s == 4000));
+}
+
+/// How long the host waits after each change of the outputs to `outputs`, ms.
+fn settles_after(job: &Job, outputs: u8) -> Vec<u32> {
+    let steps: Vec<&Step> = job.steps().collect();
+    steps
+        .windows(2)
+        .filter_map(|w| match (w[0], w[1]) {
+            (Step::Send(Command::SetOutputs(o)), Step::Settle(ms)) if *o == outputs => Some(*ms),
+            (Step::Send(Command::StreamOutputs(o)), Step::Send(Command::StreamDwellMs(ms)))
+                if *o == outputs =>
+            {
+                Some(*ms)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// A bevel opening's edges, a 10° corner (two strokes), and a straight edge.
 fn mixed_job() -> Program {
     let a = 10.0_f64.to_radians();
@@ -490,10 +544,20 @@ fn a_closed_curve_goes_down_as_gmcs_oval_and_takes_the_round_trim() {
     let chord = crate::frame::heading(pts[0], pts[1]);
     assert_eq!(first, Some(blade_steps(&p, &p.bevel, 0.0, chord)));
     assert_ne!(first, Some(blade_steps(&p, &p.bevel, 3.0, chord)));
+    // It moves off after GMC's 100 ms, the blade still coming down through the throttle, where
+    // an edge waits the material's settle, 250 ms; or, switched off, the oval does too.
+    assert_eq!(settles_after(&job, 0x41), [100]);
+    let mut settled = p601();
+    settled.bevel.closed_settle_ms = None;
+    assert_eq!(
+        settles_after(&lower(&prog, &settled).expect("lowers"), 0x41),
+        [250]
+    );
     // An arc of the same circle isn't closed.
     let arc = program(1.5, vec![clamp(), cut(HeadKind::Bevel, &pts[..60])]);
     let job = lower(&arc, &p).expect("lowers");
     assert!(job.commands().any(|c| *c == Command::SetOutputs(0x45)));
+    assert_eq!(settles_after(&job, 0x45), [250]);
 }
 
 #[test]

@@ -79,7 +79,12 @@ pub fn heads(port: &str, session: &Session, stock: &Stock) -> Res<bool> {
             )
         )
     );
-    crate::cut::run(port, std::slice::from_ref(&file), session, false)
+    crate::cut::run(
+        port,
+        std::slice::from_ref(&file),
+        session,
+        crate::cut::Form::default(),
+    )
 }
 
 /// The session's plan, if it has one (stage 1 on).

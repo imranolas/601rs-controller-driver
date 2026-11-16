@@ -630,7 +630,13 @@ Each step passes `cargo test` and stops for review.
    still rebuilt with GMC's numbers, now as a tool (`Blade::gmc`: the bevel at 45°, its trims
    as the reach along the cut).
 6. **The start of a cut.** The bevel's soft start by thickness (the machine crate's plan) and
-   the oval entry's short wait, each switchable, tried against GMC's on thick board.
+   the oval entry's short wait, each switchable, tried against GMC's on thick board. *Built,
+   16 Nov:* `machine::SoftStart::bevel` (`#S` 4000 → 400 from 2 to 3.5 mm of board, the ramp
+   unchanged) and `Head::closed_settle_ms` (the bevel moves off 100 ms after its slow
+   head-down, as GMC does, not after the profile's settle), both on by default; `mc601 run
+   --gmc-bevel-start` and `--oval-settle` switch them off for comparison cuts. GMC's golden
+   jobs are lowered with GMC's start. The test cuts on thick board are the shop's
+   (`docs/hardware-testing.md`).
 7. **Plans, sessions, proposals:** stage 1 and stage 2 (combs) as plans, with steps,
    drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, `apply`;
    synthetic recovery tests; `mc601 calibrate` on the sim, end to end. *Stage 1 built, 16 Nov*
