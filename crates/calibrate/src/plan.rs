@@ -196,13 +196,12 @@ impl Plan {
         if let Some(id) = readings.keys().find(|id| self.reading(id).is_none()) {
             return Err(Error::Reading(format!("{id} isn't a reading of this plan")));
         }
-        Sheet::lowered(
-            label,
-            self.program.clone(),
-            &self.cut_with,
-            self.readings.clone(),
+        Ok(Sheet {
+            label: label.into(),
+            cuts: crate::sent::cuts(&self.program, &self.cut_with)?,
+            plan: self.clone(),
             readings,
-        )
+        })
     }
 
     /// The plan with each length's expected value, by calibration `cal`, where its cuts go.

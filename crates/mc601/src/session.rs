@@ -31,7 +31,7 @@ fn safe(text: &str) -> String {
     cleaned.trim().chars().take(60).collect()
 }
 
-/// The folder name for a session started at `at`: `2026-11-10 14.32.05 run calibration_2`.
+/// The folder name for a session started at `at`: `2026-11-10 14.32.05 run stage_1`.
 pub fn folder_name(at: DateTime<Local>, cmd: &str, what: &str) -> String {
     let stamp = at.format("%Y-%m-%d %H.%M.%S");
     let what = safe(what);
@@ -154,8 +154,8 @@ mod tests {
             .single()
             .expect("a time");
         assert_eq!(
-            folder_name(at, "run", "calibration_2"),
-            "2026-11-10 14.32.05 run calibration_2"
+            folder_name(at, "run", "stage_1"),
+            "2026-11-10 14.32.05 run stage_1"
         );
         assert_eq!(folder_name(at, "probe", ""), "2026-11-10 14.32.05 probe");
         assert_eq!(

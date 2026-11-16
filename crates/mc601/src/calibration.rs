@@ -81,7 +81,7 @@ fn day(at: &str) -> &str {
 /// Which group of the overview a value sits in.
 fn group(key: &Key, cal: &Calibration) -> String {
     match key {
-        Key::HeadOffset(..) | Key::Scale(_) => "machine".to_owned(),
+        Key::HeadOffset(..) => "machine".to_owned(),
         Key::Blade { .. } => "how each head cuts, on any board".to_owned(),
         _ => {
             let id = key.profile_id().unwrap_or_default();

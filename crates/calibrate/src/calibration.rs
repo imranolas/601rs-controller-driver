@@ -32,7 +32,7 @@ pub struct Calibration {
     revision: u32,
     /// The calibrated values, by key. Absent: the default.
     #[serde(default)]
-    values: BTreeMap<String, Val>,
+    values: BTreeMap<Key, Val>,
     #[serde(default)]
     history: Vec<Entry>,
 }
@@ -237,11 +237,7 @@ impl Calibration {
             )));
         }
         for (k, v) in &self.values {
-            let key: Key = k.parse()?;
-            if key.to_string() != *k {
-                return Err(Error::File(format!("{k}: write it as {key}")));
-            }
-            key.check(v)?;
+            k.check(v)?;
         }
         self.check_profiles()?;
         let mut last = 0;
@@ -272,7 +268,7 @@ impl Calibration {
                     profile: id.clone(),
                     value,
                 })
-                .filter(|k| !self.values.contains_key(&k.to_string()))
+                .filter(|k| !self.values.contains_key(k))
                 .map(|k| k.to_string())
                 .collect();
             if !missing.is_empty() {
@@ -287,13 +283,12 @@ impl Calibration {
 
     /// The ids of every profile the file mentions.
     fn profile_ids(&self) -> Vec<String> {
+        // Keys are ordered by profile, so each profile's values are together.
         let mut ids: Vec<String> = self
             .values
             .keys()
-            .filter_map(|k| k.parse::<Key>().ok())
             .filter_map(|k| k.profile_id().map(str::to_owned))
             .collect();
-        ids.sort();
         ids.dedup();
         ids
     }
@@ -317,13 +312,10 @@ impl Calibration {
     }
 
     fn has_profile(&self, id: &str) -> bool {
-        self.values.contains_key(
-            &Key::Profile {
-                profile: id.to_owned(),
-                value: ProfileValue::Name,
-            }
-            .to_string(),
-        )
+        self.values.contains_key(&Key::Profile {
+            profile: id.to_owned(),
+            value: ProfileValue::Name,
+        })
     }
 
     fn need_profile(&self, id: &str) -> Result<(), Error> {
@@ -336,7 +328,7 @@ impl Calibration {
 
     /// The value as the file holds it; none: the default.
     pub fn raw(&self, key: &Key) -> Option<&Val> {
-        self.values.get(&key.to_string())
+        self.values.get(key)
     }
 
     /// Whether the file sets `key`.
@@ -355,8 +347,6 @@ impl Calibration {
         let n = |v: f64| Ok(Val::Num(v));
         match key {
             Key::HeadOffset(h, a) => n(Profile::gunnar_601().head(*h).offset_mm[a.index()]),
-            Key::Scale(Axis::X) => n(Profile::gunnar_601().scale.x_steps_per_mm),
-            Key::Scale(Axis::Y) => n(Profile::gunnar_601().scale.y_steps_per_mm),
             Key::Blade { head, value } => n(blade_default(*head, *value)),
             Key::Profile { profile, value } => {
                 self.need_profile(profile)?;
@@ -383,7 +373,7 @@ impl Calibration {
             .ok_or_else(|| Error::File(format!("{key} isn't a number")))
     }
 
-    /// The machine profile: `Profile::gunnar_601()` with the calibrated head offsets and scale.
+    /// The machine profile: `Profile::gunnar_601()` with the calibrated head offsets.
     pub fn machine(&self) -> Profile {
         let mut p = Profile::gunnar_601();
         let num = |k: Key| self.num(&k).unwrap_or_default();
@@ -397,8 +387,6 @@ impl Calibration {
                 Head::Straight => p.straight.offset_mm = offset,
             }
         }
-        p.scale.x_steps_per_mm = num(Key::Scale(Axis::X));
-        p.scale.y_steps_per_mm = num(Key::Scale(Axis::Y));
         p
     }
 
@@ -505,11 +493,9 @@ impl Calibration {
             if let Some(v) = &e.value {
                 e.key.check(v)?;
             }
-            let k = e.key.to_string();
-            let before = next.values.get(&k).cloned();
-            match &e.value {
-                Some(v) => next.values.insert(k, v.clone()),
-                None => next.values.remove(&k),
+            let before = match &e.value {
+                Some(v) => next.values.insert(e.key.clone(), v.clone()),
+                None => next.values.remove(&e.key),
             };
             match changes.iter_mut().find(|c| c.key == e.key) {
                 Some(c) => {
@@ -575,24 +561,23 @@ impl Calibration {
         let mut then = self.values.clone();
         for e in later.iter().rev() {
             for c in e.changes.iter().rev() {
-                let k = c.key.to_string();
                 match &c.before {
-                    Some(v) => then.insert(k, v.clone()),
-                    None => then.remove(&k),
+                    Some(v) => then.insert(c.key.clone(), v.clone()),
+                    None => then.remove(&c.key),
                 };
             }
         }
-        let mut edits = Vec::new();
-        for k in self.values.keys().chain(then.keys()) {
-            let (now, was) = (self.values.get(k), then.get(k));
-            if now != was && !edits.iter().any(|e: &Edit| e.key.to_string() == *k) {
-                edits.push(Edit {
-                    key: k.parse()?,
-                    value: was.cloned(),
-                    se: None,
-                });
-            }
-        }
+        let keys: std::collections::BTreeSet<&Key> =
+            self.values.keys().chain(then.keys()).collect();
+        let edits: Vec<Edit> = keys
+            .into_iter()
+            .filter(|k| self.values.get(*k) != then.get(*k))
+            .map(|k| Edit {
+                key: k.clone(),
+                value: then.get(k).cloned(),
+                se: None,
+            })
+            .collect();
         let why = Why {
             note: why
                 .note
@@ -772,12 +757,15 @@ mod tests {
     fn the_file_reads_back_as_written() {
         let c = with_c2()
             .set(
-                &[Edit::set(key("machine.scale.x"), 40.02).with_se(0.004)],
+                &[Edit::set(key("machine.straight.offset.x"), 6.42).with_se(0.004)],
                 &at(2),
             )
             .expect("set");
         let text = c.to_json();
-        assert!(text.contains("\"machine.scale.x\": 40.02"), "{text}");
+        assert!(
+            text.contains("\"machine.straight.offset.x\": 6.42"),
+            "{text}"
+        );
         assert_eq!(Calibration::from_json(&text).expect("reads"), c);
     }
 

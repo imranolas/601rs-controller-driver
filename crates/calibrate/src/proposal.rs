@@ -60,23 +60,6 @@ pub enum Verdict {
     Undetermined,
 }
 
-/// How far a value plausibly moves between calibrations: beyond it, a change is
-/// [`Verdict::Large`].
-fn plausible(key: &Key) -> f64 {
-    match key {
-        Key::HeadOffset(..) => 1.0,
-        Key::Scale(_) => 0.2,
-        Key::Blade { value, .. } => match value {
-            BladeValue::Sideways | BladeValue::Width => 0.5,
-            BladeValue::Lean => 5.0,
-            BladeValue::Lead(_) | BladeValue::Shortfall(_) => 1.5,
-            BladeValue::OverlapMs => 500.0,
-            BladeValue::RunOutMm => 0.5,
-        },
-        Key::Profile { .. } => f64::INFINITY,
-    }
-}
-
 impl Change {
     /// The change of `key` from what `cal` has to `fitted` (value, standard error), rounded to
     /// what is worth writing: a micrometre, a hundredth of a degree. Rounded to that, a value
@@ -85,12 +68,12 @@ impl Change {
     /// holds more finely moved.
     pub fn new(cal: &Calibration, key: Key, fitted: Option<(f64, f64)>) -> Change {
         let before = cal.num(&key).unwrap_or(f64::NAN);
-        let step = if key.unit() == "°" { 0.01 } else { 0.001 };
+        let step = key.step();
         let after = fitted.map(|(v, _)| (v / step).round() * step);
         let se = fitted.map(|(_, se)| se).filter(|se| se.is_finite());
         let verdict = match after {
             None => Verdict::Undetermined,
-            Some(a) if (a - before).abs() > plausible(&key) => Verdict::Large,
+            Some(a) if (a - before).abs() > key.plausible() => Verdict::Large,
             Some(a) if (a - before).abs() <= step / 2.0 + 1e-9 => Verdict::WithinNoise,
             Some(a) if se.is_some_and(|se| (a - before).abs() <= 2.0 * se) => Verdict::WithinNoise,
             Some(_) => Verdict::Moved,

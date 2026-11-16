@@ -65,13 +65,6 @@ pub enum Span {
     FromStock { axis: Axis, edge: Edge },
     /// From one edge to the other, along `axis`.
     Between { axis: Axis, edges: [Edge; 2] },
-    /// How far `cut`'s slit runs on past `crossing` at its `end`, along the cut (calibration
-    /// 1's overruns): before it at a start, past it at an end.
-    Overrun {
-        cut: String,
-        end: End,
-        crossing: Edge,
-    },
 }
 
 impl Span {
@@ -80,7 +73,6 @@ impl Span {
         match self {
             Span::FromStock { edge, .. } => vec![edge.cut.as_str()],
             Span::Between { edges, .. } => edges.iter().map(|e| e.cut.as_str()).collect(),
-            Span::Overrun { cut, crossing, .. } => vec![cut.as_str(), crossing.cut.as_str()],
         }
     }
 }
@@ -184,17 +176,16 @@ impl Reading {
     /// Whether `value` can be this reading, and whether it is unusual.
     ///
     /// # Errors
-    /// When it isn't a length (an overrun may be negative), or a tooth of the comb.
+    /// When it isn't a length, or a tooth of the comb.
     pub fn check(&self, value: f64) -> Result<Check, Error> {
         let id = &self.id;
         match &self.kind {
             Kind::Length {
-                span,
                 expected_mm,
                 unusual_mm,
+                ..
             } => {
-                let signed = matches!(span, Span::Overrun { .. });
-                if !value.is_finite() || (!signed && value <= 0.0) {
+                if !(value.is_finite() && value > 0.0) {
                     return Err(Error::Reading(format!("{id}: {value} isn't a length")));
                 }
                 Ok(match expected_mm.map(|e| (value - e).abs()) {

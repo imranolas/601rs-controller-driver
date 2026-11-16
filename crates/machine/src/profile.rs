@@ -411,8 +411,8 @@ impl Profile {
             clamp_pads: ClampPads::gunnar_601(),
             one_clamp_up_to_mm: one_clamp_up_to_mm(),
             // [GCF] Heads[*].ToolHeadCorrection StartPX/StartPY/StartPZ; outputs [CAP]. The
-            // offsets are fitted to testdata/calibration/calibration_1 (`mc601 calibrate`,
-            // 2026-11-10, ±0.06 mm): GMC's were (-71.5, 1.9) and (6.2, 1.7).
+            // offsets are fitted to calibration 1, the shop's 601 on 2026-11-10 (±0.06 mm):
+            // GMC's were (-71.5, 1.9) and (6.2, 1.7).
             bevel: Head {
                 offset_mm: [-71.45, 2.03],
                 blade_mount_deg: 0.0,
@@ -663,21 +663,6 @@ impl Profile {
             (x * s.x_steps_per_mm).round() as i32,
             (y * s.y_steps_per_mm).round() as i32,
         ]
-    }
-
-    /// This machine with none of its calibration: no board origin, no head offsets and no
-    /// clamp border, so a program's points are where the carriage goes, in mm. For a
-    /// calibration sheet cut raw (`mc601 calibrate`): what it measures then can't inherit an
-    /// earlier estimate. Everything else (scales, outputs, speeds, soft limits, park) stays.
-    pub fn raw(&self) -> Profile {
-        let mut p = self.clone();
-        p.board_origin_mm = MachineMm([0.0, 0.0]);
-        p.bevel.offset_mm = [0.0, 0.0];
-        p.straight.offset_mm = [0.0, 0.0];
-        p.clamp_border_mm = [f64::NEG_INFINITY; 2];
-        p.clamp_pads.front_mm.clear();
-        p.clamp_pads.left_mm.clear();
-        p
     }
 }
 

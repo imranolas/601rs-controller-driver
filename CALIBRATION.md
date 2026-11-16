@@ -33,6 +33,10 @@ app's screens stay generic: a new routine needs no new UI.
   each switchable.
 - **The runner** takes a new calibration between runs (`set_profile`).
 - All of it runs end to end on the simulator, and GMC's own jobs are still rebuilt to the step.
+- **Refactored, 16 Nov** (`calibrate/refactor`): a reading is described once (`calibrate::reading`),
+  and the fit is in the tool model's own terms. The record (calibrations 1 and 2, cut raw before
+  the routines) is retired with everything that served only it (§5), and the scale is no longer a
+  key.
 
 **Waiting on the machine** (`docs/hardware-testing.md`), in order:
 
@@ -41,8 +45,6 @@ app's screens stay generic: a new routine needs no new UI.
 2. Stage 1 on a measured offcut: the first real scatter, and straight strokes cut both ways.
 3. Stage 2 on a common board, then on a 2.5–2.7 mm board: whether the reach changes with
    thickness.
-4. If its sheet is still there, calibration 1's overrun readings taken again on the face
-   (§10, step 4).
 
 **Waiting on the apps** (step 9, §10): calibrating from an app, on the driver's sessions
 and stage 2; cutting with the file's blade and machine, not the hardcoded defaults; programs
@@ -157,9 +159,7 @@ less on 1.0 mm.
 **What it can't fix:**
 
 1. **The start lead and end shortfall on the face.** Calibration 1 read its overruns on the
-   back only. Its four overrun readings taken again on the face, on the same sheet, give them
-   for a program we know exactly; failing that, the face corners of a window GMC cut on C10
-   (does a cut run on past each corner, along which edge, how far); stage 2 measures them.
+   back only, and its sheet is gone: stage 2 measures them.
 2. **Whether the reach changes with thickness.** The combs (§5) cut on a 2.5–2.7 mm board as
    well as a common one settle it without thick board. GMC's straight run-on doesn't change
    with thickness at all, and the shop finds thick boards unreliable.
@@ -218,7 +218,6 @@ exact. `calibrate::key::Key` is the typed form; its text is what the file, the h
 | Key | Unit | Default |
 |-----|------|---------|
 | `machine.<head>.offset.<x\|y>` | mm | `Profile::gunnar_601()` |
-| `machine.scale.<x\|y>` | steps/mm | `Profile::gunnar_601()` (40) |
 | `blade.<head>.sideways` | mm left of the line, on the back | `Blade::fitted()` |
 | `blade.<head>.width` | mm | `Blade::fitted()` |
 | `blade.<head>.lean` | ° from vertical | `Blade::fitted()` |
@@ -228,7 +227,7 @@ exact. `calibrate::key::Key` is the typed form; its text is what the file, the h
 | `profile.<id>.trim.<straight\|bevel\|bevel_round>` | ° | 0; `bevel_round` the bevel's |
 
 `<head>` is `bevel` or `straight`; a profile id is letters, digits, `_` and `-`. Each key has
-bounds that catch a typing slip or a corrupt file (a speed of 1 to 100 %, a scale of 1 to 1000
+bounds that catch a typing slip or a corrupt file (a speed of 1 to 100 %, a head offset within 2 m
 steps/mm, …). Whether a change is plausible is the fit's question (§7), not the file's.
 
 **Rules**
@@ -269,7 +268,7 @@ impl Calibration {
     pub fn revision(&self) -> u32;
     pub fn history(&self) -> &[Entry];
 
-    /// `Profile::gunnar_601()` with the calibrated head offsets and scale.
+    /// `Profile::gunnar_601()` with the calibrated head offsets.
     pub fn machine(&self) -> machine::Profile;
     /// How each head cuts, on any board (§3): the compiler works out each line's place and
     /// each cut's run-ons from it and the board's thickness.
@@ -354,7 +353,11 @@ and doesn't drift; and the **scale**, GMC's 40 steps/mm, which its captures matc
   only where calibration 1 had it freeing later. No margin is added: the freeing tooth is up
   to a step past the threshold already. Teeth two or more apart between the directions are
   noted.
-- **Calibration sheet 2** stays in the golden tests, as the record.
+- **The record is retired** (16 Nov): calibrations 1 and 2, cut raw from carriage coordinates
+  before the routines. Their values live on as the defaults (`Blade::fitted`,
+  `Profile::gunnar_601`); their sheets, readings and the code that read them are in git history
+  (before `calibrate/refactor`); calibration 1's two run logs are simulator regression tests
+  (`testdata/sessions/calibration_1*-run.log`). Nothing is cut raw any more.
 - **Ovals: later.** GMC's overlaps and run-outs serve until a shop complaint about joins.
 - **Hooks: later.** A hook is a curve at the start of a cut, more common on the bevel head.
   The bevel has no soft start at any thickness in GMC (protocol reference §3.3), the likeliest
@@ -457,8 +460,8 @@ carriage mm,
   moves left per mm deeper (tan of the lean; none on the straight head). At a depth `z` below
   the back, its left side lies `e = s + z·r + w/2` left of the line, its right side
   `e = w/2 − s − z·r` right of it.
-- On the back, how far a cut starts before its commanded start and stops short of its end
-  (calibration 1's overruns).
+
+How far a cut starts early or stops short isn't fitted: stage 2's combs read it (§5).
 
 A position reading is `c − P + σe`, where σ = ±1 is the side read along the axis. A width is
 two edges' difference, so `P` cancels unless the heads differ. Each is one linear row. The rows
@@ -467,10 +470,9 @@ about the model. An unknown the readings don't settle is reported as such and le
 
 **What changes from today:**
 
-- **Carriage positions come from lowering**, not from the log: `machine::lower(program,
-  profile_cut_with)`, which is pure. A session keeps the profile it was cut with. `mc601` checks
-  the result against its log, so a disagreement between the two is a test failure, not a
-  surprise.
+- **Carriage positions come from lowering**, not from a log: `machine::lower(program,
+  profile_cut_with)`, which is pure. A session keeps the profile it was cut with. `mc601`'s tests
+  hold it to what the simulator received, command for command.
 - **Picks become values with an uncertainty.** In a comb (§5), the first tooth to come free
   gives an interval for the run-on that frees that corner on both faces: past the tooth
   before, up to this one. With each face's corner where stage 1 puts it, that is the head's
@@ -491,7 +493,7 @@ about the model. An unknown the readings don't settle is reported as such and le
   calibration 1's). A routine reads only what it means to check and takes the rest as known.
 - **Precision before cutting.** `precision(sheet, priors)` gives each unknown's standard
   error from which readings a plan takes, before any is read: what a plan can promise, and
-  what leaving a reading out costs (`cargo run -p calibrate --example readings`).
+  what leaving a reading out costs.
 - **Suspects.** After the fit, each reading's residual in units of what it should scatter,
   judged by the other readings and allowing for how much it decides alone (externally
   studentised, `Leftover::t`). Beyond 3.5, and off by at least 0.02 mm (`MISREAD_MM`, about
@@ -566,15 +568,14 @@ that rounds to within half a step of the file's (a micrometre, a hundredth of a 
 within the noise whatever its standard error, so readings that fit exactly don't call the
 bevel's 0.4525 moved to 0.453. Pooling sessions in a proposal is still to come.
 
-**Tests.** The fits of `testdata/calibration` (calibration 1 and 2, cut raw, from their logs)
-must give today's numbers. For each routine, a known "true" calibration with errors goes through
+**Tests.** For each routine, a known "true" calibration with errors goes through
 `predict`, plus noise, and `fit` must recover it within its standard errors. A plan must fail
 loudly with a reading it doesn't list, a pick out of range, or a board of the wrong thickness.
 *Stage 1, 16 Nov:* a machine unlike the file is recovered within three standard errors, and the
 proposal applied makes the file say so; a reading misread by 0.5 mm is named; every expected
 reading is the design's with the calibration's edges, to the motor step; and in `mc601`, the
 plan runs on the simulator to the park, what went down the line is what lowering the plan
-gives, cut for cut, and readings read to a hundredth fit back to the machine they came from.
+gives, command for command, and readings read to a hundredth fit back to the machine they came from.
 Writing it found a fault older than stage 1: a width read across the two heads' cuts (a
 mount's border) was ordered by carriage position, where the heads are 78 mm apart, so the fit
 expected a border of −24.7 mm. Edges are now ordered as they lie on the board.
@@ -685,9 +686,9 @@ Each step passes `cargo test` and stops for review.
    fit writes. Writing a fit into the file from `mc601 calibrate` is step 3's proposal.
 3. **The fit.** *Built, 16 Nov:* the SVD solve, what is tied, weights, priors, `precision`,
    combinations, studentised suspects; the record's fit unchanged.
-4. **Settle the tool model** (§3) before building on it: calibration 1's overrun readings
-   taken again on the face, if its sheet is still there; then stage 2's combs on a common board
-   and on a 2.5–2.7 mm one.
+4. **Settle the tool model** (§3) before building on it: stage 2's combs on a common board and
+   on a 2.5–2.7 mm one (calibration 1's sheet, which might have been read again on the face, is
+   gone).
 5. **The tool in the compiler and the file.** *Built, 16 Nov:* `compiler::HeadCut` is a head's
    tool model (§3; the name `Tool` is a contour's), from which the compiler works out each
    line's place and each cut's run-ons for a board's thickness. The file's blade keys are the
@@ -712,7 +713,7 @@ Each step passes `cargo test` and stops for review.
    `mc601 calibrate heads --thickness MM` cuts it and offers its readings, and `mc601
    calibrate read` fits them and offers the proposal, written as one revision if the operator
    says so. `mc601 calibrate cut` and `calibrate sheet`, which cut calibration sheet 2, are
-   gone; the record still fits with `calibrate fit`. *Stage 2 built, 16 Nov:*
+   gone, and since 16 Nov the record too (§5). *Stage 2 built, 16 Nov:*
    `calibrate::runons` (plan, propose, `simulate`), `mc601 calibrate runons`; its 64 cuts run
    on the simulator as lowering says, and the combs a machine would free give its run-ons back
    within a tooth, never short. *The `Session` type built, 16 Nov* (§8): `mc601` keeps it as
@@ -747,7 +748,7 @@ Ovals and hooks wait (§5).
    its measured thickness; GMC's per-profile patches not copied.
 6. **Straight strokes may run both ways,** once stage 1 has measured each side of the cut.
 7. **Calibration on 150 × 150 offcuts, in stages, with no slits** (§5): calibration sheet 2's
-   approach, rebuilt. Sheet 2 stays as the record.
+   approach, rebuilt. Sheet 2 was the record until 16 Nov (§5).
 8. **Only stage 1 and stage 2 are routines.** No check, scale or sheet count: the tip depth
    needs no value of its own (§3; the shop cuts through no more than four printer sheets),
    and square and scale are taken as given (§5).
@@ -765,5 +766,5 @@ Ovals and hooks wait (§5).
 
 11. **Blade changes.** Should an app record "blade changed" (it asks when a board is loaded), so
     its machine page can suggest stage 2?
-12. **Each head's start lead and end shortfall on the face** (§3): calibration 1's overrun
-    readings taken again on the face, if its sheet is still there.
+12. **Each head's start lead and end shortfall on the face** (§3): stage 2's combs (calibration
+    1's sheet is gone).

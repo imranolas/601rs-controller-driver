@@ -24,7 +24,7 @@ this document and cites it rather than repeating it.
 | **[RADIUS]** | A flowchart of the controller's radius slowdown ("Tangentialverzögerung, Steuerung Weissenberger") that comes with the manual. |
 | **[GMC]** | How GMC, Gunnar's own software for the 601, does it: learned from studying GMC 4.0 and 5.0, and not reproduced here. The captures were made with GMC 4.0.502.683. |
 | **[CAP name]** | GMC serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 export of a software port monitor, 1-second timestamps, no line settings). `mc601 capture <file>` decodes them. |
-| **[SESSION name]** | Logs written by `mc601` at the machine, in `testdata/sessions/` and `testdata/calibration/`. |
+| **[SESSION name]** | Logs written by `mc601` at the machine, in `testdata/sessions/`. |
 | **[GCF]** | GMC's machine and tool parameters for the 601 (its `.gcf` file; not included). |
 | **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included). |
 | **[HELP …]** | GMC's user documentation: [HELP RN] its release notes, and **[HELP CA n]** page n of its Configuration Assistant (calibration of borders, overcuts, trims, the throttle, COE). |

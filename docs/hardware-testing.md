@@ -108,9 +108,7 @@ mc601 calibration history                # what was written, when, by which sess
   counting from the left (tooth 1 is the shortest), or 0 if none does. A comb where none, or
   every one, comes free moves the file's value so the next stage 2 is centred past it: cut it
   again. Once on 2.5 to 2.7 mm board too, to see whether the reach changes with thickness.
-- The record's raw sheets still fit: `mc601 calibrate fit --sheet PROGRAM LOG READINGS`
-  (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`, `.readings.txt`), and
-  `mc601 calibrate fit --all` pools sessions.
+- `mc601 calibrate fit --all` pools every stage 1 session that has readings.
 
 ## Starting cuts on thick board
 

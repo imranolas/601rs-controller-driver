@@ -22,7 +22,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use link::Direction;
 use link::capture;
 use link::tap::printable;
@@ -56,8 +56,7 @@ enum Command {
     /// Cut programs, asking before each
     #[command(
         after_help = "Examples:\n  mc601 run job.json\n  mc601 run job.json --sim          \
-                            a dry run on the simulator\n  mc601 run calibration_2.json      a \
-                            calibration sheet: cut raw, then its readings"
+                            a dry run on the simulator"
     )]
     Run(RunArgs),
     /// Calibrate the heads: cut the sheet, take its readings, fit them
@@ -169,12 +168,10 @@ enum CalibrateCommand {
         /// The session folder
         session: Option<PathBuf>,
     },
-    /// Fit calibration sessions together
+    /// Fit stage 1 sessions together: a report, and what they would propose
     #[command(
         after_help = "Examples:\n  mc601 calibrate fit --all\n  mc601 calibrate fit \
-                            \"~/Documents/mc601/sessions/2026-11-10 14.32.05 calibrate calibration_2\"\n  \
-                            mc601 calibrate fit --sheet calibration_1.json calibration_1.run.log \
-                            calibration_1.readings.txt"
+                            \"~/Documents/mc601/sessions/2026-11-16 10.31.02 calibrate stage_1\""
     )]
     Fit(FitArgs),
 }
@@ -196,15 +193,9 @@ struct StageArgs {
 struct FitArgs {
     /// Calibration session folders
     sessions: Vec<PathBuf>,
-    /// Every calibration session in the data folder that has readings
+    /// Every stage 1 session in the data folder that has readings
     #[arg(long)]
     all: bool,
-    /// A sheet kept elsewhere: its program, run log and readings
-    #[arg(long, num_args = 3, value_names = ["PROGRAM", "LOG", "READINGS"], action = ArgAction::Append)]
-    sheet: Vec<PathBuf>,
-    /// Also write a profile with the fitted head offsets to FILE
-    #[arg(long, value_name = "FILE")]
-    profile: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -425,20 +416,9 @@ fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
             let data = Config::load()?.data_dir();
             let mut dirs = f.sessions;
             if f.all {
-                dirs.extend(calibrate::sessions_with_readings(&data));
+                dirs.extend(calibrate::stage_1_sessions(&data));
             }
-            let triples: Vec<[PathBuf; 3]> = f
-                .sheet
-                .chunks(3)
-                .map(|c| [c[0].clone(), c[1].clone(), c[2].clone()])
-                .collect();
-            if dirs.is_empty() && triples.is_empty() {
-                return Err(
-                    "nothing to fit: give session folders, --all, or --sheet PROGRAM LOG READINGS"
-                        .into(),
-                );
-            }
-            calibrate::fit(&dirs, &triples, f.profile.as_deref())
+            calibrate::fit(&dirs)
         }
     }
 }
@@ -702,20 +682,14 @@ mod tests {
             "a program is required"
         );
         assert!(Cli::try_parse_from(["mc601", "run", "a.json", "--sim", "--port", "x"]).is_err());
-        let cli = Cli::try_parse_from([
-            "mc601",
-            "calibrate",
-            "fit",
-            "--sheet",
-            "p",
-            "l",
-            "r",
-            "--all",
-        ])
-        .expect("parses");
+        let cli =
+            Cli::try_parse_from(["mc601", "calibrate", "fit", "a", "b", "--all"]).expect("parses");
         let Command::Calibrate(CalibrateCommand::Fit(f)) = cli.command else {
             panic!("not fit")
         };
-        assert_eq!((f.sheet.len(), f.all), (3, true));
+        assert_eq!((f.sessions.len(), f.all), (2, true));
+        assert!(
+            Cli::try_parse_from(["mc601", "calibrate", "fit", "--sheet", "p", "l", "r"]).is_err()
+        );
     }
 }

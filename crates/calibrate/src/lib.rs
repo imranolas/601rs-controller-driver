@@ -16,16 +16,13 @@
 //! - [`plan`]: a routine as data: the program to cut, and the readings to take off it in steps;
 //!   [`heads`] (stage 1) and [`runons`] (stage 2) make them.
 //! - [`session`]: one run of a routine, kept as a file: how far it was cut, the readings so far.
-//! - [`fit`]: the caliper readings as linear rows in each head's unknowns (where its line lands
-//!   on the registered corner, where each side of its slit lands, its drag), solved by least
+//! - [`fit`]: the caliper readings as linear rows in the tool model's values (where each head's
+//!   line lands on the registered corner, its slit's offset, width and lean), solved by least
 //!   squares with each unknown's standard error; and what a calibration predicts.
 //! - [`proposal`]: what a routine's readings propose for the file, each change with its verdict
 //!   and its effect in words, applied as one revision.
-//! - [`sent`]: the cuts a program sent, in carriage millimetres, from the bytes on the line or
-//!   from lowering the program again with the profile it was cut with. Lowering is pure, so an
-//!   app that keeps no log still knows where every cut went.
-//! - [`legacy`] and [`sheet`]: the record's calibration sheets, cut raw before the routines:
-//!   their readings as their programs list them, and calibration sheet 2 itself.
+//! - [`sent`]: the cuts a program sent, in carriage millimetres, from lowering it again with the
+//!   profile it was cut with. Lowering is pure, so no run log is needed.
 //!
 //! Depends on `compiler`, `machine` and `program`.
 
@@ -33,14 +30,12 @@ pub mod calibration;
 pub mod fit;
 pub mod heads;
 pub mod key;
-pub mod legacy;
 pub mod plan;
 pub mod proposal;
 pub mod reading;
 pub mod runons;
 pub mod sent;
 pub mod session;
-pub mod sheet;
 pub mod store;
 
 pub use calibration::{Calibration, Change, Edit, Entry, Last, ValueState, Why};
@@ -52,7 +47,7 @@ pub use key::{Key, Val};
 pub use plan::{Plan, Routine, Step, Stock};
 pub use proposal::{Proposal, Verdict};
 pub use reading::{Check, Comb, CombReading, Edge, End, Kind, Reading, Side, Span, Tooth, combs};
-pub use sent::{SentCut, cuts_from_bytes, cuts_from_lowering};
+pub use sent::SentCut;
 pub use session::Session;
 
 /// What went wrong.

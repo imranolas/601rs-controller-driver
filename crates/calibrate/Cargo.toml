@@ -1,6 +1,6 @@
 [package]
 name = "calibrate"
-description = "Calibrating the 601: the machine's calibration file (head offsets, scale, the blade, each board profile), the calibration sheet, where each of its cuts went, and the least-squares fit of the blade model to the operator's readings."
+description = "Calibrating the 601: the machine's calibration file (head offsets, each head's tool model, the board profiles), the two routines as plans, their sessions, the least-squares fit of the tool model to the operator's readings, and what it proposes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ compiler.workspace = true
 machine.workspace = true
 nalgebra.workspace = true
 program.workspace = true
+protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

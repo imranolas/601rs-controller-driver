@@ -102,13 +102,13 @@ mod tests {
         let why = Why::typed("2026-11-15T10:00:00Z");
         let key = |s: &str| s.parse().expect(s);
         let mine = read
-            .set(&[Edit::set(key("machine.scale.x"), 40.01)], &why)
+            .set(&[Edit::set(key("machine.bevel.offset.x"), -71.4)], &why)
             .expect("set");
         save(&path, &mine, read.revision()).expect("saved");
         assert_eq!(load(&path).expect("loads"), mine);
         // Another writer that read before this save is refused, not let overwrite it.
         let theirs = read
-            .set(&[Edit::set(key("machine.scale.y"), 39.99)], &why)
+            .set(&[Edit::set(key("machine.bevel.offset.y"), 2.1)], &why)
             .expect("set");
         match save(&path, &theirs, read.revision()) {
             Err(Error::Moved { read: 0, now: 1 }) => {}

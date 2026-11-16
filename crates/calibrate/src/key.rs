@@ -1,7 +1,8 @@
 //! What can be calibrated: each value's key, in the file and in the history as a dotted path
-//! (`machine.bevel.offset.x`, `blade.bevel.lean`), its unit, its words for a person, and the
-//! bounds a value must keep to be one at all. The bounds catch a typing slip or a
-//! corrupt file; whether a change is plausible is the fit's question, not this.
+//! (`machine.bevel.offset.x`, `blade.bevel.lean`), and all there is to say of it in one table:
+//! its unit, its words for a person, the bounds a value must keep to be one at all, and how far
+//! it plausibly moves between calibrations. The bounds catch a typing slip or a corrupt file;
+//! a move past the plausible is a fit's to question ([`crate::Verdict::Large`]).
 
 use std::fmt;
 use std::str::FromStr;
@@ -29,7 +30,7 @@ impl Axis {
         }
     }
 
-    /// As a key and a person write it: `x`, `y`.
+    /// As a key writes it: `x`, `y`.
     fn word(self) -> &'static str {
         match self {
             Axis::X => "x",
@@ -84,14 +85,14 @@ pub enum ProfileValue {
     Trim(Trim),
 }
 
-/// One value that can be calibrated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One value that can be calibrated. Ordered as the file and the overview list them: the
+/// heads' offsets, the blade, then each profile. The scale isn't one: X and Y each move alone
+/// on their own rails, at GMC's 40 steps/mm, which its captures match (CALIBRATION.md §5).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum Key {
     /// Where a head's blade is from the carriage (`machine::Head::offset_mm`).
     HeadOffset(Head, Axis),
-    /// Steps per mm (`machine::Scale`).
-    Scale(Axis),
     /// How a head cuts, on any board.
     Blade { head: Head, value: BladeValue },
     /// A board profile's setting.
@@ -143,21 +144,37 @@ pub fn valid_profile_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-impl BladeValue {
-    fn path(self) -> &'static str {
-        match self {
-            BladeValue::Sideways => "sideways",
-            BladeValue::Width => "width",
-            BladeValue::Lean => "lean",
-            BladeValue::Lead(Surface::Back) => "lead.back",
-            BladeValue::Lead(Surface::Face) => "lead.face",
-            BladeValue::Shortfall(Surface::Back) => "shortfall.back",
-            BladeValue::Shortfall(Surface::Face) => "shortfall.face",
-            BladeValue::OverlapMs => "overlap_ms",
-            BladeValue::RunOutMm => "run_out_mm",
-        }
-    }
+/// All there is to say of a value: its path in its key, its unit, its words, the bounds a value
+/// must keep to be one at all, and how far it plausibly moves between calibrations.
+#[derive(Debug, Clone, Copy)]
+struct About {
+    path: &'static str,
+    unit: &'static str,
+    words: &'static str,
+    bounds: [f64; 2],
+    plausible: f64,
+}
 
+const fn about(
+    path: &'static str,
+    unit: &'static str,
+    words: &'static str,
+    bounds: [f64; 2],
+    plausible: f64,
+) -> About {
+    About {
+        path,
+        unit,
+        words,
+        bounds,
+        plausible,
+    }
+}
+
+/// A profile's settings aren't fitted, so nothing they move to is implausible.
+const TYPED: f64 = f64::INFINITY;
+
+impl BladeValue {
     pub const ALL: [BladeValue; 9] = [
         BladeValue::Sideways,
         BladeValue::Width,
@@ -169,21 +186,26 @@ impl BladeValue {
         BladeValue::OverlapMs,
         BladeValue::RunOutMm,
     ];
+
+    #[rustfmt::skip]
+    fn about(self) -> About {
+        use BladeValue::*;
+        use Surface::{Back, Face};
+        match self {
+            Sideways        => about("sideways",       "mm", "slit's middle left of the line, on the back", [-5.0, 5.0], 0.5),
+            Width           => about("width",          "mm", "slit width",                  [-1.0, 5.0], 0.5),
+            Lean            => about("lean",           "°",  "lean from vertical",          [-30.0, 75.0], 5.0),
+            Lead(Back)      => about("lead.back",      "mm", "start lead, on the back",     [-30.0, 30.0], 1.5),
+            Lead(Face)      => about("lead.face",      "mm", "start lead, on the face",     [-30.0, 30.0], 1.5),
+            Shortfall(Back) => about("shortfall.back", "mm", "end shortfall, on the back",  [-30.0, 30.0], 1.5),
+            Shortfall(Face) => about("shortfall.face", "mm", "end shortfall, on the face",  [-30.0, 30.0], 1.5),
+            OverlapMs       => about("overlap_ms",     "ms", "overlap on closed curves",    [0.0, 10_000.0], 500.0),
+            RunOutMm        => about("run_out_mm",     "mm", "run-out on closed curves",    [0.0, 5.0], 0.5),
+        }
+    }
 }
 
 impl ProfileValue {
-    fn path(self) -> &'static str {
-        match self {
-            ProfileValue::Name => "name",
-            ProfileValue::ThicknessMm => "thickness_mm",
-            ProfileValue::SpeedPct => "speed_pct",
-            ProfileValue::HeadSettleMs => "head_settle_ms",
-            ProfileValue::Trim(Trim::Straight) => "trim.straight",
-            ProfileValue::Trim(Trim::Bevel) => "trim.bevel",
-            ProfileValue::Trim(Trim::BevelRound) => "trim.bevel_round",
-        }
-    }
-
     const ALL: [ProfileValue; 7] = [
         ProfileValue::Name,
         ProfileValue::ThicknessMm,
@@ -201,6 +223,20 @@ impl ProfileValue {
         ProfileValue::SpeedPct,
         ProfileValue::HeadSettleMs,
     ];
+
+    #[rustfmt::skip]
+    fn about(self) -> About {
+        use ProfileValue::{HeadSettleMs, Name, SpeedPct, ThicknessMm};
+        match self {
+            Name                   => about("name",             "",   "Name",                       [0.0, 0.0], TYPED),
+            ThicknessMm            => about("thickness_mm",     "mm", "Thickness",                  [0.01, 20.0], TYPED),
+            SpeedPct               => about("speed_pct",        "%",  "Cutting speed",              [1.0, 100.0], TYPED),
+            HeadSettleMs           => about("head_settle_ms",   "ms", "Head settle",                [0.0, 10_000.0], TYPED),
+            Self::Trim(Trim::Straight)   => about("trim.straight",    "°",  "Straight head trim",         [-45.0, 45.0], TYPED),
+            Self::Trim(Trim::Bevel)      => about("trim.bevel",       "°",  "Bevel trim, straight edges", [-45.0, 45.0], TYPED),
+            Self::Trim(Trim::BevelRound) => about("trim.bevel_round", "°",  "Bevel trim, closed curves",  [-45.0, 45.0], TYPED),
+        }
+    }
 }
 
 impl Key {
@@ -210,11 +246,8 @@ impl Key {
         for h in Head::ALL {
             out.extend(Axis::BOTH.map(|a| Key::HeadOffset(h, a)));
         }
-        out.extend(Axis::BOTH.map(Key::Scale));
         for head in Head::ALL {
-            for value in BladeValue::ALL {
-                out.push(Key::Blade { head, value });
-            }
+            out.extend(BladeValue::ALL.map(|value| Key::Blade { head, value }));
         }
         out
     }
@@ -249,62 +282,48 @@ impl Key {
         )
     }
 
+    fn about(&self) -> About {
+        match self {
+            Key::HeadOffset(..) => about("offset", "mm", "offset", [-2000.0, 2000.0], 1.0),
+            Key::Blade { value, .. } => value.about(),
+            Key::Profile { value, .. } => value.about(),
+        }
+    }
+
     /// Its unit, as shown beside a value.
     pub fn unit(&self) -> &'static str {
+        self.about().unit
+    }
+
+    /// How far it plausibly moves between calibrations: beyond it, a change is more likely a
+    /// mistake in loading or reading than a fact about the machine.
+    pub fn plausible(&self) -> f64 {
+        self.about().plausible
+    }
+
+    /// What a fitted value is written to: a hundredth of a degree for the lean, else a
+    /// micrometre.
+    pub fn step(&self) -> f64 {
         match self {
-            Key::HeadOffset(..) => "mm",
-            Key::Scale(_) => "steps/mm",
-            Key::Blade { value, .. } => match value {
-                BladeValue::Lean => "°",
-                BladeValue::OverlapMs => "ms",
-                _ => "mm",
-            },
-            Key::Profile { value, .. } => match value {
-                ProfileValue::Name => "",
-                ProfileValue::ThicknessMm => "mm",
-                ProfileValue::SpeedPct => "%",
-                ProfileValue::HeadSettleMs => "ms",
-                ProfileValue::Trim(_) => "°",
-            },
+            Key::Blade {
+                value: BladeValue::Lean,
+                ..
+            } => 0.01,
+            _ => 0.001,
         }
     }
 
     /// In words, for a person: "Bevel head, X offset".
     pub fn label(&self) -> String {
-        let head = |h: Head| match h {
+        let head = |h: &Head| match h {
             Head::Bevel => "Bevel head",
             Head::Straight => "Straight head",
         };
+        let words = self.about().words;
         match self {
-            Key::HeadOffset(h, a) => format!(
-                "{}, {} offset",
-                head(*h),
-                if *a == Axis::X { "X" } else { "Y" }
-            ),
-            Key::Scale(a) => format!("{} scale", if *a == Axis::X { "X" } else { "Y" }),
-            Key::Blade { head: h, value, .. } => {
-                let what = match value {
-                    BladeValue::Sideways => "slit's middle left of the line, on the back",
-                    BladeValue::Width => "slit width",
-                    BladeValue::Lean => "lean from vertical",
-                    BladeValue::Lead(Surface::Back) => "start lead, on the back",
-                    BladeValue::Lead(Surface::Face) => "start lead, on the face",
-                    BladeValue::Shortfall(Surface::Back) => "end shortfall, on the back",
-                    BladeValue::Shortfall(Surface::Face) => "end shortfall, on the face",
-                    BladeValue::OverlapMs => "overlap on closed curves",
-                    BladeValue::RunOutMm => "run-out on closed curves",
-                };
-                format!("{}, {what}", head(*h))
-            }
-            Key::Profile { value, .. } => match value {
-                ProfileValue::Name => "Name".into(),
-                ProfileValue::ThicknessMm => "Thickness".into(),
-                ProfileValue::SpeedPct => "Cutting speed".into(),
-                ProfileValue::HeadSettleMs => "Head settle".into(),
-                ProfileValue::Trim(Trim::Straight) => "Straight head trim".into(),
-                ProfileValue::Trim(Trim::Bevel) => "Bevel trim, straight edges".into(),
-                ProfileValue::Trim(Trim::BevelRound) => "Bevel trim, closed curves".into(),
-            },
+            Key::HeadOffset(h, a) => format!("{}, {} {words}", head(h), a.word().to_uppercase()),
+            Key::Blade { head: h, .. } => format!("{}, {words}", head(h)),
+            Key::Profile { .. } => words.to_owned(),
         }
     }
 
@@ -318,42 +337,21 @@ impl Key {
                 None => bad("isn't text"),
             };
         }
-        let Some(x) = v.num() else {
+        let Some(x) = v.num().filter(|x| x.is_finite()) else {
             return bad("isn't a number");
         };
-        if !x.is_finite() {
-            return bad("isn't a number");
-        }
-        let (lo, hi) = match self {
-            Key::HeadOffset(..) => (-2000.0, 2000.0),
-            Key::Scale(_) => (1.0, 1000.0),
-            Key::Blade { value, .. } => match value {
-                BladeValue::Sideways => (-5.0, 5.0),
-                BladeValue::Width => (-1.0, 5.0),
-                BladeValue::Lean => (-30.0, 75.0),
-                BladeValue::Lead(_) | BladeValue::Shortfall(_) => (-30.0, 30.0),
-                BladeValue::OverlapMs => (0.0, 10_000.0),
-                BladeValue::RunOutMm => (0.0, 5.0),
-            },
-            Key::Profile { value, .. } => match value {
-                ProfileValue::Name => unreachable!("text, above"),
-                ProfileValue::ThicknessMm => (0.01, 20.0),
-                ProfileValue::SpeedPct => (1.0, 100.0),
-                ProfileValue::HeadSettleMs => (0.0, 10_000.0),
-                ProfileValue::Trim(_) => (-45.0, 45.0),
-            },
-        };
+        let [lo, hi] = self.about().bounds;
         if !(lo..=hi).contains(&x) {
             return bad(&format!("is outside {lo} to {hi} {}", self.unit()));
         }
-        if matches!(
+        let whole_ms = matches!(
             self,
             Key::Profile {
                 value: ProfileValue::HeadSettleMs,
                 ..
             }
-        ) && x.fract() != 0.0
-        {
+        );
+        if whole_ms && x.fract() != 0.0 {
             return bad("isn't a whole number of ms");
         }
         Ok(())
@@ -364,9 +362,10 @@ impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Key::HeadOffset(h, a) => write!(f, "machine.{h}.offset.{}", a.word()),
-            Key::Scale(a) => write!(f, "machine.scale.{}", a.word()),
-            Key::Blade { head, value } => write!(f, "blade.{head}.{}", value.path()),
-            Key::Profile { profile, value } => write!(f, "profile.{profile}.{}", value.path()),
+            Key::Blade { head, value } => write!(f, "blade.{head}.{}", value.about().path),
+            Key::Profile { profile, value } => {
+                write!(f, "profile.{profile}.{}", value.about().path)
+            }
         }
     }
 }
@@ -379,28 +378,28 @@ impl FromStr for Key {
         let parts: Vec<&str> = s.split('.').collect();
         let axis = |a: &str| Axis::BOTH.into_iter().find(|x| x.word() == a);
         let head = |h: &str| h.parse::<Head>().ok();
-        let blade = |rest: &[&str]| {
-            let path = rest.join(".");
-            BladeValue::ALL.into_iter().find(|v| v.path() == path)
-        };
         let key = match parts.as_slice() {
-            ["machine", "scale", a] => Key::Scale(axis(a).ok_or_else(bad)?),
             ["machine", h, "offset", a] => {
                 Key::HeadOffset(head(h).ok_or_else(bad)?, axis(a).ok_or_else(bad)?)
             }
-            ["blade", h, rest @ ..] => Key::Blade {
-                head: head(h).ok_or_else(bad)?,
-                value: blade(rest).ok_or_else(bad)?,
-            },
+            ["blade", h, rest @ ..] => {
+                let path = rest.join(".");
+                Key::Blade {
+                    head: head(h).ok_or_else(bad)?,
+                    value: BladeValue::ALL
+                        .into_iter()
+                        .find(|v| v.about().path == path)
+                        .ok_or_else(bad)?,
+                }
+            }
             ["profile", id, rest @ ..] if valid_profile_id(id) => {
                 let path = rest.join(".");
-                let value = ProfileValue::ALL
-                    .into_iter()
-                    .find(|v| v.path() == path)
-                    .ok_or_else(bad)?;
                 Key::Profile {
                     profile: (*id).to_owned(),
-                    value,
+                    value: ProfileValue::ALL
+                        .into_iter()
+                        .find(|v| v.about().path == path)
+                        .ok_or_else(bad)?,
                 }
             }
             _ => return Err(bad()),
@@ -430,7 +429,7 @@ mod tests {
     fn every_key_reads_back_as_written() {
         let mut keys = Key::machine();
         keys.extend(Key::profile("C2"));
-        assert_eq!(keys.len(), 6 + 18 + 7);
+        assert_eq!(keys.len(), 4 + 18 + 7);
         for k in keys {
             let text = k.to_string();
             assert_eq!(text.parse::<Key>().expect(&text), k, "{text}");

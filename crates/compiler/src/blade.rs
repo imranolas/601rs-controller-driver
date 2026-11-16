@@ -85,8 +85,8 @@ pub struct Blade {
 const CALIBRATION_1_MM: f64 = 1.5;
 
 impl Blade {
-    /// The shop's 601 as fitted: calibration 1's values (`mc601 calibrate fit` on
-    /// `testdata/calibration`, ± 0.06 mm across the cut, ± 0.13 along it), and on the face,
+    /// The shop's 601 as fitted: calibration 1's values (10 Nov, ± 0.06 mm across the cut,
+    /// ± 0.13 along it), and on the face,
     /// where it read nothing along the cut, whatever gives GMC's run-ons on its 1.5 mm board,
     /// until stage 2's combs measure it (CALIBRATION.md §5).
     ///
