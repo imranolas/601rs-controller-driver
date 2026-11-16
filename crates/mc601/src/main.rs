@@ -151,7 +151,18 @@ enum CalibrateCommand {
                             mc601 calibrate heads --profile C2\n  \
                             mc601 calibrate heads --sim --thickness 1.5"
     )]
-    Heads(HeadsArgs),
+    Heads(StageArgs),
+    /// Stage 2, the run-ons: cut eight combs on an offcut, read them by flexing the board, and
+    /// offer each head's reach to the calibration file
+    #[command(
+        after_help = "The offcut: at least 150 × 150 mm of a common board, face down \
+                            into the front-left stops; measure its thickness with calipers \
+                            first. Once per blade, after stage 1; once on 2.5 to 2.7 mm board \
+                            too, to see whether the reach changes with thickness.\n\nExamples:\n  \
+                            mc601 calibrate runons --thickness 1.42\n  \
+                            mc601 calibrate runons --profile C2"
+    )]
+    Runons(StageArgs),
     /// Take a calibration session's readings, then fit them, and for stage 1 offer the changes
     /// [default: the latest session]
     Read {
@@ -169,7 +180,7 @@ enum CalibrateCommand {
 }
 
 #[derive(Args)]
-struct HeadsArgs {
+struct StageArgs {
     #[command(flatten)]
     machine: MachineArgs,
     /// The offcut's thickness, mm, as measured with calipers [default: its profile's]
@@ -400,12 +411,8 @@ fn finish(session: &Session, r: Res<bool>) -> Res<bool> {
 
 fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
     match c {
-        CalibrateCommand::Heads(h) => {
-            let stock = calibrate::stock(h.profile.as_deref(), h.thickness)?;
-            let (port, session) = open_session("calibrate", "stage_1", &h.machine, false)?;
-            require_terminal(&port, "calibrate heads")?;
-            finish(&session, calibrate::heads(&port, &session, &stock))
-        }
+        CalibrateCommand::Heads(a) => calibrate_stage(::calibrate::Routine::Heads, a),
+        CalibrateCommand::Runons(a) => calibrate_stage(::calibrate::Routine::RunOns, a),
         CalibrateCommand::Read { session } => {
             let data = Config::load()?.data_dir();
             let dir = match session {
@@ -434,6 +441,18 @@ fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
             calibrate::fit(&dirs, &triples, f.profile.as_deref())
         }
     }
+}
+
+/// `mc601 calibrate heads | runons`.
+fn calibrate_stage(routine: ::calibrate::Routine, a: StageArgs) -> Res<bool> {
+    let stock = calibrate::stock(a.profile.as_deref(), a.thickness)?;
+    let what = match routine {
+        ::calibrate::Routine::Heads => "stage_1",
+        ::calibrate::Routine::RunOns => "stage_2",
+    };
+    let (port, session) = open_session("calibrate", what, &a.machine, false)?;
+    require_terminal(&port, &format!("calibrate {}", routine.name()))?;
+    finish(&session, calibrate::stage(&port, &session, routine, &stock))
 }
 
 fn calibration_command(a: CalibrationArgs) -> Res<bool> {

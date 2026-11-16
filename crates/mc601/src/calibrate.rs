@@ -13,10 +13,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ::calibrate::heads::Stock;
 use ::calibrate::proposal::{Proposal, SUSPECT_T, Verdict};
 use ::calibrate::{
-    CombReading, Face, Fit, Plan, Routine, SentCut, Sheet, Unknown, Why, fit_sheets,
+    CombReading, Face, Fit, Plan, Routine, SentCut, Sheet, Stock, Unknown, Why, fit_sheets,
 };
 use link::Direction;
 use machine::Profile;
@@ -29,11 +28,10 @@ use crate::session::Session;
 use crate::style::{BOLD, DIM, GOOD, WARN, paint};
 use crate::target::Res;
 
-// ------------------------------------------------------------------ stage 1
+// ------------------------------------------------------------------ stages 1 and 2
 
-/// A session's plan, and stage 1's program in it.
+/// A session's plan; its program sits beside it under the program's id.
 const PLAN_FILE: &str = "plan.json";
-const STAGE_1_FILE: &str = "stage_1.json";
 const READINGS_FILE: &str = "readings.txt";
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Res<()> {
@@ -61,11 +59,18 @@ pub fn stock(profile: Option<&str>, thickness: Option<f64>) -> Res<Stock> {
     })
 }
 
-/// `mc601 calibrate heads`: stage 1's plan into the session and cut; once it is cut, the run
-/// offers to take its readings (`cut::run`).
-pub fn heads(port: &str, session: &Session, stock: &Stock) -> Res<bool> {
-    let plan = ::calibrate::heads::plan(&crate::calibration::current(), stock)?;
-    let file = session.dir.join(STAGE_1_FILE);
+/// `mc601 calibrate heads | runons`: the stage's plan into the session and cut; once it is
+/// cut, the run offers to take its readings (`cut::run`).
+pub fn stage(port: &str, session: &Session, routine: Routine, stock: &Stock) -> Res<bool> {
+    let cal = crate::calibration::current();
+    let (plan, what) = match routine {
+        Routine::Heads => (::calibrate::heads::plan(&cal, stock)?, "stage 1, the heads"),
+        Routine::RunOns => (
+            ::calibrate::runons::plan(&cal, stock)?,
+            "stage 2, the run-ons",
+        ),
+    };
+    let file = session.dir.join(format!("{}.json", plan.program.id));
     write_json(&file, &plan.program)?;
     write_json(&session.dir.join(PLAN_FILE), &plan)?;
     anstream::println!(
@@ -73,7 +78,7 @@ pub fn heads(port: &str, session: &Session, stock: &Stock) -> Res<bool> {
         paint(
             DIM,
             format!(
-                "stage 1, the heads: {}. {} readings by calipers once it is cut.",
+                "{what}: {}. {} readings once it is cut.",
                 plan.board,
                 plan.readings.len()
             )
@@ -316,6 +321,10 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         let comb = text_of(m, "kind") == "comb";
         let about = m.get("about").and_then(Value::as_f64);
         let near = m.get("unusual").and_then(Value::as_f64).unwrap_or(NEAR_MM);
+        let how = m
+            .get("how")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| face_note(m));
         let teeth = m
             .get("values")
             .and_then(Value::as_array)
@@ -334,7 +343,7 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 i + 1,
                 list.len(),
                 text_of(m, "what"),
-                paint(DIM, format!("{} · {hint}", face_note(m)))
+                paint(DIM, format!("{how} · {hint}"))
             );
             let Some(answer) = op.ask(&question) else {
                 break 'readings;
@@ -396,26 +405,29 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
             }
         }
     };
-    let (fit, combs) = fit_sheets(&[sheet])?;
-    let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
-    let proposal = plan.as_ref().map(|p| propose(p, &fit));
-    if let Some(p) = &proposal {
-        out.push_str(&proposal_text(p));
-    }
+    let cal = crate::calibration::current();
+    let routine = plan.as_ref().map(|p| p.routine);
+    // Stage 2's combs give their proposal directly; anything with lengths is fitted first.
+    let (out, fitted, proposal) = if routine == Some(Routine::RunOns) {
+        let combs = ::calibrate::comb_readings(&sheet)?;
+        let p = ::calibrate::runons::propose(&combs, &cal, thickness);
+        (proposal_text(&p), None, Some(p))
+    } else {
+        let (fit, combs) = fit_sheets(&[sheet])?;
+        let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
+        let p = (routine == Some(Routine::Heads))
+            .then(|| ::calibrate::heads::propose(&fit, &cal, thickness));
+        if let Some(p) = &p {
+            out.push_str(&proposal_text(p));
+        }
+        (out, Some(fitted), p)
+    };
     anstream::print!("\n{out}");
-    keep(dir, &out, &fitted)?;
+    keep(dir, &out, fitted.as_ref())?;
     if let Some(p) = &proposal {
         offer(p, dir, op)?;
     }
     Ok(true)
-}
-
-/// What a plan's fit proposes for the calibration file as it is now.
-fn propose(plan: &Plan, fit: &Fit) -> Proposal {
-    let cal = crate::calibration::current();
-    match plan.routine {
-        Routine::Heads => ::calibrate::heads::propose(fit, &cal, plan.program.board.thickness_mm),
-    }
 }
 
 fn verdict_word(v: Verdict) -> String {
@@ -431,15 +443,15 @@ fn verdict_word(v: Verdict) -> String {
 fn proposal_text(p: &Proposal) -> String {
     let mut o = String::new();
     let scatter = if p.scatter_mm.is_finite() {
-        format!("{:.3} mm", p.scatter_mm)
+        format!(", scatter {:.3} mm", p.scatter_mm)
     } else {
-        "–".to_owned()
+        String::new()
     };
     let _ = writeln!(
         o,
         "\n{}  {}",
         paint(BOLD, "proposed for the calibration file"),
-        paint(DIM, format!("{} readings, scatter {scatter}", p.readings))
+        paint(DIM, format!("{} readings{scatter}", p.readings))
     );
     for c in &p.changes {
         let places = if c.unit == "°" { 2 } else { 3 };
@@ -516,21 +528,21 @@ fn offer(p: &Proposal, dir: &Path, op: &Operator) -> Res<()> {
     Ok(())
 }
 
-/// Keep a fit and its profile in `dir`.
-fn keep(dir: &Path, report: &str, fitted: &Profile) -> Res<()> {
+/// Keep a fit, and the profile with its fitted head offsets if it has one, in `dir`.
+fn keep(dir: &Path, report: &str, fitted: Option<&Profile>) -> Res<()> {
     let plain = anstream::adapter::strip_str(report).to_string();
     std::fs::write(dir.join("fit.txt"), plain).map_err(|e| format!("{}: {e}", dir.display()))?;
-    std::fs::write(
-        dir.join("profile.json"),
-        serde_json::to_string_pretty(fitted)? + "\n",
-    )
-    .map_err(|e| format!("{}: {e}", dir.display()))?;
+    if let Some(fitted) = fitted {
+        write_json(&dir.join("profile.json"), fitted)?;
+    }
+    let what = if fitted.is_some() {
+        "fit and fitted profile"
+    } else {
+        "fit"
+    };
     anstream::println!(
         "{}",
-        paint(
-            DIM,
-            format!("fit and fitted profile: {}", tidy(&dir.join("fit.txt")))
-        )
+        paint(DIM, format!("{what}: {}", tidy(&dir.join("fit.txt"))))
     );
     Ok(())
 }
@@ -780,17 +792,10 @@ mod tests {
         p
     }
 
-    /// Stage 1 on the simulator, end to end: the plan runs to the park; what went down the line
-    /// is what lowering the plan gives, cut for cut, so the fit needs no log; readings a machine
-    /// unlike the file would show, read to a hundredth, fit back to that machine; and the
-    /// proposal, applied, makes the file say so.
-    #[test]
-    fn stage_1_runs_on_the_simulator_and_fits_back_to_the_machine() {
-        use ::calibrate::{Calibration, Edit};
+    /// Cut `plan` on the simulator to the park, and hold what went down the line to what
+    /// lowering the plan gives, cut for cut, so its fit needs no log.
+    fn cut_on_the_simulator(plan: &Plan) {
         const SPEEDUP: f64 = 20.0;
-        let file = Calibration::new();
-        let plan = ::calibrate::heads::plan(&file, &Stock::offcut(1.5)).expect("a plan");
-
         let (link, sim) = sim::spawn(
             sim::SimConfig {
                 homed_at_start: false,
@@ -820,6 +825,17 @@ mod tests {
         let lowered =
             ::calibrate::cuts_from_lowering(&plan.program, &plan.cut_with).expect("lowers");
         assert_eq!(::calibrate::cuts_from_bytes(&sent, &plan.cut_with), lowered);
+    }
+
+    /// Stage 1 on the simulator, end to end: the plan runs to the park as lowering it says;
+    /// readings a machine unlike the file would show, read to a hundredth, fit back to that
+    /// machine; and the proposal, applied, makes the file say so.
+    #[test]
+    fn stage_1_runs_on_the_simulator_and_fits_back_to_the_machine() {
+        use ::calibrate::{Calibration, Edit};
+        let file = Calibration::new();
+        let plan = ::calibrate::heads::plan(&file, &Stock::offcut(1.5)).expect("a plan");
+        cut_on_the_simulator(&plan);
 
         let key = |s: &str| -> ::calibrate::Key { s.parse().expect(s) };
         let why = Why::typed("2026-11-16T15:00:00Z");
@@ -846,7 +862,7 @@ mod tests {
             .map(|(k, v)| (k.clone(), (v * 100.0).round() / 100.0))
             .collect();
         let (fit, _) = fit_sheets(&[plan.sheet("sim", readings).expect("a sheet")]).expect("fits");
-        let p = propose(&plan, &fit);
+        let p = ::calibrate::heads::propose(&fit, &file, 1.5);
         assert!(p.suspects.is_empty(), "{:?}", p.suspects);
         assert_eq!(p.chosen().len(), 8, "{:?}", p.changes);
         let applied = p.apply(&file, &p.chosen(), &why).expect("applied");
@@ -863,6 +879,49 @@ mod tests {
             );
         }
         assert!(proposal_text(&p).contains("blade.bevel.lean"));
+    }
+
+    /// Stage 2 on the simulator, end to end: its 64 cuts run to the park as lowering them says;
+    /// the teeth a machine with a longer reach would free give its run-ons back, within a tooth
+    /// and never short; and the proposal, applied, makes the file say so.
+    #[test]
+    fn stage_2_runs_on_the_simulator_and_finds_the_machines_reach() {
+        use ::calibrate::{Calibration, Edit, runons};
+        let file = Calibration::new();
+        let t = 1.5;
+        let plan = runons::plan(&file, &Stock::offcut(t)).expect("a plan");
+        cut_on_the_simulator(&plan);
+        let key = |s: &str| -> ::calibrate::Key { s.parse().expect(s) };
+        let why = Why::typed("2026-11-16T17:00:00Z");
+        let truth = file
+            .set(
+                &[
+                    Edit::set(key("blade.bevel.shortfall.face"), 2.0),
+                    Edit::set(key("blade.straight.lead.face"), 0.3),
+                ],
+                &why,
+            )
+            .expect("a machine");
+        let need = |cal: &Calibration| {
+            let b = cal.blade();
+            move |h, at_start: bool| b.head(h).run_on(t)[usize::from(!at_start)]
+        };
+        let readings = runons::simulate(&plan, need(&truth));
+        let combs = ::calibrate::comb_readings(&plan.sheet("sim", readings).expect("a sheet"))
+            .expect("combs");
+        let p = runons::propose(&combs, &file, t);
+        assert!(proposal_text(&p).contains("blade.bevel.shortfall.face"));
+        let applied = p.apply(&file, &p.chosen(), &why).expect("applied");
+        let (got, want) = (need(&applied), need(&truth));
+        for h in [Head::Bevel, Head::Straight] {
+            for at_start in [false, true] {
+                let (g, w) = (got(h, at_start), want(h, at_start));
+                assert!(
+                    g >= w - 1e-9 && g - w <= 0.3 + 1e-9,
+                    "{h:?} {at_start}: {g} against {w}"
+                );
+            }
+        }
     }
 
     #[test]

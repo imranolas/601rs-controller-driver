@@ -29,17 +29,18 @@ pub mod heads;
 pub mod key;
 pub mod plan;
 pub mod proposal;
+pub mod runons;
 pub mod sent;
 pub mod sheet;
 pub mod store;
 
 pub use calibration::{Calibration, Change, Edit, Entry, Last, ValueState, Why};
 pub use fit::{
-    CALIPER_SD_MM, CombReading, Face, Fit, Leftover, Precision, Prior, Sheet, Unknown, fit_sheets,
-    fit_sheets_with, known, precision, predict,
+    CALIPER_SD_MM, CombReading, Face, Fit, Leftover, Precision, Prior, Sheet, Unknown,
+    comb_readings, fit_sheets, fit_sheets_with, known, precision, predict,
 };
 pub use key::{Key, Val};
-pub use plan::{Check, Plan, Reading, Routine, Step};
+pub use plan::{Check, Kind, Plan, Reading, Routine, Step, Stock};
 pub use proposal::{Proposal, Verdict};
 pub use sent::{SentCut, cuts_from_bytes, cuts_from_lowering};
 

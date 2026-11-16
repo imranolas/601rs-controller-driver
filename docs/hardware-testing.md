@@ -82,7 +82,8 @@ position, the straight slit's offset and width, and the bevel's offset and lean,
 calibration file `mc601` shares with Bevel.
 
 ```sh
-mc601 calibrate heads --thickness 1.42   # plan, cut, then take its readings, fit, offer the changes
+mc601 calibrate heads --thickness 1.42   # stage 1: plan, cut, then take its readings, fit, offer the changes
+mc601 calibrate runons --thickness 1.42  # stage 2: the combs, after stage 1, once per blade
 mc601 calibrate read                     # take (or correct) the latest session's readings later
 mc601 calibration history                # what was written, when, by which session
 ```
@@ -99,6 +100,11 @@ mc601 calibration history                # what was written, when, by which sess
   uncertainty: moved, within its noise, or large), go into the session's `fit.txt`. Moved values
   are written as one revision if you say so; large ones only if you confirm them; nothing while
   a reading is suspect (measure it again). `mc601 calibration revert N` undoes it.
+- Stage 2 cuts eight combs on another 150 × 150 offcut of a common board. Leave the board back
+  up and flex it along each comb's reference: enter the first tooth that comes free there,
+  counting from the left (tooth 1 is the shortest), or 0 if none does. A comb where none, or
+  every one, comes free moves the file's value so the next stage 2 is centred past it: cut it
+  again. Once on 2.5 to 2.7 mm board too, to see whether the reach changes with thickness.
 - The record's raw sheets still fit: `mc601 calibrate fit --sheet PROGRAM LOG READINGS`
   (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`, `.readings.txt`), and
   `mc601 calibrate fit --all` pools sessions.

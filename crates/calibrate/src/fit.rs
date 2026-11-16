@@ -726,6 +726,14 @@ impl Sheet {
     }
 }
 
+/// The combs read on `sheet`: each one's first tooth to come free.
+///
+/// # Errors
+/// When the sheet's cuts and readings don't agree with its program.
+pub fn comb_readings(sheet: &Sheet) -> Result<Vec<CombReading>, Error> {
+    Ok(sheet_rows(sheet)?.1)
+}
+
 /// What calibration `cal` says an unknown is, on board `thickness_mm` thick: where the carriage
 /// puts each head's line on the registered corner, where each side of each slit lands on each
 /// face (`compiler::HeadCut::sides`), and how far a cut starts early and stops short on the

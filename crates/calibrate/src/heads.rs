@@ -12,17 +12,15 @@
 
 use std::collections::HashMap;
 
-use program::{Board, Clamp, ClampSide, Cut, Head, Material, Op, Program};
+use program::Head;
 use serde_json::{Value, json};
 
 use crate::fit::{Face, Fit, Unknown, known, predict};
 use crate::key::{Axis, BladeValue, Key, Surface};
-use crate::plan::{Plan, Reading, Routine, Step};
+use crate::plan::{Kind, Line, Plan, Reading, Routine, Step, Stock, program};
 use crate::proposal::{Change, Proposal, SUSPECT_T};
 use crate::{Calibration, Error, Sheet};
 
-/// The offcut, square, mm.
-const BOARD_MM: f64 = 150.0;
 /// The mount and the window, `[x0, y0, x1, y1]` on the board, mm.
 const MOUNT: [f64; 4] = [25.0, 25.0, 125.0, 125.0];
 const WINDOW: [f64; 4] = [50.0, 50.0, 100.0, 100.0];
@@ -32,40 +30,6 @@ const MARGIN_MM: f64 = 1.0;
 /// A reading this far from what's expected is asked about, mm: past a misread's scatter, short
 /// of a board not against the stops.
 const UNUSUAL_MM: f64 = 1.0;
-
-/// The board stage 1 is cut on.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Stock {
-    /// As measured with calipers, mm: the bevel's lean is its run across this.
-    pub thickness_mm: f64,
-    pub material: Material,
-}
-
-impl Stock {
-    /// Profile `id`'s board, as the calibration file has it.
-    ///
-    /// # Errors
-    /// When there's no such profile.
-    pub fn profile(cal: &Calibration, id: &str) -> Result<Stock, Error> {
-        Ok(Stock {
-            thickness_mm: cal.thickness(id)?,
-            material: cal.material(id)?,
-        })
-    }
-
-    /// An offcut `thickness_mm` thick, cut as calibration sheet 2 was.
-    pub fn offcut(thickness_mm: f64) -> Stock {
-        Stock {
-            thickness_mm,
-            material: Material {
-                name: "Stage 1 offcut".to_owned(),
-                speed_pct: 95.0,
-                head_settle_ms: 250,
-                blade_angle_offset_deg: program::BladeOffsets::default(),
-            },
-        }
-    }
-}
 
 /// A side of a cut a reading is taken from: the cut, whether the piece is on its right as it
 /// travels, and the board's side up.
@@ -272,15 +236,6 @@ fn specs() -> Vec<Spec> {
     ]
 }
 
-/// A cut on the board, its line from `a` to `b`, mm.
-struct Line {
-    id: &'static str,
-    label: &'static str,
-    head: Head,
-    a: [f64; 2],
-    b: [f64; 2],
-}
-
 /// The window clockwise, then the outline anticlockwise, each line on its design and run on
 /// past its corners by the calibration's run-ons on this board, and [`MARGIN_MM`] more.
 fn lines(cal: &Calibration, thickness_mm: f64) -> Vec<Line> {
@@ -288,9 +243,9 @@ fn lines(cal: &Calibration, thickness_mm: f64) -> Vec<Line> {
     let ends = |h: Head| blade.head(h).run_on(thickness_mm).map(|r| r + MARGIN_MM);
     let ([s, e], b) = (ends(Head::Bevel), Head::Bevel);
     let [x0, y0, x1, y1] = WINDOW;
-    let line = |id, label, head, a, b| Line {
-        id,
-        label,
+    let line = |id: &str, label: &str, head, a, b| Line {
+        id: id.to_owned(),
+        label: label.to_owned(),
         head,
         a,
         b,
@@ -380,43 +335,6 @@ fn readings_json(lines: &[Line], expected: &HashMap<String, f64>) -> Vec<Value> 
         .collect()
 }
 
-fn program(lines: &[Line], stock: &Stock, readings: Vec<Value>) -> Program {
-    let mut ops = vec![Op::Clamp(Clamp {
-        id: None,
-        label: None,
-        side: ClampSide::Left,
-        turned: Vec::new(),
-    })];
-    ops.extend(lines.iter().map(|l| {
-        Op::Cut(Cut {
-            id: Some(l.id.to_owned()),
-            label: Some(l.label.to_owned()),
-            head: l.head,
-            path_mm: vec![l.a, l.b],
-            speed_pct: None,
-        })
-    }));
-    Program {
-        format: program::FORMAT.to_owned(),
-        version: program::VERSION,
-        id: "stage_1".to_owned(),
-        meta: Some(json!({
-            "source": "calibrate::heads: stage 1 of the 601's calibration (CALIBRATION.md §5)",
-            "calibration": {
-                "version": 2, "frame": "board", "routine": Routine::Heads.name(),
-                "readings": readings,
-            },
-        })),
-        board: Board {
-            width_mm: BOARD_MM,
-            height_mm: BOARD_MM,
-            thickness_mm: stock.thickness_mm,
-        },
-        material: stock.material.clone(),
-        ops,
-    }
-}
-
 /// Where an edge lies on the board, by the calibration, mm along `axis`.
 fn edge_at(lines: &[Line], e: Edge, axis: Axis, cal: &Calibration, thickness_mm: f64) -> f64 {
     let Some(l) = lines.iter().find(|l| l.id == e.cut) else {
@@ -444,13 +362,12 @@ fn edge_at(lines: &[Line], e: Edge, axis: Axis, cal: &Calibration, thickness_mm:
 /// # Errors
 /// When the board isn't one stage 1 can be cut on, or the program doesn't fit the machine.
 pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
+    stock.check()?;
     let t = stock.thickness_mm;
-    if !(0.5..=6.0).contains(&t) {
-        return Err(format!("stage 1 needs a board 0.5 to 6 mm thick, not {t} mm").into());
-    }
     let cut_with = cal.machine();
     let lines = lines(cal, t);
-    let unplaced = program(&lines, stock, readings_json(&lines, &HashMap::new()));
+    let program = |readings| program("stage_1", Routine::Heads, stock, &lines, readings);
+    let unplaced = program(readings_json(&lines, &HashMap::new()));
     let sheet = Sheet::lowered("stage 1", unplaced, &cut_with, HashMap::new())?;
     let expected = predict(&sheet, cal)?;
     let readings: Vec<Reading> = specs()
@@ -475,8 +392,10 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
                 id: s.id.to_owned(),
                 prompt: s.prompt.to_owned(),
                 surface,
-                expected_mm: expected.get(s.id).copied().unwrap_or(f64::NAN),
-                unusual_mm: UNUSUAL_MM,
+                kind: Kind::Length {
+                    expected_mm: expected.get(s.id).copied().unwrap_or(f64::NAN),
+                    unusual_mm: UNUSUAL_MM,
+                },
                 dimension: [point(from), point(to)],
             }
         })
@@ -495,11 +414,8 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
         .collect();
     Ok(Plan {
         routine: Routine::Heads,
-        board: format!(
-            "An offcut at least {BOARD_MM:.0} × {BOARD_MM:.0} mm, {t} mm thick as measured with \
-             calipers, face down into the front-left stops"
-        ),
-        program: program(&lines, stock, readings_json(&lines, &expected)),
+        board: stock.need(),
+        program: program(readings_json(&lines, &expected)),
         cut_with,
         steps,
         readings,
@@ -591,9 +507,11 @@ mod tests {
     fn the_plan_cuts_clear_of_the_pads_and_lowers() {
         let p = default_plan();
         machine::lower(&p.program, &p.cut_with).expect("lowers");
-        let pads = p.cut_with.pads_on(BOARD_MM, BOARD_MM);
+        let pads = p
+            .cut_with
+            .pads_on(crate::plan::OFFCUT_MM, crate::plan::OFFCUT_MM);
         for op in &p.program.ops {
-            if let Op::Cut(c) = op {
+            if let program::Op::Cut(c) = op {
                 let hit: Vec<&str> = pads
                     .iter()
                     .filter(|pad| pad.hit(c.path_mm[0], c.path_mm[1]))
@@ -645,7 +563,7 @@ mod tests {
     #[test]
     fn the_expected_readings_are_the_designs_with_the_calibrations_edges() {
         let p = default_plan();
-        let e = |id: &str| p.reading(id).expect(id).expected_mm;
+        let e = |id: &str| p.reading(id).and_then(Reading::expected_mm).expect(id);
         let (back, face) = (0.4525, 2.1625);
         // To the motor step the cuts are rounded to, 0.025 mm, as lowering sends them.
         let close = |a: f64, b: f64| (a - b).abs() < 0.026;
@@ -672,12 +590,8 @@ mod tests {
         for r in &p.readings {
             let [a, b] = r.dimension;
             let span = (b[0] - a[0]).abs() + (b[1] - a[1]).abs();
-            assert!(
-                close(span, r.expected_mm),
-                "{}: {span} against {}",
-                r.id,
-                r.expected_mm
-            );
+            let want = r.expected_mm().expect("a length");
+            assert!(close(span, want), "{}: {span} against {want}", r.id);
         }
         assert_eq!(
             p.check("W.width", 50.9).expect("a length"),

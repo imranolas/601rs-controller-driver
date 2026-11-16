@@ -55,8 +55,9 @@ impl HeadCut {
         [middle + self.width_mm / 2.0, middle - self.width_mm / 2.0]
     }
 
-    /// How far the slit's farther side lies from the line, `depth_mm` below the back, mm.
-    fn farthest(&self, depth_mm: f64) -> f64 {
+    /// How far the slit's farther side lies from the line, `depth_mm` below the back, mm: where
+    /// a cut at a square corner must reach to meet it.
+    pub fn farthest(&self, depth_mm: f64) -> f64 {
         let [left, right] = self.sides(depth_mm);
         left.abs().max(right.abs())
     }

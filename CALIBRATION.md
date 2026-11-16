@@ -337,7 +337,13 @@ and doesn't drift; and the **scale**, GMC's 40 steps/mm, which its captures matc
   cutting: whether a corner comes free varies with the board's fibres and the blade's edge by
   about 0.1–0.2 mm, so finer teeth read erratically, and the margin above the threshold covers
   it. **Built after the bevel's soft start and the oval entry wait** (§9): how a cut starts
-  changes its start.
+  changes its start. *Built, 16 Nov* (`calibrate::runons`, `mc601 calibrate runons`): the
+  proposal takes, for each head and end, the run-on of the longest first-freeing tooth over
+  the two directions (the run-on that freed the corner both ways), and writes the face's lead
+  or shortfall so that the compiler's run-on on this board is exactly that; the back's too,
+  only where calibration 1 had it freeing later. No margin is added: the freeing tooth is up
+  to a step past the threshold already. Teeth two or more apart between the directions are
+  noted.
 - **Calibration sheet 2** stays in the golden tests, as the record.
 - **Ovals: later.** GMC's overlaps and run-outs serve until a shop complaint about joins.
 - **Hooks: later.** A hook is a curve at the start of a cut, more common on the bevel head.
@@ -353,11 +359,11 @@ board, and to fit the envelope with the default calibration and with plausible e
 *Stage 1 built, 16 Nov (§10, step 7): `calibrate::plan`, `calibrate::heads`.*
 
 ```rust
-pub enum Routine { Heads }          // stage 1; stage 2's combs (RunOns) come with step 7's rest
+pub enum Routine { Heads, RunOns }  // stage 1, stage 2
 
-// calibrate::heads
 pub struct Stock { pub thickness_mm: f64, pub material: Material }   // Stock::profile, ::offcut
-pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error>;
+pub fn heads::plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error>;
+pub fn runons::plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error>;
 
 pub struct Plan {
     pub routine: Routine,
@@ -380,9 +386,18 @@ pub struct Reading {
     pub id: String,                // "W.width"
     pub prompt: String,            // "The window, left to right (inside jaws)"
     pub surface: Surface,          // the side up as it is read: Back | Face
-    pub expected_mm: f64,          // by the calibration the plan was made with
-    pub unusual_mm: f64,           // further than this from expected: ask before keeping it
-    pub dimension: [[f64; 2]; 2],  // where it is taken, board frame: one edge to the other
+    pub kind: Kind,
+    pub dimension: [[f64; 2]; 2],  // where it is taken, board frame: one edge to the other;
+                                   // for a comb, its reference
+}
+
+pub enum Kind {
+    /// By calipers. Expected: by the calibration the plan was made with; further than
+    /// `unusual_mm` from it, ask before keeping it.
+    Length { expected_mm: f64, unusual_mm: f64 },
+    /// A comb's first tooth to come free, by flexing the board: 1 to `teeth`, 0 for none;
+    /// its teeth are the program's cuts `cuts`, tooth 1 first.
+    Tooth { teeth: usize, cuts: Vec<String> },
 }
 
 impl Plan {
@@ -392,8 +407,8 @@ impl Plan {
 ```
 
 The drawing is the program's cuts and each reading's dimension, all geometry from the driver, so
-Bevel only draws them (Bevel's rule: the front end does no geometry). Stage 2 will add picks (a
-comb's first tooth to come free, by eye), with their places in the drawing.
+Bevel only draws them (Bevel's rule: the front end does no geometry). A comb's teeth are named
+cuts of the program, so the drawing can mark each one.
 
 **JSON, one reading:**
 
@@ -426,9 +441,13 @@ about the model. An unknown the readings don't settle is reported as such and le
 - **Picks become values with an uncertainty.** In a comb (§5), the first tooth to come free
   gives an interval for the run-on that frees that corner on both faces: past the tooth
   before, up to this one. With each face's corner where stage 1 puts it, that is the head's
-  reach on each face within half a step: the limiting face exactly, the other as a bound. A
-  comb whose first tooth already comes free, or whose last doesn't, missed: the proposal says
-  so and plans one shifted next time.
+  reach on each face within a step: the limiting face exactly, the other as a bound. *Built:*
+  the value is the freeing tooth's run-on, and its standard error the step below it ÷ √12 (as
+  likely anywhere in it), so a value a tooth away has moved and one on the same tooth is
+  within the noise. A comb whose first tooth already comes free, or whose last doesn't,
+  missed: the proposal says so, with no standard error, and proposes the shortest tooth (it
+  freed) or the middle of a comb past the longest (2.4 mm on), so the next stage 2, centred
+  on the file, is shifted.
 - **The solve is an SVD** (`nalgebra`, built at step 3), not the normal equations. It says
   which unknowns the readings fix each on its own; unknowns seen only as a sum or a difference
   are reported tied (`Fit::tied`), never one of them fixed at the sum's value, as the normal
@@ -644,8 +663,11 @@ Each step passes `cargo test` and stops for review.
    `mc601 calibrate heads --thickness MM` cuts it and offers its readings, and `mc601
    calibrate read` fits them and offers the proposal, written as one revision if the operator
    says so. `mc601 calibrate cut` and `calibrate sheet`, which cut calibration sheet 2, are
-   gone; the record still fits with `calibrate fit`. Still to come: stage 2's plan, the
-   `Session` type, pooling and each change's effect in words.
+   gone; the record still fits with `calibrate fit`. *Stage 2 built, 16 Nov:*
+   `calibrate::runons` (plan, propose, `simulate`), `mc601 calibrate runons`; its 64 cuts run
+   on the simulator as lowering says, and the combs a machine would free give its run-ons back
+   within a tooth, never short. Still to come: the `Session` type, pooling and each change's
+   effect in words.
 8. **The runner:** `set_profile`.
 9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
 
