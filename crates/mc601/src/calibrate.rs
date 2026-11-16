@@ -513,6 +513,9 @@ fn proposal_text(p: &Proposal) -> String {
             c.unit,
             verdict_word(c.verdict)
         );
+        if !c.effect.is_empty() && matches!(c.verdict, Verdict::Moved | Verdict::Large) {
+            let _ = writeln!(o, "      {}", paint(DIM, &c.effect));
+        }
     }
     for n in &p.notes {
         let _ = writeln!(o, "  {}", paint(DIM, n));

@@ -490,6 +490,7 @@ pub fn propose(fit: &Fit, cal: &Calibration, thickness_mm: f64) -> Proposal {
         suspects: fit.suspects(SUSPECT_T).into_iter().cloned().collect(),
         notes,
     }
+    .with_effects(cal, thickness_mm)
 }
 
 #[cfg(test)]
@@ -666,6 +667,17 @@ mod tests {
         // board, among them.
         let moved = proposal.chosen();
         assert!(moved.contains(&key("blade.bevel.lean")), "{moved:?}");
+        // In words: the straight head's cuts land 0.2 mm right of where the file puts them.
+        let x = proposal
+            .changes
+            .iter()
+            .find(|c| c.key == key("machine.straight.offset.x"))
+            .expect("proposed");
+        assert!(
+            x.effect.contains("the straight head's cuts land 0.2") && x.effect.contains("right"),
+            "{}",
+            x.effect
+        );
         assert!(moved.contains(&key("machine.bevel.offset.x")), "{moved:?}");
     }
 

@@ -340,6 +340,7 @@ pub fn propose(combs: &[CombReading], cal: &Calibration, thickness_mm: f64) -> P
         suspects: Vec::new(),
         notes,
     }
+    .with_effects(cal, thickness_mm)
 }
 
 /// Each comb's first tooth to come free, if the corner frees at `need(head, at_start)` mm: the
@@ -481,6 +482,16 @@ mod tests {
             );
         }
         assert_eq!(applied.history()[0].routine.as_deref(), Some("runons"));
+        // In words: the bevel's cuts run on one tooth further at each corner.
+        let end = proposal
+            .changes
+            .iter()
+            .find(|c| c.key == key("blade.bevel.shortfall.face"))
+            .expect("proposed");
+        assert_eq!(
+            end.effect,
+            "On 1.5 mm board, the bevel head's cuts run on 0.30 mm further at each corner."
+        );
     }
 
     /// A comb whose teeth all fall short says so, and moves the next one past it.

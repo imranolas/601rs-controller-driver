@@ -166,7 +166,7 @@ pub struct Last {
 }
 
 /// Where a blade value lives in a head's tool model.
-fn blade_value(c: &mut HeadCut, value: BladeValue) -> &mut f64 {
+pub(crate) fn blade_value(c: &mut HeadCut, value: BladeValue) -> &mut f64 {
     let side = |s: Surface| usize::from(s == Surface::Face);
     match value {
         BladeValue::Sideways => &mut c.sideways_mm,

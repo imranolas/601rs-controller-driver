@@ -524,8 +524,11 @@ impl Proposal {
 }
 ```
 
-Each change's effect in words ("Windows move 0.21 mm to the right") and pooling sessions in a
-proposal are still to come.
+*Built since:* each change's effect in words (`Change::effect`, worked out on the board the
+routine was cut on, the run-ons by the compiler's own `run_on`); and, found by Bevel, a value
+that rounds to within half a step of the file's (a micrometre, a hundredth of a degree) is
+within the noise whatever its standard error, so readings that fit exactly don't call the
+bevel's 0.4525 moved to 0.453. Pooling sessions in a proposal is still to come.
 
 **Tests.** The fits of `testdata/calibration` (calibration 1 and 2, cut raw, from their logs)
 must give today's numbers. For each routine, a known "true" calibration with errors goes through
@@ -682,7 +685,10 @@ Each step passes `cargo test` and stops for review.
    come: each change's effect in words, and pooling in a proposal.
 8. **The runner:** `set_profile`. *Built, 16 Nov:* on the simulator, the run after it sends
    exactly what the new profile lowers to, homing kept, nothing written to the controller.
-9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
+9. **A request to Bevel**, written there by Bevel's own process: what §9 lists. *Drafted, 16
+   Nov, for Bevel's process to take up (not kept here):* answering Bevel's
+   `docs/driver-requests.md` (`set_profile`; a finely held value no longer called moved by
+   rounding) and listing what's new for its CALIBRATE.md and what §9 asks of it.
 
 Ovals and hooks wait (§5).
 
