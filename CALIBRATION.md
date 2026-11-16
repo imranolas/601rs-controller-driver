@@ -593,7 +593,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 | new crate `calibrate` | The file (§4), the routines and plans (§5, §6), the fit, sessions and apply (§7, §8). Pure. Depends on `compiler`, `machine` and `program`, so it sits beside `nest` in the README's table. It replaces the planned `profile` crate: a profile's values are its file's. |
 | `compiler` | *Built, 16 Nov:* `HeadCut` is a head's tool model (§3); `compile` takes a `Blade` (both heads) from `Calibration::blade` and a `Profile` from `machine`, and works out lines and run-ons for the board's thickness. `Blade::fitted()` stays as the default model, `Blade::gmc()` as GMC's for the golden tests. |
 | `machine` | `Profile::gunnar_601()` keeps the shop's fitted numbers as the defaults (decided, §11). Each fitted value names the record it came from, as it does now. |
-| `runner` | `Runner::set_profile(profile)` between jobs (busy otherwise), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ. |
+| `runner` | *Built, 16 Nov:* `Runner::set_profile(profile)` between jobs (a run holds the runner, so nothing runs meanwhile), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ; a calibration never changes them. |
 | `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply; `heads` built, 16 Nov); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
 
 **In Bevel** (for Bevel's own spec; the driver is designed to make it possible):
@@ -668,7 +668,8 @@ Each step passes `cargo test` and stops for review.
    on the simulator as lowering says, and the combs a machine would free give its run-ons back
    within a tooth, never short. Still to come: the `Session` type, pooling and each change's
    effect in words.
-8. **The runner:** `set_profile`.
+8. **The runner:** `set_profile`. *Built, 16 Nov:* on the simulator, the run after it sends
+   exactly what the new profile lowers to, homing kept, nothing written to the controller.
 9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
 
 Ovals and hooks wait (§5).

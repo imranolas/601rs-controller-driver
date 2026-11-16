@@ -190,6 +190,26 @@ impl Runner {
         &self.profile
     }
 
+    /// Take a new machine profile between runs, without reconnecting: a calibration revision
+    /// applied while the machine is on (CALIBRATION.md §9). Homing stays: a profile changes the
+    /// arithmetic that places a cut, not where the carriage is. If the controller settings it
+    /// implies differ ([`Profile::controller_settings`]; a calibration never changes them), they
+    /// are written as [`configure`](Runner::configure) does, and what was written is returned.
+    /// Nothing can run meanwhile: a run holds the runner.
+    ///
+    /// # Errors
+    /// As [`configure`](Runner::configure); the new profile is kept, as it is after a failed
+    /// configuration at the start.
+    pub fn set_profile(&mut self, profile: Profile) -> Result<Vec<Setting>, Error> {
+        let settings_differ = profile.controller_settings() != self.profile.controller_settings();
+        self.profile = profile;
+        if settings_differ {
+            self.configure()
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     /// Whether the machine must be homed before it moves: after a stop (even one made while
     /// nothing ran) or a failure, or if the controller doesn't know its position.
     pub fn needs_homing(&mut self) -> Result<bool, Error> {

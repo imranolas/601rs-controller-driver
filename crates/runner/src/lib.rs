@@ -7,6 +7,8 @@
 //! [`configure`](Runner::configure) the controller as the machine profile needs,
 //! [`home`](Runner::home), [`park`](Runner::park), [`clamp`](Runner::clamp), or
 //! [`run`](Runner::run) a program, reporting [`Event`]s and taking [`Request`]s between cuts.
+//! Between runs it takes a new machine profile ([`set_profile`](Runner::set_profile)): a
+//! calibration applied while the machine stays connected and homed.
 //! Its [`stop_handle`](Runner::stop_handle) stops the machine at once from any thread. The
 //! station runs it on a thread of its own. `tests/runner.rs` drives it against the simulator.
 //!

@@ -184,6 +184,41 @@ fn gmcs_job_runs_to_the_park() {
     assert_eq!(vectors(&sim) - homing, sent);
 }
 
+/// A calibration applied between runs: the next run is placed by the new profile, without
+/// reconnecting or homing again, and nothing is written to the controller.
+#[test]
+fn a_new_profile_between_runs_places_the_next_run_and_keeps_homing() {
+    let (mut r, sim) = ready();
+    let mut calibrated = Profile::gunnar_601();
+    calibrated.straight.offset_mm[0] += 0.2;
+    calibrated.bevel.offset_mm[1] -= 0.1;
+    assert_eq!(
+        r.set_profile(calibrated.clone()).expect("taken"),
+        Vec::new()
+    );
+    assert!(!r.needs_homing().expect("reads"), "homing kept");
+    assert_eq!(r.profile(), &calibrated);
+    let program = fixture("g_multi_C10");
+    let before = sim.received().len();
+    let (result, _) = run_with(&mut r, &program, |_, _| {});
+    assert_eq!(result.expect("runs"), Outcome::Finished);
+    let sent: Vec<String> = sim.received()[before..]
+        .iter()
+        .filter(|l| l.starts_with('L'))
+        .cloned()
+        .collect();
+    let lowered = |p: &Profile| -> Vec<String> {
+        machine::lower(&program, p)
+            .expect("lowers")
+            .commands()
+            .filter(|c| matches!(c, protocol::Command::Vector { .. }))
+            .map(ToString::to_string)
+            .collect()
+    };
+    assert_eq!(sent, lowered(&calibrated));
+    assert_ne!(sent, lowered(&Profile::gunnar_601()));
+}
+
 #[test]
 fn pause_resume_and_cancel_between_cuts() {
     let (mut r, sim) = ready();
