@@ -136,13 +136,18 @@ struct CheckArgs {
 
 #[derive(Subcommand)]
 enum CalibrateCommand {
-    /// Cut the machine-and-head sheet raw, take its readings and fit them
+    /// Stage 1, the heads: cut a mount and window on an offcut, take 16 readings, fit them, and
+    /// offer the changes to the calibration file
     #[command(
-        after_help = "The sheet needs a 1.5 mm offcut of at least 140 × 105 mm in the front-left \
-                            corner. What to measure: testdata/calibration/calibration_2.html"
+        after_help = "The offcut: at least 150 × 150 mm, face down into the front-left \
+                            stops; 1.2 to 2 mm board is best. Measure its thickness with calipers \
+                            first.\n\nExamples:\n  mc601 calibrate heads --thickness 1.42\n  \
+                            mc601 calibrate heads --profile C2\n  \
+                            mc601 calibrate heads --sim --thickness 1.5"
     )]
-    Cut(MachineArgs),
-    /// Take a calibration session's readings, then fit them [default: the latest session]
+    Heads(HeadsArgs),
+    /// Take a calibration session's readings, then fit them, and for stage 1 offer the changes
+    /// [default: the latest session]
     Read {
         /// The session folder
         session: Option<PathBuf>,
@@ -155,11 +160,19 @@ enum CalibrateCommand {
                             calibration_1.readings.txt"
     )]
     Fit(FitArgs),
-    /// Write the sheet's program to a file, to look at or cut with `mc601 run`
-    Sheet {
-        /// Where to write it
-        out: PathBuf,
-    },
+}
+
+#[derive(Args)]
+struct HeadsArgs {
+    #[command(flatten)]
+    machine: MachineArgs,
+    /// The offcut's thickness, mm, as measured with calipers [default: its profile's]
+    #[arg(long, value_name = "MM")]
+    thickness: Option<f64>,
+    /// The board profile it is cut from, in the calibration file: its speed and settle, and
+    /// its thickness unless given
+    #[arg(long, value_name = "ID")]
+    profile: Option<String>,
 }
 
 #[derive(Args)]
@@ -376,10 +389,11 @@ fn finish(session: &Session, r: Res<bool>) -> Res<bool> {
 
 fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
     match c {
-        CalibrateCommand::Cut(m) => {
-            let (port, session) = open_session("calibrate", "calibration_2", &m, false)?;
-            require_terminal(&port, "calibrate cut")?;
-            finish(&session, calibrate::cut(&port, &session))
+        CalibrateCommand::Heads(h) => {
+            let stock = calibrate::stock(h.profile.as_deref(), h.thickness)?;
+            let (port, session) = open_session("calibrate", "stage_1", &h.machine, false)?;
+            require_terminal(&port, "calibrate heads")?;
+            finish(&session, calibrate::heads(&port, &session, &stock))
         }
         CalibrateCommand::Read { session } => {
             let data = Config::load()?.data_dir();
@@ -408,7 +422,6 @@ fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
             }
             calibrate::fit(&dirs, &triples, f.profile.as_deref())
         }
-        CalibrateCommand::Sheet { out } => calibrate::sheet(&out),
     }
 }
 

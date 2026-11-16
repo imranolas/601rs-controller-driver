@@ -76,25 +76,29 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 
 ## Calibrating the heads
 
-Once per blade or holder change, cut the machine-and-head sheet raw: no profile, offset or trim
-is applied, so nothing it measures inherits an earlier estimate. The layout and what to measure
-are in `testdata/calibration/calibration_2.html`.
+Stage 1 (CALIBRATION.md §5), on a new machine or after a knock or head service: a 100 mm mount
+with a 50 mm bevel window on a 150 × 150 mm offcut, and 16 caliper readings. It sets each head's
+position, the straight slit's offset and width, and the bevel's offset and lean, in the
+calibration file `mc601` shares with Bevel.
 
 ```sh
-mc601 calibrate cut          # write the sheet, cut it raw, then take its readings and fit them
-mc601 calibrate read         # take (or correct) the latest session's readings later
-mc601 calibrate fit --all    # fit every calibration session that has readings, together
+mc601 calibrate heads --thickness 1.42   # plan, cut, then take its readings, fit, offer the changes
+mc601 calibrate read                     # take (or correct) the latest session's readings later
+mc601 calibration history                # what was written, when, by which session
 ```
 
-- Offcut 140 × 105 mm or larger, 1.5 mm, in the front-left corner against the left clamp.
-- After the cut, `mc601` asks for each reading in turn: what to measure, on which face, and
-  roughly what to expect. A value far from that is questioned before it is kept. Comb answers
-  are tooth numbers (0 if none reached). Each value is saved as it is typed, so stopping early
-  loses nothing; `calibrate read` shows the saved values and Enter keeps them.
-- The fit reads each cut's exact carriage steps from the run log, so the profile current at the
-  time doesn't matter. Its report and a profile with the fitted head offsets
-  (`fit.txt`, `profile.json`) go into the session. Change the profile only where the fit says
-  a value has moved (more than twice its uncertainty).
-- A sheet kept outside the data folder fits too: `mc601 calibrate fit --sheet PROGRAM LOG
-  READINGS` (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`,
-  `.readings.txt`), alone or with sessions.
+- An offcut at least 150 × 150 mm, 1.2 to 2 mm board best, face down into the front-left stops.
+  Measure its thickness with calipers first: the bevel's lean is its run across it.
+  `--profile ID` cuts at a profile's speed and settle, and takes its thickness unless given.
+- After the cut, `mc601` asks for each reading in turn, grouped by how the pieces are held: what
+  to measure, on which face, and what the calibration expects. A value more than 1 mm from that
+  is questioned before it is kept. Each value is saved as it is typed, so stopping early loses
+  nothing; `calibrate read` shows the saved values and Enter keeps them.
+- Where the cuts went comes from lowering the session's plan again with the profile it was cut
+  with, so no log is needed. The fit, and what it proposes for each value (before → after ± its
+  uncertainty: moved, within its noise, or large), go into the session's `fit.txt`. Moved values
+  are written as one revision if you say so; large ones only if you confirm them; nothing while
+  a reading is suspect (measure it again). `mc601 calibration revert N` undoes it.
+- The record's raw sheets still fit: `mc601 calibrate fit --sheet PROGRAM LOG READINGS`
+  (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`, `.readings.txt`), and
+  `mc601 calibrate fit --all` pools sessions.

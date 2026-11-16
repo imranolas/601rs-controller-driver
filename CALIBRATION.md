@@ -350,61 +350,57 @@ board, and to fit the envelope with the default calibration and with plausible e
 
 ## 6. A routine as data: the plan
 
+*Stage 1 built, 16 Nov (§10, step 7): `calibrate::plan`, `calibrate::heads`.*
+
 ```rust
-pub enum Routine { Heads, RunOns }   // stage 1, stage 2
+pub enum Routine { Heads }          // stage 1; stage 2's combs (RunOns) come with step 7's rest
 
-/// What the overview lists: title, scope, why and when, minutes, the board it needs.
-pub fn routines() -> Vec<RoutineInfo>;
-
-/// The plan for a routine, on this profile's board, with this calibration.
-pub fn plan(routine: Routine, cal: &Calibration, profile: &str) -> Result<Plan, Error>;
+// calibrate::heads
+pub struct Stock { pub thickness_mm: f64, pub material: Material }   // Stock::profile, ::offcut
+pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error>;
 
 pub struct Plan {
     pub routine: Routine,
-    pub profile: String,
-    pub board: BoardNeed,          // least size, thickness range, which profile; in words too
-    pub program: Program,          // board frame; cut as any program (station.run)
-    pub drawing: Drawing,          // the sheet as it will lie: pieces, cuts, labels
-    pub steps: Vec<MeasureStep>,   // the readings, grouped by how the board is held
+    pub board: String,             // the board it needs, in words
+    pub program: Program,          // board frame, cut as any program; lists its readings in
+                                   // meta.calibration.readings, which the fit reads
+    pub cut_with: machine::Profile,// the calibration's machine it was placed with: lowering
+                                   // the program with it gives where the carriage went
+    pub steps: Vec<Step>,          // the readings, grouped by how the pieces are held
     pub readings: Vec<Reading>,
 }
 
-pub struct MeasureStep {
-    pub instruction: String,       // "Leave the sheet face down." "Push out the drop-out, face up."
+pub struct Step {
+    pub instruction: String,       // "Lift the mount out of the frame, push the window's drop-out
+                                   //  out of it, and lay the mount back up, as it lay on the machine."
     pub readings: Vec<String>,     // reading ids, in order
 }
 
 pub struct Reading {
     pub id: String,                // "W.width"
-    pub prompt: String,            // "The window, left to right, on the back"
-    pub kind: ReadingKind,
-    pub tool: Tool,                // Calipers | Rule | Eye
-    pub face: Face,                // Back (as cut, face down) | Face (turned over)
-    pub piece: String,             // which piece to hold: "the sheet", "the drop-out", "strip SL"
-    pub needs_ops: Vec<usize>,     // the program's ops it depends on (for a stopped run)
-    pub dimension: Option<Dimension>, // where to draw it: two points and an axis, board frame
+    pub prompt: String,            // "The window, left to right (inside jaws)"
+    pub surface: Surface,          // the side up as it is read: Back | Face
+    pub expected_mm: f64,          // by the calibration the plan was made with
+    pub unusual_mm: f64,           // further than this from expected: ask before keeping it
+    pub dimension: [[f64; 2]; 2],  // where it is taken, board frame: one edge to the other
 }
 
-pub enum ReadingKind {
-    /// mm. Expected: the current calibration's prediction. Beyond `unusual_mm` from it, ask.
-    Length { expected_mm: f64, unusual_mm: f64 },
-    /// One of several, by eye: a comb's first tooth to come free, or sheets cut through.
-    /// `none` allowed where it means something ("none came free").
-    Pick { options: Vec<PickOption>, none: Option<String> },
+impl Plan {
+    pub fn check(&self, id: &str, value: f64) -> Result<Check, Error>;  // Fine | Unusual { off_mm }
+    pub fn sheet(&self, label, readings) -> Result<Sheet, Error>;      // lowered with cut_with
 }
 ```
 
-The drawing and each reading's dimension are geometry from the driver, so Bevel only draws them
-(Bevel's rule: the front end does no geometry). A pick's options carry their places in the
-drawing too: tooth 3 is the third of its comb.
+The drawing is the program's cuts and each reading's dimension, all geometry from the driver, so
+Bevel only draws them (Bevel's rule: the front end does no geometry). Stage 2 will add picks (a
+comb's first tooth to come free, by eye), with their places in the drawing.
 
 **JSON, one reading:**
 
 ```jsonc
-{ "id": "W.width", "prompt": "The window, left to right, on the back",
-  "kind": { "length": { "expected_mm": 25.91, "unusual_mm": 1.5 } },
-  "tool": "calipers", "face": "back", "piece": "the sheet", "needs_ops": [1, 2, 3, 4],
-  "dimension": { "from": [67.55, 40.5], "to": [93.45, 40.5], "axis": "x" } }
+{ "id": "W.width", "prompt": "The window, left to right (inside jaws)", "surface": "back",
+  "expected_mm": 50.905, "unusual_mm": 1.0,
+  "dimension": [[49.5475, 62.0], [100.4525, 62.0]] }
 ```
 
 ## 7. The fit
@@ -446,7 +442,9 @@ about the model. An unknown the readings don't settle is reported as such and le
   what leaving a reading out costs (`cargo run -p calibrate --example readings`).
 - **Suspects.** After the fit, each reading's residual in units of what it should scatter,
   judged by the other readings and allowing for how much it decides alone (externally
-  studentised, `Leftover::t`). Beyond 3.5 it is named: "measure W.width again". A reading
+  studentised, `Leftover::t`). Beyond 3.5, and off by at least 0.02 mm (`MISREAD_MM`, about
+  what calipers resolve on a cut edge, so readings that fit almost exactly don't make a
+  rounding error a misread), it is named: "measure W.width again". A reading
   that is an unknown's only witness has no `t`: nothing can check it, and the plan should say
   so. (Judged by a scatter it is part of, a misread would hide: that measure can't pass √dof,
   under 3 on most sheets.)
@@ -460,50 +458,74 @@ about the model. An unknown the readings don't settle is reported as such and le
   offsets to ±0.114 mm: four readings, not eleven, would serve a quick check.
 - **Verdicts.** Each change is *within the noise* (|Δ| ≤ 2 se: the value is kept unless chosen),
   *moved* (proposed), or *large* (beyond a plausible bound, which needs confirming). The bounds
-  start at: head offset 1 mm, scale 0.5 %, edge 0.5 mm, run-on 1.5 mm. A
-  large change is more likely a mistake in loading or reading than a fact about the machine.
+  start at: head offset 1 mm, a slit's offset or width 0.5 mm, the lean 5°, a lead or shortfall
+  1.5 mm. A large change is more likely a mistake in loading or reading than a fact about the
+  machine.
 - **Pooling.** `fit` takes several sessions of one routine and profile, as `fit --all` does now.
   The fit is in absolute terms, so earlier sheets still count. Pooling is always on offer. It is
   never automatic, because a blade change in between makes it wrong.
 
-```rust
-/// The value each reading should show, by this calibration: the expected values, and the
-/// synthetic readings the tests fit.
-pub fn predict(plan: &Plan, cal: &Calibration) -> BTreeMap<String, f64>;
+*Built for stage 1, 16 Nov:*
 
-/// Fit one or more sessions of the same routine and profile.
-pub fn fit(sessions: &[Session], cal: &Calibration) -> Result<Proposal, Error>;
+```rust
+/// What a calibration says each unknown is, and so what each reading should show: a plan's
+/// expected values, and the synthetic readings the tests fit.
+pub fn known(u: Unknown, cal: &Calibration, thickness_mm: f64) -> f64;
+pub fn predict(sheet: &Sheet, cal: &Calibration) -> Result<HashMap<String, f64>, Error>;
+
+/// Stage 1's fit as changes to the file: each head's offset, the straight slit's sideways
+/// offset and width, the bevel's sideways offset and lean (its width held: its two sides are
+/// read on different faces).
+pub fn heads::propose(fit: &Fit, cal: &Calibration, thickness_mm: f64) -> Proposal;
 
 pub struct Proposal {
+    pub routine: Routine,
     pub readings: usize,
-    pub unknowns: usize,
-    pub scatter_mm: Option<f64>,
+    pub scatter_mm: f64,              // NaN: none to spare
     pub changes: Vec<Change>,
-    pub suspects: Vec<Suspect>,       // reading id, how far off the model
-    pub notes: Vec<String>,           // "A bevel of 1.71 mm across 1.5 mm board, 48.7° from vertical."
+    pub suspects: Vec<Leftover>,      // worst first
+    pub notes: Vec<String>,           // "The bevel runs 1.71 mm across the 1.5 mm board: 48.7° ± 1.3°"
 }
 
 pub struct Change {
     pub key: Key,
-    pub label: String,                // "Bevel head, X"
+    pub label: String,                // "Bevel head, X offset"
+    pub unit: &'static str,
     pub before: f64,
-    pub after: f64,
+    pub after: Option<f64>,           // rounded to a micrometre, a hundredth of a degree
     pub se: Option<f64>,
     pub verdict: Verdict,             // WithinNoise | Moved | Large | Undetermined
-    pub effect: String,               // "Windows move 0.21 mm to the right."
 }
 
-/// The chosen changes as a new revision, with its history entry.
-pub fn apply(cal: &Calibration, p: &Proposal, chosen: &[Key], stamp: &Stamp)
-    -> Result<Calibration, Error>;
+impl Proposal {
+    pub fn chosen(&self) -> Vec<Key>;                                  // the moved values
+    /// The chosen changes as one revision, each with its standard error, the history naming
+    /// the routine.
+    pub fn apply(&self, cal: &Calibration, chosen: &[Key], why: &Why) -> Result<Calibration, Error>;
+}
 ```
+
+Each change's effect in words ("Windows move 0.21 mm to the right") and pooling sessions in a
+proposal are still to come.
 
 **Tests.** The fits of `testdata/calibration` (calibration 1 and 2, cut raw, from their logs)
 must give today's numbers. For each routine, a known "true" calibration with errors goes through
 `predict`, plus noise, and `fit` must recover it within its standard errors. A plan must fail
 loudly with a reading it doesn't list, a pick out of range, or a board of the wrong thickness.
+*Stage 1, 16 Nov:* a machine unlike the file is recovered within three standard errors, and the
+proposal applied makes the file say so; a reading misread by 0.5 mm is named; every expected
+reading is the design's with the calibration's edges, to the motor step; and in `mc601`, the
+plan runs on the simulator to the park, what went down the line is what lowering the plan
+gives, cut for cut, and readings read to a hundredth fit back to the machine they came from.
+Writing it found a fault older than stage 1: a width read across the two heads' cuts (a
+mount's border) was ordered by carriage position, where the heads are 78 mm apart, so the fit
+expected a border of −24.7 mm. Edges are now ordered as they lie on the board.
 
 ## 8. Sessions: cut, read, fit, apply
+
+*In `mc601`, 16 Nov:* a session folder holds the plan (`plan.json`), its program
+(`stage_1.json`), the run's log, the readings as typed (`readings.txt`), and the fit with its
+proposal (`fit.txt`). The `Session` type below, for Bevel, is still to come.
 
 A session is one run of a routine. It is serialisable, so Bevel can keep it as a file, resume
 it tomorrow, and fit it again later.
@@ -553,7 +575,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 | `compiler` | *Built, 16 Nov:* `HeadCut` is a head's tool model (§3); `compile` takes a `Blade` (both heads) from `Calibration::blade` and a `Profile` from `machine`, and works out lines and run-ons for the board's thickness. `Blade::fitted()` stays as the default model, `Blade::gmc()` as GMC's for the golden tests. |
 | `machine` | `Profile::gunnar_601()` keeps the shop's fitted numbers as the defaults (decided, §11). Each fitted value names the record it came from, as it does now. |
 | `runner` | `Runner::set_profile(profile)` between jobs (busy otherwise), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ. |
-| `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
+| `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply; `heads` built, 16 Nov); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
 
 **In Bevel** (for Bevel's own spec; the driver is designed to make it possible):
 
@@ -611,7 +633,13 @@ Each step passes `cargo test` and stops for review.
    the oval entry's short wait, each switchable, tried against GMC's on thick board.
 7. **Plans, sessions, proposals:** stage 1 and stage 2 (combs) as plans, with steps,
    drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, `apply`;
-   synthetic recovery tests; `mc601 calibrate` on the sim, end to end.
+   synthetic recovery tests; `mc601 calibrate` on the sim, end to end. *Stage 1 built, 16 Nov*
+   (§6, §7): `calibrate::heads` (plan, propose), `calibrate::plan`, `calibrate::proposal`;
+   `mc601 calibrate heads --thickness MM` cuts it and offers its readings, and `mc601
+   calibrate read` fits them and offers the proposal, written as one revision if the operator
+   says so. `mc601 calibrate cut` and `calibrate sheet`, which cut calibration sheet 2, are
+   gone; the record still fits with `calibrate fit`. Still to come: stage 2's plan, the
+   `Session` type, pooling and each change's effect in words.
 8. **The runner:** `set_profile`.
 9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
 

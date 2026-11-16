@@ -18,7 +18,8 @@ pub enum Axis {
 }
 
 /// A side of the board: the back, up, where the blade enters; the face, the customer's, down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Surface {
     Back,
     Face,

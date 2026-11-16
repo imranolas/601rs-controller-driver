@@ -6,8 +6,8 @@
 //! settle, path and head up in mode 2, cut after cut, the stream breaking only where a setting
 //! must change in mode 0 (the start speed `#S` between the heads). `--gmc` runs GMC's form.
 //!
-//! A calibration sheet (`meta.calibration.frame` = `carriage`, from `mc601 calibrate sheet`)
-//! is cut raw, with [`Profile::raw`]: its points are carriage positions, and no offset, trim or
+//! A calibration sheet in carriage coordinates (`meta.calibration.frame` = `carriage`: the
+//! record's, `testdata/calibration`) is cut raw, with [`Profile::raw`]: its points are carriage positions, and no offset, trim or
 //! clamp border of the profile is applied. It is first checked against the profile's clamp
 //! border and soft limits all the same, placed where the profile thinks the heads are.
 //!
@@ -388,7 +388,11 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
                 } else if has_readings(p) {
                     anstream::println!(
                         "{}",
-                        paint(DIM, "  simulator: nothing to measure, so no readings")
+                        paint(
+                            DIM,
+                            "  simulator: nothing was cut to measure; `mc601 calibrate read` \
+                             takes readings typed in, to try the fit"
+                        )
                     );
                 }
             }

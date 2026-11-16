@@ -49,7 +49,7 @@ pub fn describe() -> String {
     }
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
@@ -177,7 +177,7 @@ pub fn history() -> Res<bool> {
 }
 
 /// Write `next` over the file read as `was`, and say what changed.
-fn commit(was: &Calibration, next: &Calibration) -> Res<bool> {
+pub(crate) fn commit(was: &Calibration, next: &Calibration) -> Res<bool> {
     if next.revision() == was.revision() {
         println!("nothing changes");
         return Ok(true);

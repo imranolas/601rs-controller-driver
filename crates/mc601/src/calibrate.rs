@@ -1,71 +1,97 @@
-//! `mc601 calibrate`: the machine-and-head calibration, from raw cuts, at the terminal. The
-//! sheet, where its cuts went and the fit are the `calibrate` crate's; this keeps the session
-//! folders, takes the readings and prints the fit.
+//! `mc601 calibrate`: calibrating the heads at the terminal (CALIBRATION.md §5). The plan,
+//! where its cuts went, the fit and the proposal are the `calibrate` crate's; this keeps the
+//! session folders, takes the readings, prints the fit and writes what the operator accepts to
+//! the calibration file.
 //!
-//! - `sheet FILE` writes the calibration sheet (`testdata/calibration/calibration_2.json`): a
-//!   straight strip block, a bevel window and four overcut combs on a small offcut, in carriage
-//!   coordinates, cut raw by `mc601 run` ([`machine::Profile::raw`]).
-//! - `fit PROGRAM LOG READINGS [PROGRAM LOG READINGS ...]` reads each cut's carriage steps from
-//!   the run log (what was sent, whatever profile it was cut with) and the caliper readings, and
-//!   fits by least squares, pooling every sheet given. `--profile FILE` writes the profile with
-//!   the fitted head offsets.
-//!
-//! The model is in `calibrate::fit`.
+//! - `heads` is stage 1: its plan into a session folder, cut as any sheet, then its readings,
+//!   the fit, and the changes it proposes, applied if the operator says so.
+//! - `read` takes a session's readings (again, or the rest of them) and fits them.
+//! - `fit` pools sessions, and the record's sheets (calibrations 1 and 2, cut raw), reading each
+//!   cut's carriage steps from its run log.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ::calibrate::{CombReading, Face, Fit, SentCut, Sheet, Unknown, fit_sheets};
+use ::calibrate::heads::Stock;
+use ::calibrate::proposal::{Proposal, SUSPECT_T, Verdict};
+use ::calibrate::{
+    CombReading, Face, Fit, Plan, Routine, SentCut, Sheet, Unknown, Why, fit_sheets,
+};
 use link::Direction;
 use machine::Profile;
-use program::{Head, Op, Program};
+use program::{Head, Program};
 use serde_json::Value;
 
 use crate::config::tidy;
 use crate::operator::{NO_ANSWER, Operator};
 use crate::session::Session;
-use crate::style::{DIM, GOOD, WARN, paint};
+use crate::style::{BOLD, DIM, GOOD, WARN, paint};
 use crate::target::Res;
 
-// ------------------------------------------------------------------ the sheet
+// ------------------------------------------------------------------ stage 1
 
-/// `mc601 calibrate sheet`: the sheet's program, written to `out`.
-pub fn sheet(out: &Path) -> Res<bool> {
-    let program = ::calibrate::sheet::program(&crate::calibration::machine());
-    let text = serde_json::to_string_pretty(&program)? + "\n";
-    std::fs::write(out, text).map_err(|e| format!("{}: {e}", out.display()))?;
-    let cuts = program
-        .ops
-        .iter()
-        .filter(|o| matches!(o, Op::Cut(_)))
-        .count();
-    println!(
-        "{}: {cuts} cuts in carriage coordinates, cut raw by `mc601 run`",
-        out.display()
-    );
-    Ok(true)
-}
-
-/// The sheet's file name in a session.
-const SHEET_FILE: &str = "calibration_2.json";
+/// A session's plan, and stage 1's program in it.
+const PLAN_FILE: &str = "plan.json";
+const STAGE_1_FILE: &str = "stage_1.json";
 const READINGS_FILE: &str = "readings.txt";
 
-/// `mc601 calibrate cut`: write the sheet into the session, cut it raw, take its readings.
-pub fn cut(port: &str, session: &Session) -> Res<bool> {
-    let file = session.dir.join(SHEET_FILE);
-    let program = ::calibrate::sheet::program(&crate::calibration::machine());
-    std::fs::write(&file, serde_json::to_string_pretty(&program)? + "\n")
-        .map_err(|e| format!("{}: {e}", file.display()))?;
+fn write_json(path: &Path, value: &impl serde::Serialize) -> Res<()> {
+    std::fs::write(path, serde_json::to_string_pretty(value)? + "\n")
+        .map_err(|e| format!("{}: {e}", path.display()).into())
+}
+
+/// The board stage 1 is cut on: a profile's, or an offcut of the thickness given.
+pub fn stock(profile: Option<&str>, thickness: Option<f64>) -> Res<Stock> {
+    let cal = crate::calibration::current();
+    Ok(match (profile, thickness) {
+        (Some(id), t) => {
+            let mut s = Stock::profile(&cal, id)?;
+            if let Some(t) = t {
+                s.thickness_mm = t;
+            }
+            s
+        }
+        (None, Some(t)) => Stock::offcut(t),
+        (None, None) => {
+            return Err("give the offcut's thickness as measured with calipers \
+                        (--thickness MM), or its profile (--profile ID)"
+                .into());
+        }
+    })
+}
+
+/// `mc601 calibrate heads`: stage 1's plan into the session and cut; once it is cut, the run
+/// offers to take its readings (`cut::run`).
+pub fn heads(port: &str, session: &Session, stock: &Stock) -> Res<bool> {
+    let plan = ::calibrate::heads::plan(&crate::calibration::current(), stock)?;
+    let file = session.dir.join(STAGE_1_FILE);
+    write_json(&file, &plan.program)?;
+    write_json(&session.dir.join(PLAN_FILE), &plan)?;
     anstream::println!(
         "{}",
         paint(
             DIM,
-            "the machine-and-head sheet: a 1.5 mm offcut of at least 140 × 105 mm; what to \
-             measure: testdata/calibration/calibration_2.html"
+            format!(
+                "stage 1, the heads: {}. {} readings by calipers once it is cut.",
+                plan.board,
+                plan.readings.len()
+            )
         )
     );
     crate::cut::run(port, std::slice::from_ref(&file), session, false)
+}
+
+/// The session's plan, if it has one (stage 1 on).
+fn load_plan(dir: &Path) -> Res<Option<Plan>> {
+    let path = dir.join(PLAN_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", tidy(&path)))?;
+    Ok(Some(
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", tidy(&path)))?,
+    ))
 }
 
 // ------------------------------------------------------------------ the run log
@@ -207,28 +233,32 @@ fn face_note(m: &Value) -> &'static str {
         .iter()
         .map(|e| text_of(e, "face"))
         .collect();
+    // A straight cut's edge is the same on either face, so it doesn't decide.
+    let (back, face) = (
+        faces.iter().any(|f| f == "back"),
+        faces.iter().any(|f| f == "face"),
+    );
     if text_of(m, "kind") == "comb" {
         "by eye, face up"
-    } else if faces.iter().all(|f| f == "back") && !faces.is_empty() {
+    } else if back && !face {
         "on the back"
-    } else if faces.iter().all(|f| f == "face") && !faces.is_empty() {
+    } else if face && !back {
         "face up"
     } else {
         "either face"
     }
 }
 
-/// A reading this many of its own scatters off the model, judged by the rest, is likely a
-/// misread (`calibrate::Leftover::t`).
-const SUSPECT_T: f64 = 3.5;
-
-/// How far a reading may stray from its expected value before it is questioned, mm.
+/// How far a reading may stray from its expected value before it is questioned, mm, unless the
+/// sheet says (`unusual`).
 const NEAR_MM: f64 = 1.5;
 
 /// `mc601 calibrate read`: take a session's readings one by one (each saved as it is given),
-/// then fit them and keep the fit and a fitted profile in the session.
+/// then fit them and keep the fit and a fitted profile in the session. For a routine with a
+/// plan (stage 1), the fit's proposal for the calibration file, applied if the operator says so.
 pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     let (_, program, log) = session_files(dir)?;
+    let plan = load_plan(dir)?;
     let list: Vec<Value> = program
         .meta
         .as_ref()
@@ -245,10 +275,15 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     } else {
         HashMap::new()
     };
+    let combs = if list.iter().any(|m| text_of(m, "kind") == "comb") {
+        " (a comb: the first tooth that reached, 0 for none)"
+    } else {
+        ""
+    };
     anstream::println!(
-        "\n{} {} readings. Type each in mm (a comb: the first tooth that reached, 0 for none). \
-         Enter alone keeps the value shown or skips it; q stops, keeping what is typed.",
-        paint(crate::style::BOLD, format!("Readings for {}:", program.id)),
+        "\n{} {} readings. Type each in mm{combs}. Enter alone keeps the value shown or skips \
+         it; q stops, keeping what is typed.",
+        paint(BOLD, format!("Readings for {}:", program.id)),
         list.len()
     );
     let save = |readings: &HashMap<String, f64>| -> Res<()> {
@@ -266,10 +301,16 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
         Ok(())
     };
+    let mut step = String::new();
     'readings: for (i, m) in list.iter().enumerate() {
         let name = text_of(m, "name");
+        if !text_of(m, "step").is_empty() && text_of(m, "step") != step {
+            step = text_of(m, "step");
+            anstream::println!("\n{}", paint(BOLD, &step));
+        }
         let comb = text_of(m, "kind") == "comb";
         let about = m.get("about").and_then(Value::as_f64);
+        let near = m.get("unusual").and_then(Value::as_f64).unwrap_or(NEAR_MM);
         let teeth = m
             .get("values")
             .and_then(Value::as_array)
@@ -312,7 +353,7 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 continue;
             }
             if let (false, Some(a)) = (comb, about) {
-                if (v - a).abs() > NEAR_MM {
+                if (v - a).abs() > near {
                     let keep = op.ask(&format!(
                         "{} {v} is {:.1} mm from the {a} expected. Keep it? (y/n)",
                         paint(WARN, "check:"),
@@ -334,19 +375,140 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         return Ok(true);
     }
     let profile = crate::calibration::machine();
-    let text = std::fs::read_to_string(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let thickness = program.board.thickness_mm;
-    let sheet = Sheet {
-        label: tidy(dir),
-        program,
-        cuts: cuts_from_log(&text, &profile),
-        readings,
+    // Where the cuts went: by lowering the plan again with the profile it was placed with, or,
+    // for the record's raw sheets, from the run log.
+    let sheet = match &plan {
+        Some(p) => p.sheet(tidy(dir), readings)?,
+        None => {
+            let text =
+                std::fs::read_to_string(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+            Sheet {
+                label: tidy(dir),
+                program,
+                cuts: cuts_from_log(&text, &profile),
+                readings,
+            }
+        }
     };
     let (fit, combs) = fit_sheets(&[sheet])?;
-    let (out, fitted) = report(&fit, &combs, thickness, &profile);
+    let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
+    let proposal = plan.as_ref().map(|p| propose(p, &fit));
+    if let Some(p) = &proposal {
+        out.push_str(&proposal_text(p));
+    }
     anstream::print!("\n{out}");
     keep(dir, &out, &fitted)?;
+    if let Some(p) = &proposal {
+        offer(p, dir, op)?;
+    }
     Ok(true)
+}
+
+/// What a plan's fit proposes for the calibration file as it is now.
+fn propose(plan: &Plan, fit: &Fit) -> Proposal {
+    let cal = crate::calibration::current();
+    match plan.routine {
+        Routine::Heads => ::calibrate::heads::propose(fit, &cal, plan.program.board.thickness_mm),
+    }
+}
+
+fn verdict_word(v: Verdict) -> String {
+    match v {
+        Verdict::WithinNoise => paint(DIM, "within its noise"),
+        Verdict::Moved => paint(GOOD, "moved"),
+        Verdict::Large => paint(WARN, "large: check the loading and readings"),
+        Verdict::Undetermined => paint(DIM, "not fixed by these readings"),
+    }
+}
+
+/// The proposal, as text for the terminal (styled).
+fn proposal_text(p: &Proposal) -> String {
+    let mut o = String::new();
+    let scatter = if p.scatter_mm.is_finite() {
+        format!("{:.3} mm", p.scatter_mm)
+    } else {
+        "–".to_owned()
+    };
+    let _ = writeln!(
+        o,
+        "\n{}  {}",
+        paint(BOLD, "proposed for the calibration file"),
+        paint(DIM, format!("{} readings, scatter {scatter}", p.readings))
+    );
+    for c in &p.changes {
+        let places = if c.unit == "°" { 2 } else { 3 };
+        let after = c
+            .after
+            .map_or_else(|| "–".to_owned(), |a| format!("{a:.places$}"));
+        let se =
+            c.se.map_or_else(String::new, |se| format!(" ± {se:.places$}"));
+        let _ = writeln!(
+            o,
+            "  {:30} {:>9.places$} → {after:>9} {}{se:10}  {}",
+            c.key.to_string(),
+            c.before,
+            c.unit,
+            verdict_word(c.verdict)
+        );
+    }
+    for n in &p.notes {
+        let _ = writeln!(o, "  {}", paint(DIM, n));
+    }
+    o
+}
+
+/// Offer to write the proposal's moved values (and its large ones, if confirmed) to the
+/// calibration file, unless a reading is suspect.
+fn offer(p: &Proposal, dir: &Path, op: &Operator) -> Res<()> {
+    if !p.suspects.is_empty() {
+        let names: Vec<&str> = p.suspects.iter().map(|l| l.name.as_str()).collect();
+        anstream::println!(
+            "\n{} measure {} again first (`mc601 calibrate read` keeps the other readings); \
+             nothing is written while a reading is suspect.",
+            paint(WARN, "check:"),
+            names.join(", ")
+        );
+        return Ok(());
+    }
+    let mut chosen = p.chosen();
+    let large: Vec<_> = p
+        .changes
+        .iter()
+        .filter(|c| c.verdict == Verdict::Large)
+        .collect();
+    if !large.is_empty() {
+        let keys: Vec<String> = large.iter().map(|c| c.key.to_string()).collect();
+        let answer = op.ask(&format!(
+            "{} {} moved further than a machine usually does. Include them? (y/n)",
+            paint(WARN, "check:"),
+            keys.join(", ")
+        ));
+        if answer.as_deref() == Some("y") {
+            chosen.extend(large.iter().map(|c| c.key.clone()));
+        }
+    }
+    if chosen.is_empty() {
+        println!("\nnothing to write: every value fixed is within its noise of the file's");
+        return Ok(());
+    }
+    let cal = crate::calibration::current();
+    let answer = op.ask(&format!(
+        "Write {} value(s) to the calibration as revision {}? (y/n)",
+        chosen.len(),
+        cal.revision() + 1
+    ));
+    if answer.as_deref() != Some("y") {
+        println!("nothing written; `mc601 calibrate read` offers it again");
+        return Ok(());
+    }
+    let why = Why {
+        session: dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+        ..Why::typed(crate::calibration::now())
+    };
+    let next = p.apply(&cal, &chosen, &why)?;
+    crate::calibration::commit(&cal, &next)?;
+    Ok(())
 }
 
 /// Keep a fit and its profile in `dir`.
@@ -567,7 +729,7 @@ fn report(
         // Studentised: in units of what the reading should scatter, given the rest.
         let t =
             l.t.map_or_else(|| "    –".to_owned(), |t| format!("{t:+5.1}"));
-        let flag = if l.t.is_some_and(|t| t.abs() > SUSPECT_T) {
+        let flag = if l.suspect(SUSPECT_T) {
             paint(WARN, "  look again")
         } else {
             String::new()
@@ -611,6 +773,91 @@ mod tests {
         p.straight.offset_mm = [6.57, 1.86];
         p.bevel.offset_mm = [-71.50, 1.90];
         p
+    }
+
+    /// Stage 1 on the simulator, end to end: the plan runs to the park; what went down the line
+    /// is what lowering the plan gives, cut for cut, so the fit needs no log; readings a machine
+    /// unlike the file would show, read to a hundredth, fit back to that machine; and the
+    /// proposal, applied, makes the file say so.
+    #[test]
+    fn stage_1_runs_on_the_simulator_and_fits_back_to_the_machine() {
+        use ::calibrate::{Calibration, Edit};
+        const SPEEDUP: f64 = 20.0;
+        let file = Calibration::new();
+        let plan = ::calibrate::heads::plan(&file, &Stock::offcut(1.5)).expect("a plan");
+
+        let (link, sim) = sim::spawn(
+            sim::SimConfig {
+                homed_at_start: false,
+                ..sim::SimConfig::default()
+            },
+            SPEEDUP,
+        );
+        let (ctl, _) = controller::connect(link, controller::Config::default()).expect("connects");
+        let mut r = runner::Runner::new(
+            ctl,
+            plan.cut_with.clone(),
+            runner::Config {
+                speedup: SPEEDUP,
+                ..runner::Config::default()
+            },
+        );
+        r.configure().expect("configures");
+        r.home().expect("homes");
+        let (_requests, rx) = std::sync::mpsc::channel();
+        let outcome = r.run(&plan.program, &rx, &mut |_| {}).expect("runs");
+        assert_eq!(outcome, runner::Outcome::Finished);
+        let sent: Vec<u8> = sim
+            .received()
+            .iter()
+            .flat_map(|l| l.bytes().chain(*b"\r"))
+            .collect();
+        let lowered =
+            ::calibrate::cuts_from_lowering(&plan.program, &plan.cut_with).expect("lowers");
+        assert_eq!(::calibrate::cuts_from_bytes(&sent, &plan.cut_with), lowered);
+
+        let key = |s: &str| -> ::calibrate::Key { s.parse().expect(s) };
+        let why = Why::typed("2026-11-16T15:00:00Z");
+        let truth = file
+            .set(
+                &[
+                    Edit::set(key("machine.straight.offset.x"), 6.613),
+                    Edit::set(key("machine.straight.offset.y"), 1.668),
+                    Edit::set(key("machine.bevel.offset.x"), -71.252),
+                    Edit::set(key("machine.bevel.offset.y"), 2.132),
+                    Edit::set(key("blade.straight.sideways"), -0.03),
+                    Edit::set(key("blade.straight.width"), 0.05),
+                    Edit::set(key("blade.bevel.sideways"), 0.6),
+                    Edit::set(key("blade.bevel.lean"), 46.0),
+                ],
+                &why,
+            )
+            .expect("a machine");
+        let all = plan.readings.iter().map(|r| (r.id.clone(), 0.0)).collect();
+        let clean = ::calibrate::predict(&plan.sheet("sim", all).expect("a sheet"), &truth)
+            .expect("predicted");
+        let readings = clean
+            .iter()
+            .map(|(k, v)| (k.clone(), (v * 100.0).round() / 100.0))
+            .collect();
+        let (fit, _) = fit_sheets(&[plan.sheet("sim", readings).expect("a sheet")]).expect("fits");
+        let p = propose(&plan, &fit);
+        assert!(p.suspects.is_empty(), "{:?}", p.suspects);
+        assert_eq!(p.chosen().len(), 8, "{:?}", p.changes);
+        let applied = p.apply(&file, &p.chosen(), &why).expect("applied");
+        for c in &p.changes {
+            let (got, want) = (
+                applied.num(&c.key).expect("set"),
+                truth.num(&c.key).expect("set"),
+            );
+            let within = if c.unit == "°" { 0.5 } else { 0.02 };
+            assert!(
+                (got - want).abs() < within,
+                "{}: {got} against {want}",
+                c.key
+            );
+        }
+        assert!(proposal_text(&p).contains("blade.bevel.lean"));
     }
 
     #[test]

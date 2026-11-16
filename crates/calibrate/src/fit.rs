@@ -19,11 +19,10 @@ use nalgebra::{DMatrix, DVector};
 use program::{Cut, Head, Op, Program};
 use serde_json::Value;
 
-use crate::Error;
 use crate::sent::{SentCut, cuts_from_lowering};
+use crate::{Calibration, Error};
 
 /// Which face of the board a slit edge is read on: the bevel's differ, by the bevel's run.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Face {
     Any,
@@ -100,16 +99,19 @@ fn head_of(s: &str) -> Result<Head, Error> {
     }
 }
 
-/// A cut as the fit sees it: head, start, end, unit direction (along X or Y).
+/// A cut as the fit sees it: head, start, end, unit direction (along X or Y), all in carriage
+/// mm; and where it starts in the program's own frame, which orders cuts as they lie on the
+/// board (in carriage mm, the two heads' cuts are their offset apart).
 struct Line {
     head: Head,
     a: [f64; 2],
     b: [f64; 2],
     d: [f64; 2],
+    planned: [f64; 2],
 }
 
 impl Line {
-    fn new(c: &SentCut, what: &str) -> Result<Line, Error> {
+    fn new(c: &SentCut, planned: [f64; 2], what: &str) -> Result<Line, Error> {
         let (a, b) = (c.points[0], c.points[c.points.len() - 1]);
         let len = (b[0] - a[0]).hypot(b[1] - a[1]);
         let d = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
@@ -121,6 +123,7 @@ impl Line {
             a,
             b,
             d,
+            planned,
         })
     }
     /// The kept side's direction along `axis`: ±1.
@@ -157,14 +160,22 @@ fn text_of(v: &Value, k: &str) -> String {
         .to_owned()
 }
 
+/// The readings a calibration program lists (`meta.calibration.readings`), and whether in
+/// version 2's form; calibration 1 calls them `measurements`.
+fn listed(program: &Program) -> Option<(&Vec<Value>, bool)> {
+    let cal = program.meta.as_ref()?.get("calibration")?;
+    match (cal.get("readings"), cal.get("measurements")) {
+        (Some(Value::Array(a)), _) => Some((a, true)),
+        (_, Some(Value::Array(a))) => Some((a, false)),
+        _ => None,
+    }
+}
+
 /// One sheet's rows and comb readings.
 fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
     let (program, cuts, label) = (&sheet.program, &sheet.cuts, &sheet.label);
-    let cal = program
-        .meta
-        .as_ref()
-        .and_then(|m| m.get("calibration"))
-        .ok_or_else(|| format!("{label}: not a calibration sheet (no meta.calibration)"))?;
+    let (list, v2) = listed(program)
+        .ok_or_else(|| format!("{label}: not a calibration sheet (no readings listed)"))?;
     // The program's cuts in order, with their op indices, matched to the log's.
     let ops: Vec<(usize, &Cut)> = program
         .ops
@@ -196,12 +207,8 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
             _ => None,
         }
         .ok_or_else(|| format!("{label}: no cut {:?}", v.get(key)))?;
-        Line::new(&cuts[k], &format!("cut {k}"))
-    };
-    let (list, v2) = match (cal.get("readings"), cal.get("measurements")) {
-        (Some(Value::Array(a)), _) => (a, true),
-        (_, Some(Value::Array(a))) => (a, false),
-        _ => return Err(format!("{label}: no readings listed").into()),
+        let planned = ops[k].1.path_mm.first().copied().unwrap_or_default();
+        Line::new(&cuts[k], planned, &format!("cut {k}"))
     };
     let names: Vec<String> = list.iter().map(|m| text_of(m, "name")).collect();
     if let Some(unknown) = sheet.readings.keys().find(|k| !names.contains(k)) {
@@ -247,7 +254,7 @@ fn sheet_rows(sheet: &Sheet) -> Result<(Vec<Row>, Vec<CombReading>), Error> {
                     .ok_or_else(|| format!("{name}: a width needs two edges"))?;
                 let mut one = edge(&es[0], axis)?;
                 let mut two = edge(&es[1], axis)?;
-                if two.0.a[axis] < one.0.a[axis] {
+                if two.0.planned[axis] < one.0.planned[axis] {
                     std::mem::swap(&mut one, &mut two);
                 }
                 let mut terms = vec![(two.2, two.1), (one.2, -one.1)];
@@ -451,7 +458,7 @@ fn solve(rows: &[Row]) -> Solved {
 }
 
 /// One reading less the model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Leftover {
     pub name: String,
     /// mm.
@@ -461,6 +468,18 @@ pub struct Leftover {
     /// likely a misread than scatter. None when nothing else checks it: it alone decides what
     /// it reads, or no other reading is spare.
     pub t: Option<f64>,
+}
+
+/// Off by less than this, mm, a reading is no misread however closely the others agree: about
+/// what calipers resolve on a cut edge. Without it, readings that fit almost exactly (made-up
+/// ones, rounded) make a rounding error look like many scatters.
+pub const MISREAD_MM: f64 = 0.02;
+
+impl Leftover {
+    /// Worth taking again: studentised beyond `t`, and off by at least [`MISREAD_MM`].
+    pub fn suspect(&self, t: f64) -> bool {
+        self.t.is_some_and(|v| v.abs() > t) && self.mm.abs() >= MISREAD_MM
+    }
 }
 
 /// The fitted values: each unknown with its standard error (`None`: not determined).
@@ -522,13 +541,9 @@ impl Fit {
             .and_then(|(_, v, se)| v.map(|v| (v, *se)))
     }
 
-    /// The readings worth taking again: studentised beyond `t`, worst first.
+    /// The readings worth taking again ([`Leftover::suspect`]), worst first.
     pub fn suspects(&self, t: f64) -> Vec<&Leftover> {
-        let mut out: Vec<&Leftover> = self
-            .leftovers
-            .iter()
-            .filter(|l| l.t.is_some_and(|v| v.abs() > t))
-            .collect();
+        let mut out: Vec<&Leftover> = self.leftovers.iter().filter(|l| l.suspect(t)).collect();
         out.sort_by(|a, b| {
             let key = |l: &Leftover| l.t.map_or(0.0, f64::abs);
             key(b).total_cmp(&key(a))
@@ -709,6 +724,59 @@ impl Sheet {
             readings,
         })
     }
+}
+
+/// What calibration `cal` says an unknown is, on board `thickness_mm` thick: where the carriage
+/// puts each head's line on the registered corner, where each side of each slit lands on each
+/// face (`compiler::HeadCut::sides`), and how far a cut starts early and stops short on the
+/// back (the drag).
+pub fn known(u: Unknown, cal: &Calibration, thickness_mm: f64) -> f64 {
+    let blade = cal.blade();
+    match u {
+        Unknown::P(h, axis) => {
+            let machine = cal.machine();
+            let MachineMm(origin) = machine.board_origin_mm;
+            origin[axis] - machine.head(h).offset_mm[axis]
+        }
+        Unknown::E(h, right, face) => {
+            let depth = if face == Face::Front {
+                thickness_mm
+            } else {
+                0.0
+            };
+            let [left, r] = blade.head(h).sides(depth);
+            if right { -r } else { left }
+        }
+        Unknown::Drag(h, true) => blade.head(h).lead_mm[0],
+        Unknown::Drag(h, false) => blade.head(h).shortfall_mm[0],
+    }
+}
+
+/// What each reading `sheet`'s program lists should show by calibration `cal`, its cuts where
+/// they went: a plan's expected values, and the readings the tests fit. The sheet's own
+/// readings are ignored; the combs, read by eye, aren't predicted.
+///
+/// # Errors
+/// When the sheet's cuts and readings don't agree with its program.
+pub fn predict(sheet: &Sheet, cal: &Calibration) -> Result<HashMap<String, f64>, Error> {
+    let names = listed(&sheet.program).map_or_else(Vec::new, |(list, _)| {
+        list.iter().map(|m| text_of(m, "name")).collect()
+    });
+    let zeroed = Sheet {
+        readings: names.into_iter().map(|n| (n, 0.0)).collect(),
+        ..sheet.clone()
+    };
+    let (rows, _) = sheet_rows(&zeroed)?;
+    let t = sheet.program.board.thickness_mm;
+    // A row reads `value − geometry = model`, so with the value at zero the reading is the
+    // model less the row's right-hand side.
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let model: f64 = r.terms.iter().map(|&(u, c)| c * known(u, cal, t)).sum();
+            (r.name, model - r.rhs)
+        })
+        .collect())
 }
 
 /// Fit every sheet's readings together.
@@ -898,7 +966,7 @@ mod tests {
             "D.height",
         ];
         let sheet = Sheet::lowered("test", p, &profile.raw(), HashMap::new()).expect("lowers");
-        let clean = expected(&sheet, &names, &Calibration::new());
+        let clean = predict(&sheet, &Calibration::new()).expect("predicted");
         // A fixed scatter of a few hundredths, as calipers give.
         let noise = [
             0.03, -0.02, 0.01, -0.04, 0.02, 0.0, -0.01, 0.03, -0.03, 0.02, -0.01,
@@ -923,37 +991,6 @@ mod tests {
             unchecked,
             ["SR.width", "S.left", "S.front", "W.left", "W.front"]
         );
-    }
-
-    /// What each reading of calibration sheet 2's strips and window would show, by a known
-    /// calibration: the slit edges and head offsets put the cuts' edges where they land.
-    fn expected(sheet: &Sheet, names: &[&str], truth: &Calibration) -> HashMap<String, f64> {
-        let zeroed = Sheet {
-            readings: names.iter().map(|n| ((*n).to_owned(), 0.0)).collect(),
-            ..sheet.clone()
-        };
-        let (rows, _) = sheet_rows(&zeroed).expect("rows");
-        let machine = truth.machine();
-        let MachineMm([ox, oy]) = machine.board_origin_mm;
-        // Each side of the slit on the back, outward from the line: the fit's edges.
-        let edge = |h: Head, right: bool| {
-            let [left, r] = compiler::Blade::fitted().head(h).sides(0.0);
-            if right { -r } else { left }
-        };
-        let value = |u: Unknown| match u {
-            Unknown::P(h, 0) => ox - machine.head(h).offset_mm[0],
-            Unknown::P(h, _) => oy - machine.head(h).offset_mm[1],
-            Unknown::E(h, right, Face::Front) => -edge(h, right) - 1.7,
-            Unknown::E(h, right, _) => edge(h, right),
-            Unknown::Drag(..) => 0.0,
-        };
-        rows.iter()
-            .map(|r| {
-                let model: f64 = r.terms.iter().map(|&(u, c)| c * value(u)).sum();
-                // A row reads `value − geometry = model`, so the reading is model + geometry.
-                (r.name.clone(), model - r.rhs)
-            })
-            .collect()
     }
 
     /// Calibration sheet 2's strips and window fix both heads' lines and slit edges; leave out
