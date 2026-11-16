@@ -82,7 +82,7 @@ fn day(at: &str) -> &str {
 fn group(key: &Key, cal: &Calibration) -> String {
     match key {
         Key::HeadOffset(..) | Key::Scale(_) => "machine".to_owned(),
-        Key::Blade { profile: None, .. } => "blade, on the reference board".to_owned(),
+        Key::Blade { .. } => "how each head cuts, on any board".to_owned(),
         _ => {
             let id = key.profile_id().unwrap_or_default();
             let name = cal

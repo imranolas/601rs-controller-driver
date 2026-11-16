@@ -1,6 +1,6 @@
 //! What can be calibrated: each value's key, in the file and in the history as a dotted path
-//! (`machine.bevel.offset.x`, `profile.C2.bevel.run_on.end`), its unit, its words for a person,
-//! and the bounds a value must keep to be one at all. The bounds catch a typing slip or a
+//! (`machine.bevel.offset.x`, `blade.bevel.lean`), its unit, its words for a person, and the
+//! bounds a value must keep to be one at all. The bounds catch a typing slip or a
 //! corrupt file; whether a change is plausible is the fit's question, not this.
 
 use std::fmt;
@@ -17,18 +17,11 @@ pub enum Axis {
     Y,
 }
 
-/// A side of a cut, as it travels.
+/// A side of the board: the back, up, where the blade enters; the face, the customer's, down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Side {
-    Left,
-    Right,
-}
-
-/// An end of a cut.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum End {
-    Start,
-    End,
+pub enum Surface {
+    Back,
+    Face,
 }
 
 /// One of a profile's blade trims (PROGRAM_FORMAT §3): the bevel head's on straight edges and
@@ -40,16 +33,19 @@ pub enum Trim {
     BevelRound,
 }
 
-/// How a head's cuts land (`compiler::HeadCut`).
+/// How a head cuts: the tool model (`compiler::HeadCut`, CALIBRATION.md §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BladeValue {
-    /// Where the edge on that side of the slit lands from the line, on the back, mm.
-    Edge(Side),
-    /// How far a cut runs past its edge at that end, mm. For the machine, on board of no
-    /// thickness; for a profile, as measured on its board.
-    RunOn(End),
-    /// How much the run-on grows per mm of board (the machine's only).
-    RunOnPerMm,
+    /// Where the slit's middle lies on the back, mm left of the line as the cut travels.
+    Sideways,
+    /// How far apart the slit's sides are, mm.
+    Width,
+    /// The blade's lean from vertical, degrees, leftward as it goes down.
+    Lean,
+    /// How far a cut starts before its commanded start, on that side of the board, mm.
+    Lead(Surface),
+    /// How far a cut stops short of its commanded end, on that side of the board, mm.
+    Shortfall(Surface),
     /// A closed curve's overlap, ms at its speed.
     OverlapMs,
     /// How far the overlap drifts toward the waste by its end, mm.
@@ -74,13 +70,8 @@ pub enum Key {
     HeadOffset(Head, Axis),
     /// Steps per mm (`machine::Scale`).
     Scale(Axis),
-    /// How a head's cuts land: the machine's, on the reference board (`profile` none), or a
-    /// profile's own, on its board.
-    Blade {
-        profile: Option<String>,
-        head: Head,
-        value: BladeValue,
-    },
+    /// How a head cuts, on any board.
+    Blade { head: Head, value: BladeValue },
     /// A board profile's setting.
     Profile {
         profile: String,
@@ -121,7 +112,7 @@ impl fmt::Display for Val {
     }
 }
 
-const HEADS: [Head; 2] = [Head::Bevel, Head::Straight];
+pub(crate) const HEADS: [Head; 2] = [Head::Bevel, Head::Straight];
 
 fn head_word(h: Head) -> &'static str {
     match h {
@@ -144,24 +135,28 @@ pub fn valid_profile_id(id: &str) -> bool {
 }
 
 impl BladeValue {
-    fn path(self) -> String {
+    fn path(self) -> &'static str {
         match self {
-            BladeValue::Edge(Side::Left) => "edge.left".into(),
-            BladeValue::Edge(Side::Right) => "edge.right".into(),
-            BladeValue::RunOn(End::Start) => "run_on.start".into(),
-            BladeValue::RunOn(End::End) => "run_on.end".into(),
-            BladeValue::RunOnPerMm => "run_on_per_mm".into(),
-            BladeValue::OverlapMs => "overlap_ms".into(),
-            BladeValue::RunOutMm => "run_out_mm".into(),
+            BladeValue::Sideways => "sideways",
+            BladeValue::Width => "width",
+            BladeValue::Lean => "lean",
+            BladeValue::Lead(Surface::Back) => "lead.back",
+            BladeValue::Lead(Surface::Face) => "lead.face",
+            BladeValue::Shortfall(Surface::Back) => "shortfall.back",
+            BladeValue::Shortfall(Surface::Face) => "shortfall.face",
+            BladeValue::OverlapMs => "overlap_ms",
+            BladeValue::RunOutMm => "run_out_mm",
         }
     }
 
-    const ALL: [BladeValue; 7] = [
-        BladeValue::Edge(Side::Left),
-        BladeValue::Edge(Side::Right),
-        BladeValue::RunOn(End::Start),
-        BladeValue::RunOn(End::End),
-        BladeValue::RunOnPerMm,
+    pub const ALL: [BladeValue; 9] = [
+        BladeValue::Sideways,
+        BladeValue::Width,
+        BladeValue::Lean,
+        BladeValue::Lead(Surface::Back),
+        BladeValue::Lead(Surface::Face),
+        BladeValue::Shortfall(Surface::Back),
+        BladeValue::Shortfall(Surface::Face),
         BladeValue::OverlapMs,
         BladeValue::RunOutMm,
     ];
@@ -211,11 +206,7 @@ impl Key {
         out.push(Key::Scale(Axis::Y));
         for head in HEADS {
             for value in BladeValue::ALL {
-                out.push(Key::Blade {
-                    profile: None,
-                    head,
-                    value,
-                });
+                out.push(Key::Blade { head, value });
             }
         }
         out
@@ -223,31 +214,18 @@ impl Key {
 
     /// A profile's keys, in the order the overview lists them.
     pub fn profile(id: &str) -> Vec<Key> {
-        let mut out: Vec<Key> = ProfileValue::ALL
+        ProfileValue::ALL
             .into_iter()
             .map(|value| Key::Profile {
                 profile: id.to_owned(),
                 value,
             })
-            .collect();
-        for head in HEADS {
-            for value in BladeValue::ALL {
-                if value != BladeValue::RunOnPerMm {
-                    out.push(Key::Blade {
-                        profile: Some(id.to_owned()),
-                        head,
-                        value,
-                    });
-                }
-            }
-        }
-        out
+            .collect()
     }
 
     /// The profile it belongs to, if any.
     pub fn profile_id(&self) -> Option<&str> {
         match self {
-            Key::Blade { profile, .. } => profile.as_deref(),
             Key::Profile { profile, .. } => Some(profile),
             _ => None,
         }
@@ -270,9 +248,9 @@ impl Key {
             Key::HeadOffset(..) => "mm",
             Key::Scale(_) => "steps/mm",
             Key::Blade { value, .. } => match value {
-                BladeValue::Edge(_) | BladeValue::RunOn(_) | BladeValue::RunOutMm => "mm",
-                BladeValue::RunOnPerMm => "mm/mm",
+                BladeValue::Lean => "°",
                 BladeValue::OverlapMs => "ms",
+                _ => "mm",
             },
             Key::Profile { value, .. } => match value {
                 ProfileValue::Name => "",
@@ -299,11 +277,13 @@ impl Key {
             Key::Scale(a) => format!("{} scale", if *a == Axis::X { "X" } else { "Y" }),
             Key::Blade { head: h, value, .. } => {
                 let what = match value {
-                    BladeValue::Edge(Side::Left) => "edge left of the cut, on the back",
-                    BladeValue::Edge(Side::Right) => "edge right of the cut, on the back",
-                    BladeValue::RunOn(End::Start) => "run-on at the start",
-                    BladeValue::RunOn(End::End) => "run-on at the end",
-                    BladeValue::RunOnPerMm => "run-on growth per mm of board",
+                    BladeValue::Sideways => "slit's middle left of the line, on the back",
+                    BladeValue::Width => "slit width",
+                    BladeValue::Lean => "lean from vertical",
+                    BladeValue::Lead(Surface::Back) => "start lead, on the back",
+                    BladeValue::Lead(Surface::Face) => "start lead, on the face",
+                    BladeValue::Shortfall(Surface::Back) => "end shortfall, on the back",
+                    BladeValue::Shortfall(Surface::Face) => "end shortfall, on the face",
                     BladeValue::OverlapMs => "overlap on closed curves",
                     BladeValue::RunOutMm => "run-out on closed curves",
                 };
@@ -341,9 +321,10 @@ impl Key {
             Key::HeadOffset(..) => (-2000.0, 2000.0),
             Key::Scale(_) => (1.0, 1000.0),
             Key::Blade { value, .. } => match value {
-                BladeValue::Edge(_) => (-5.0, 5.0),
-                BladeValue::RunOn(_) => (-30.0, 30.0),
-                BladeValue::RunOnPerMm => (0.0, 5.0),
+                BladeValue::Sideways => (-5.0, 5.0),
+                BladeValue::Width => (-1.0, 5.0),
+                BladeValue::Lean => (-30.0, 75.0),
+                BladeValue::Lead(_) | BladeValue::Shortfall(_) => (-30.0, 30.0),
                 BladeValue::OverlapMs => (0.0, 10_000.0),
                 BladeValue::RunOutMm => (0.0, 5.0),
             },
@@ -378,16 +359,9 @@ impl fmt::Display for Key {
         match self {
             Key::HeadOffset(h, a) => write!(f, "machine.{}.offset.{}", head_word(*h), axis(a)),
             Key::Scale(a) => write!(f, "machine.scale.{}", axis(a)),
-            Key::Blade {
-                profile: None,
-                head,
-                value,
-            } => write!(f, "blade.{}.{}", head_word(*head), value.path()),
-            Key::Blade {
-                profile: Some(p),
-                head,
-                value,
-            } => write!(f, "profile.{p}.{}.{}", head_word(*head), value.path()),
+            Key::Blade { head, value } => {
+                write!(f, "blade.{}.{}", head_word(*head), value.path())
+            }
             Key::Profile { profile, value } => write!(f, "profile.{profile}.{}", value.path()),
         }
     }
@@ -404,17 +378,9 @@ impl FromStr for Key {
             "y" => Some(Axis::Y),
             _ => None,
         };
-        let blade = |rest: &[&str]| -> Option<BladeValue> {
-            Some(match rest {
-                ["edge", "left"] => BladeValue::Edge(Side::Left),
-                ["edge", "right"] => BladeValue::Edge(Side::Right),
-                ["run_on", "start"] => BladeValue::RunOn(End::Start),
-                ["run_on", "end"] => BladeValue::RunOn(End::End),
-                ["run_on_per_mm"] => BladeValue::RunOnPerMm,
-                ["overlap_ms"] => BladeValue::OverlapMs,
-                ["run_out_mm"] => BladeValue::RunOutMm,
-                _ => return None,
-            })
+        let blade = |rest: &[&str]| {
+            let path = rest.join(".");
+            BladeValue::ALL.into_iter().find(|v| v.path() == path)
         };
         let key = match parts.as_slice() {
             ["machine", "scale", a] => Key::Scale(axis(a).ok_or_else(bad)?),
@@ -422,35 +388,18 @@ impl FromStr for Key {
                 Key::HeadOffset(head_of(h).ok_or_else(bad)?, axis(a).ok_or_else(bad)?)
             }
             ["blade", h, rest @ ..] => Key::Blade {
-                profile: None,
                 head: head_of(h).ok_or_else(bad)?,
                 value: blade(rest).ok_or_else(bad)?,
             },
             ["profile", id, rest @ ..] if valid_profile_id(id) => {
-                let id = (*id).to_owned();
-                match rest {
-                    [h, more @ ..] if head_of(h).is_some() => {
-                        let value = blade(more).ok_or_else(bad)?;
-                        if value == BladeValue::RunOnPerMm {
-                            return Err(Error::File(format!(
-                                "{s}: the run-on's growth per mm of board is the machine's, \
-                                 not a profile's"
-                            )));
-                        }
-                        Key::Blade {
-                            profile: Some(id),
-                            head: head_of(h).ok_or_else(bad)?,
-                            value,
-                        }
-                    }
-                    _ => {
-                        let path = rest.join(".");
-                        let value = ProfileValue::ALL
-                            .into_iter()
-                            .find(|v| v.path() == path)
-                            .ok_or_else(bad)?;
-                        Key::Profile { profile: id, value }
-                    }
+                let path = rest.join(".");
+                let value = ProfileValue::ALL
+                    .into_iter()
+                    .find(|v| v.path() == path)
+                    .ok_or_else(bad)?;
+                Key::Profile {
+                    profile: (*id).to_owned(),
+                    value,
                 }
             }
             _ => return Err(bad()),
@@ -480,7 +429,7 @@ mod tests {
     fn every_key_reads_back_as_written() {
         let mut keys = Key::machine();
         keys.extend(Key::profile("C2"));
-        assert_eq!(keys.len(), 6 + 14 + 7 + 12);
+        assert_eq!(keys.len(), 6 + 18 + 7);
         for k in keys {
             let text = k.to_string();
             assert_eq!(text.parse::<Key>().expect(&text), k, "{text}");
@@ -491,14 +440,17 @@ mod tests {
     fn keys_read_as_documented() {
         let k: Key = "machine.bevel.offset.x".parse().expect("a key");
         assert_eq!(k, Key::HeadOffset(Head::Bevel, Axis::X));
-        let k: Key = "profile.C2.bevel.run_on.end".parse().expect("a key");
+        let k: Key = "blade.bevel.shortfall.face".parse().expect("a key");
         assert_eq!(
             k,
             Key::Blade {
-                profile: Some("C2".into()),
                 head: Head::Bevel,
-                value: BladeValue::RunOn(End::End)
+                value: BladeValue::Shortfall(Surface::Face)
             }
+        );
+        assert_eq!(
+            (k.unit(), k.label().as_str()),
+            ("mm", "Bevel head, end shortfall, on the face")
         );
         let k: Key = "profile.C16.trim.bevel_round".parse().expect("a key");
         assert_eq!(k.label(), "Bevel trim, closed curves");
@@ -511,10 +463,11 @@ mod tests {
             "machine",
             "machine.bevel.offset.z",
             "machine.vgroove.offset.x",
-            "blade.bevel.edge.middle",
+            "blade.bevel.edge.left",
+            "blade.bevel.lead",
             "profile.C 2.name",
             "profile.C2.colour",
-            "profile.C2.bevel.run_on_per_mm",
+            "profile.C2.bevel.run_on.end",
             "profile..name",
         ] {
             assert!(s.parse::<Key>().is_err(), "{s}");

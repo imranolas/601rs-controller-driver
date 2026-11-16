@@ -91,10 +91,10 @@ fn a_window_is_cut_clockwise_inside_its_edge() {
     ));
     let cs = cuts(&c);
     assert_eq!(cs.len(), 4);
-    let e = 0.453;
+    let e = 0.4525;
     let (_, head, right) = &cs[at(&c, "c1.right")];
     assert_eq!(*head, Head::Bevel);
-    // Down the right edge, its line 0.453 mm inside, from 0.4 mm above the top line to
+    // Down the right edge, its line 0.4525 mm inside, from 0.4 mm above the top line to
     // 3.8 mm below the bottom one.
     assert!(close(right[0][0], 200.0 - e) && close(right[1][0], 200.0 - e));
     assert!(close(right[0][1], 300.0 - e + 0.4) && close(right[1][1], 100.0 + e - 3.8));
@@ -112,7 +112,7 @@ fn a_kept_bevel_piece_is_cut_anticlockwise_outside_its_edge() {
     ));
     let cs = cuts(&c);
     let (_, _, right) = &cs[at(&c, "c1.right")];
-    assert!(close(right[0][0], 200.453), "outside the piece: {right:?}");
+    assert!(close(right[0][0], 200.4525), "outside the piece: {right:?}");
     assert!(right[1][1] > right[0][1], "up the right edge");
 }
 
@@ -132,7 +132,7 @@ fn neighbours_share_their_cuts() {
     let (id, _, middle) = &cs[at(&c, "c1.right")];
     assert_eq!(id, "c1.right+c2.left");
     // Kept both sides: the slit's middle on the edge, 0.095 mm right of the line going +Y.
-    assert!(close(middle[0][0], 150.0 - 0.0945), "{middle:?}");
+    assert!(close(middle[0][0], 150.0 - 0.095), "{middle:?}");
     // Every straight cut runs +X or +Y.
     for (_, _, p) in &cs {
         assert!(p[1][0] >= p[0][0] && p[1][1] >= p[0][1], "{p:?}");
@@ -234,7 +234,7 @@ fn an_oval_piece_is_cut_clockwise_with_its_run_out_outside() {
     let (_, head, path) = &cs[0];
     assert_eq!(*head, Head::Straight);
     let centre = [200.0, 175.0];
-    // Each point on the ellipse grown by the straight head's right edge (0.087 mm): the
+    // Each point on the ellipse grown by the straight head's right edge (0.0875 mm): the
     // normalised radius is 1 to within that over the semi-axes.
     let r = |p: [f64; 2]| ((p[0] - centre[0]) / 100.0).hypot((p[1] - centre[1]) / 75.0);
     assert!(

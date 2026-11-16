@@ -80,8 +80,9 @@
 //! `#S` is the speed the motors start at, with no ramp. GMC leaves it at 100 mm/s for the bevel
 //! head at every thickness, so each bevel edge jumps from rest to 100 mm/s (or straight to the
 //! cutting speed, if lower) with the blade in the board. Operators see a wobble at the start on
-//! thick board. GMC softens the start only for the straight head (protocol reference §3.3).
-//! The machine layer softens it for both:
+//! thick board. GMC softens the start only for the straight head (protocol reference §3.3), and
+//! so, for now, does the machine layer: [`SoftStart`], per straight cut, by the board's
+//! thickness. The plan for both heads (CALIBRATION.md §10, the start of a cut), not yet built:
 //! - **A start speed per job, by thickness:** `#S` from the head's 4000 steps/s down to 400
 //!   (10 mm/s), linearly from 2 mm to 3.5 mm of board (GMC's rule, without its jump at 3.5 mm).
 //!   A job is one board, so it is set once with the other parameters. Travel loses a few

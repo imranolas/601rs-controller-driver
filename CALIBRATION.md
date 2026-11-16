@@ -88,16 +88,27 @@ on both faces, the bevel's run, the run-ons, corners at any angle, for any board
 | Start lead, end shortfall | how far the cut starts before the commanded start and stops short of the commanded end, **on the back and on the face**: measured, not derived (below) | stage 2, calibration 1 on the back |
 | Blade edge angle | 37.5° to the spine, one blade in both heads (measured 13 Nov from a photo) | known |
 
+*Built 16 Nov (§10, step 5):* `compiler::HeadCut` is a head's tool model (the position stays the
+machine profile's head offset), and the file's keys are its values: `blade.<head>.sideways`,
+`.width`, `.lean`, `.lead.<back|face>`, `.shortfall.<back|face>` (§4).
+
 **Per board:** the thickness, **measured with calipers**, never GMC's profile value, which was
 raised to lengthen the run-ons this model works out itself. Speed, head settle and trims stay
 per profile; they aren't geometry. The tip depth needs no value of its own: stage 1 reads
 each face's edge and stage 2 each face's reach directly, and the shop keeps the depth to no
 more than four printer sheets under a board.
 
-**What follows** (a face at height `h` above the tip: the face at `d`, the back at `d + t`):
+**What follows** (a depth `z` below the back: the back at 0, the face at `t`):
 
-- **Across:** the cut on a face sits `sideways + h × tan(lean)` from the line, its sides half
-  the slit width either side. The bevel's run across the board is `t × tan(lean)`.
+- **Across:** the slit's middle lies `sideways + z × tan(lean)` left of the line, its sides half
+  the slit width either side; the bevel's run across the board is `t × tan(lean)`. **The blade
+  enters the back at the same place on any board,** so the back edge stays where the line puts
+  it and the face edge moves out with the board's thickness. That is GMC's rule face down (it
+  never moves a line for thickness: protocol reference §7.1), and the shop bears it out: had the
+  face stayed put instead, GMC's back openings on 4.6 mm board would be 7 mm smaller than on
+  1.5 mm board, and its run-ons, which grow 1 mm per mm, would need no help; instead the shop
+  raised its thicker profiles' thickness by 0.2–0.9 mm, roughly what a 48.7° blade needs beyond
+  GMC's 45° (0.14 mm per mm of board: 0.35–0.64 mm on those boards).
 - **Along:** measured, on each face, with combs (§5). The head plunges straight down and lifts
   straight up (Imran, 16 Nov), so where a cut starts on a face is the blade's cross-section at
   that height as it plunges, and where it ends is the cutting edge at that height as it lifts:
@@ -111,7 +122,16 @@ more than four printer sheets under a board.
 - **Corners:** at a corner turning by `φ`, each face's corner sits where that face's edges meet,
   so the run-on needed on a face is the neighbouring edge's offset on that face × `tan(φ ÷ 2)`
   plus that face's end shortfall (or, at a start, less its start lead). A run-on is the least
-  that frees the corner on both faces, plus a chosen margin.
+  that frees the corner on both faces; stage 2 adds a chosen margin when it sets the face's
+  values. The compiler cuts square corners only, and takes the neighbour's slit at its
+  farthest from its line.
+
+**The defaults** (`Blade::fitted`, built 16 Nov): calibration 1's values below, and on the face,
+where it read nothing along the cut, whatever gives GMC's run-ons on its 1.5 mm board, until
+stage 2 measures them (decided, §11). So on 1.5 mm board every cut is as before. On other boards
+the lines don't move, the straight run-ons don't change, and the bevel's grow by its run,
+1.14 mm per mm of board, where GMC's grow by 1: 0.43 mm more at each end on 4.6 mm board, 0.07
+less on 1.0 mm.
 
 **What calibration 1 already fixes** (its fit, 10 Nov, 1.5 mm board as named, not measured):
 
@@ -164,18 +184,18 @@ board's thickness makes a program stale.
   "values": {                                     // each over its default; absent: the default
     "machine.bevel.offset.x": -71.462,
     "machine.bevel.offset.y": 2.041,
-    "blade.straight.edge.left": -0.102,
+    "blade.straight.sideways": -0.095,
+    "blade.bevel.shortfall.face": 1.55,
     "profile.C2.name": "Mount board 1.4",
     "profile.C2.thickness_mm": 1.4,
     "profile.C2.speed_pct": 95.0,
     "profile.C2.head_settle_ms": 200.0,
-    "profile.C2.trim.bevel": 3.0,
-    "profile.C2.bevel.run_on.end": 3.6
+    "profile.C2.trim.bevel": 3.0
   },
   "history": [
     { "revision": 7, "at": "2026-11-15T10:42:00Z", "routine": "runons",
       "session": "2026-11-15 10.31 runons",
-      "changes": [ { "key": "profile.C2.bevel.run_on.end", "before": 3.7, "after": 3.6, "se": 0.15 } ] }
+      "changes": [ { "key": "blade.bevel.shortfall.face", "before": 1.7, "after": 1.55, "se": 0.15 } ] }
   ]
 }
 ```
@@ -189,13 +209,13 @@ exact. `calibrate::key::Key` is the typed form; its text is what the file, the h
 |-----|------|---------|
 | `machine.<head>.offset.<x\|y>` | mm | `Profile::gunnar_601()` |
 | `machine.scale.<x\|y>` | steps/mm | `Profile::gunnar_601()` (40) |
-| `blade.<head>.edge.<left\|right>` | mm, on the back | `Blade::fitted()` |
-| `blade.<head>.run_on.<start\|end>` | mm, on board of no thickness | `Blade::fitted()` |
-| `blade.<head>.run_on_per_mm` | mm per mm of board | `Blade::fitted()` |
+| `blade.<head>.sideways` | mm left of the line, on the back | `Blade::fitted()` |
+| `blade.<head>.width` | mm | `Blade::fitted()` |
+| `blade.<head>.lean` | ° from vertical | `Blade::fitted()` |
+| `blade.<head>.lead.<back\|face>`, `blade.<head>.shortfall.<back\|face>` | mm | `Blade::fitted()` |
 | `blade.<head>.overlap_ms`, `blade.<head>.run_out_mm` | ms, mm | `Blade::fitted()` |
 | `profile.<id>.name`, `.thickness_mm`, `.speed_pct`, `.head_settle_ms` | text, mm, %, ms | required |
 | `profile.<id>.trim.<straight\|bevel\|bevel_round>` | ° | 0; `bevel_round` the bevel's |
-| `profile.<id>.<head>.edge.<left\|right>`, `.run_on.<start\|end>`, `.overlap_ms`, `.run_out_mm` | as the blade's; run-ons as measured on the profile's board | the machine's, at the profile's thickness |
 
 `<head>` is `bevel` or `straight`; a profile id is letters, digits, `_` and `-`. Each key has
 bounds that catch a typing slip or a corrupt file (a speed of 1 to 100 %, a scale of 1 to 1000
@@ -241,10 +261,9 @@ impl Calibration {
 
     /// `Profile::gunnar_601()` with the calibrated head offsets and scale.
     pub fn machine(&self) -> machine::Profile;
-    /// The blade model for cutting this profile's board. For each value: the profile's own,
-    /// then the machine's (reference board), then the driver's model. A profile's run-ons are as
-    /// measured on its board; the machine's are `run_on_mm + run_on_per_mm × thickness`.
-    pub fn blade(&self, profile: &str) -> Result<compiler::Blade, Error>;
+    /// How each head cuts, on any board (§3): the compiler works out each line's place and
+    /// each cut's run-ons from it and the board's thickness.
+    pub fn blade(&self) -> compiler::Blade;
     /// The program `material` for this profile: name, speed, settle, trims.
     pub fn material(&self, profile: &str) -> Result<program::Material, Error>;
     pub fn thickness(&self, profile: &str) -> Result<f64, Error>;
@@ -531,7 +550,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 | Where | Change |
 |-------|--------|
 | new crate `calibrate` | The file (§4), the routines and plans (§5, §6), the fit, sessions and apply (§7, §8). Pure. Depends on `compiler`, `machine` and `program`, so it sits beside `nest` in the README's table. It replaces the planned `profile` crate: a profile's values are its file's. |
-| `compiler` | No new signature: `compile` already takes a `Blade` and a `Profile`, from `Calibration::blade` and `machine`. `Blade::fitted()` stays as the default model. |
+| `compiler` | *Built, 16 Nov:* `HeadCut` is a head's tool model (§3); `compile` takes a `Blade` (both heads) from `Calibration::blade` and a `Profile` from `machine`, and works out lines and run-ons for the board's thickness. `Blade::fitted()` stays as the default model, `Blade::gmc()` as GMC's for the golden tests. |
 | `machine` | `Profile::gunnar_601()` keeps the shop's fitted numbers as the defaults (decided, §11). Each fitted value names the record it came from, as it does now. |
 | `runner` | `Runner::set_profile(profile)` between jobs (busy otherwise), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ. |
 | `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
@@ -539,7 +558,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 **In Bevel** (for Bevel's own spec; the driver is designed to make it possible):
 
 - **The Tauri shell** loads the file once and passes it on. It gives `cal.machine()` to
-  `Station::open`, and `cal.blade(p)` and `cal.material(p)` to Arrange's times and Cut's
+  `Station::open`, and `cal.blade()`, `cal.material(p)` and `cal.thickness(p)` to Arrange's times and Cut's
   compile. That replaces the five hardcoded defaults. After an apply, it calls the runner's
   `set_profile` and marks Arrange's cached times stale.
 - **The pure parts** (`routines`, `plan`, `predict`, `check`, `fit`, `apply`) can go in
@@ -579,10 +598,15 @@ Each step passes `cargo test` and stops for review.
 4. **Settle the tool model** (§3) before building on it: calibration 1's overrun readings
    taken again on the face, if its sheet is still there; then stage 2's combs on a common board
    and on a 2.5–2.7 mm one.
-5. **The tool in the compiler and the file.** A `Tool` per head (§3) from which the compiler's
-   per-head cut numbers (`HeadCut`) are worked out for a board's thickness; the calibration
-   file's keys become the tool's (per-profile edges and run-ons go); the fit's unknowns named
-   for them. Golden: GMC's jobs still rebuilt with GMC's numbers.
+5. **The tool in the compiler and the file.** *Built, 16 Nov:* `compiler::HeadCut` is a head's
+   tool model (§3; the name `Tool` is a contour's), from which the compiler works out each
+   line's place and each cut's run-ons for a board's thickness. The file's blade keys are the
+   tool's; the per-profile edges and run-ons are gone, so `Calibration::blade()` takes no
+   profile. Defaults as §3. The fit keeps its linear unknowns (each side of the slit on each
+   face, and the drag along the cut); its proposal maps them onto the tool's keys (step 7),
+   through the combinations calibration 1's golden test already checks. Golden: GMC's jobs
+   still rebuilt with GMC's numbers, now as a tool (`Blade::gmc`: the bevel at 45°, its trims
+   as the reach along the cut).
 6. **The start of a cut.** The bevel's soft start by thickness (the machine crate's plan) and
    the oval entry's short wait, each switchable, tried against GMC's on thick board.
 7. **Plans, sessions, proposals:** stage 1 and stage 2 (combs) as plans, with steps,
@@ -624,9 +648,13 @@ Ovals and hooks wait (§5).
    for both would loosen its pieces). One number per comb to enter. Teeth graded ±1.2 mm round
    the prediction, 0.3 mm apart in the middle; one pass, a comb that misses cut again.
 
+10. **Until stage 2, the tool model as designed** (decided 16 Nov): the bevel's run-ons grow by
+    its measured run, 1.14 mm per mm of board, not GMC's 1.0; the face's reach is set to give
+    GMC's run-ons on 1.5 mm board (§3).
+
 **Still open:**
 
-10. **Blade changes.** Should Bevel record "blade changed" (Cut's Load already asks for one), so
+11. **Blade changes.** Should Bevel record "blade changed" (Cut's Load already asks for one), so
     the Machine page can suggest stage 2?
-11. **Each head's start lead and end shortfall on the face** (§3): calibration 1's overrun
+12. **Each head's start lead and end shortfall on the face** (§3): calibration 1's overrun
     readings taken again on the face, if its sheet is still there.

@@ -935,9 +935,10 @@ mod tests {
         let (rows, _) = sheet_rows(&zeroed).expect("rows");
         let machine = truth.machine();
         let MachineMm([ox, oy]) = machine.board_origin_mm;
+        // Each side of the slit on the back, outward from the line: the fit's edges.
         let edge = |h: Head, right: bool| {
-            let b = compiler::Blade::fitted();
-            b.head(h).edge_mm[usize::from(right)]
+            let [left, r] = compiler::Blade::fitted().head(h).sides(0.0);
+            if right { -r } else { left }
         };
         let value = |u: Unknown| match u {
             Unknown::P(h, 0) => ox - machine.head(h).offset_mm[0],

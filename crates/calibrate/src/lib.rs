@@ -1,10 +1,11 @@
 //! Calibrating the 601 (CALIBRATION.md): the machine's calibration file, the calibration sheet,
-//! where each of its cuts went, and the fit of the blade model to the operator's readings. Pure
-//! but for [`store`]: no clock, so `mc601` and an app (Bevel) use it alike.
+//! where each of its cuts went, and the fit to the operator's readings. Pure but for [`store`]:
+//! no clock, so `mc601` and an app (Bevel) use it alike.
 //!
 //! - [`calibration`]: the file. The calibrated values over the driver's defaults (the shop's
 //!   601 as fitted), the board profiles, and the history; what everything that cuts asks for
-//!   the machine profile, the blade and a profile's material.
+//!   the machine profile, how each head cuts (the tool model, `compiler::Blade`), and a
+//!   profile's material and thickness.
 //! - [`key`]: what can be calibrated, each value's key (`machine.bevel.offset.x`), unit, words
 //!   and bounds.
 //! - [`store`]: where the file lives, shared by `mc601` and Bevel, and reading and writing it
@@ -17,8 +18,8 @@
 //!   registered corner, where each side of its slit lands, its drag), solved by least squares
 //!   with each unknown's standard error; the combs read by eye.
 //!
-//! Steps 1 and 2 of CALIBRATION.md §10. The routines as plans, and the fit's proposals applied
-//! to the file, come next.
+//! Steps 1, 2, 3 and 5 of CALIBRATION.md §10. The routines as plans, and the fit's proposals
+//! applied to the file, come next.
 //!
 //! Depends on `compiler`, `machine` and `program`.
 

@@ -7,9 +7,10 @@
 //! the board is kept on. [`compile`] turns them into cuts and puts them in order:
 //!
 //! - **Bevel rectangles**: four cuts, a window's clockwise and a kept piece's anticlockwise, so
-//!   the board is always kept on the blade's left; each line placed by the [`Blade`] model so
-//!   the back edge lands on the design's, and run on past its corners (GMC's values: 0.4 mm
-//!   before, 3.8 mm past, on 1.5 mm board, each growing 1 mm per mm).
+//!   the board is always kept on the blade's left; each line placed by the tool model
+//!   ([`Blade`]) so the back edge lands on the design's, and run on past its corners until it
+//!   meets the next cut on both faces (as fitted: 0.4 mm before and 3.8 mm past on 1.5 mm
+//!   board, as GMC's, each growing by the bevel's run across the board, 1.14 mm per mm).
 //! - **Straight rectangles**: their edges on one line that overlap or touch are one stroke, so
 //!   mats laid edge to edge share their cuts (as the nester counts them). Each stroke runs +X or
 //!   +Y, away from the clamped corner, as GMC sets the straight head on a machine without a

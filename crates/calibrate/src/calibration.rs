@@ -5,9 +5,9 @@
 //! revision can be gone back to.
 //!
 //! Everything that cuts or predicts a cut asks the file, never the defaults:
-//! [`Calibration::machine`] for the machine profile, [`Calibration::blade`] and
-//! [`Calibration::material`] for cutting a profile's board. A value is looked up in the
-//! profile, then the machine, then the default ([`Calibration::get`]).
+//! [`Calibration::machine`] for the machine profile, [`Calibration::blade`] for how each head
+//! cuts (on any board: the compiler works out the rest from the board's thickness), and
+//! [`Calibration::material`] and [`Calibration::thickness`] for a profile's board.
 
 use std::collections::BTreeMap;
 
@@ -17,12 +17,10 @@ use program::{BladeOffsets, Head, Material};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::key::{Axis, BladeValue, End, Key, ProfileValue, Side, Trim, Val};
+use crate::key::{Axis, BladeValue, HEADS, Key, ProfileValue, Surface, Trim, Val};
 
 pub const FORMAT: &str = "601rs-calibration";
 pub const VERSION: u32 = 1;
-
-const HEADS: [Head; 2] = [Head::Bevel, Head::Straight];
 
 /// The machine's calibration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,8 +147,7 @@ pub struct ValueState {
     pub unit: &'static str,
     /// The value in effect.
     pub value: Val,
-    /// Whether the file sets it; if not, it is the default (or, for a profile's blade value,
-    /// the machine's).
+    /// Whether the file sets it; if not, it is the default.
     pub set: bool,
     /// Its last change, if it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,30 +165,23 @@ pub struct Last {
     pub se: Option<f64>,
 }
 
-fn head_cut(b: &Blade, h: Head) -> &HeadCut {
-    b.head(h)
-}
-
-fn head_cut_mut(b: &mut Blade, h: Head) -> &mut HeadCut {
-    match h {
-        Head::Bevel => &mut b.bevel,
-        Head::Straight => &mut b.straight,
-    }
-}
-
-/// The driver's default for a machine-level blade value.
-fn blade_default(head: Head, value: BladeValue) -> f64 {
-    let b = Blade::fitted();
-    let c = head_cut(&b, head);
+/// Where a blade value lives in a head's tool model.
+fn blade_value(c: &mut HeadCut, value: BladeValue) -> &mut f64 {
+    let side = |s: Surface| usize::from(s == Surface::Face);
     match value {
-        BladeValue::Edge(Side::Left) => c.edge_mm[0],
-        BladeValue::Edge(Side::Right) => c.edge_mm[1],
-        BladeValue::RunOn(End::Start) => c.run_on_mm[0],
-        BladeValue::RunOn(End::End) => c.run_on_mm[1],
-        BladeValue::RunOnPerMm => c.run_on_per_mm,
-        BladeValue::OverlapMs => c.overlap_ms,
-        BladeValue::RunOutMm => c.run_out_mm,
+        BladeValue::Sideways => &mut c.sideways_mm,
+        BladeValue::Width => &mut c.width_mm,
+        BladeValue::Lean => &mut c.lean_deg,
+        BladeValue::Lead(s) => &mut c.lead_mm[side(s)],
+        BladeValue::Shortfall(s) => &mut c.shortfall_mm[side(s)],
+        BladeValue::OverlapMs => &mut c.overlap_ms,
+        BladeValue::RunOutMm => &mut c.run_out_mm,
     }
+}
+
+/// The driver's default for a blade value: the shop's 601 as fitted.
+fn blade_default(head: Head, value: BladeValue) -> f64 {
+    *blade_value(Blade::fitted().head_mut(head), value)
 }
 
 fn axis_index(a: Axis) -> usize {
@@ -361,8 +351,7 @@ impl Calibration {
         self.raw(key).is_some()
     }
 
-    /// The value in effect: the file's, else, for a profile's blade value, the machine's at the
-    /// profile's thickness, else the driver's default.
+    /// The value in effect: the file's, else the driver's default.
     ///
     /// # Errors
     /// For a profile that doesn't exist.
@@ -375,32 +364,7 @@ impl Calibration {
             Key::HeadOffset(h, a) => n(Profile::gunnar_601().head(*h).offset_mm[axis_index(*a)]),
             Key::Scale(Axis::X) => n(Profile::gunnar_601().scale.x_steps_per_mm),
             Key::Scale(Axis::Y) => n(Profile::gunnar_601().scale.y_steps_per_mm),
-            Key::Blade {
-                profile: None,
-                head,
-                value,
-            } => n(blade_default(*head, *value)),
-            Key::Blade {
-                profile: Some(id),
-                head,
-                value,
-            } => {
-                self.need_profile(id)?;
-                let machine = |value| {
-                    self.num(&Key::Blade {
-                        profile: None,
-                        head: *head,
-                        value,
-                    })
-                };
-                match value {
-                    BladeValue::RunOn(_) => {
-                        let per = machine(BladeValue::RunOnPerMm)?;
-                        n(machine(*value)? + per * self.thickness(id)?)
-                    }
-                    _ => n(machine(*value)?),
-                }
-            }
+            Key::Blade { head, value } => n(blade_default(*head, *value)),
             Key::Profile { profile, value } => {
                 self.need_profile(profile)?;
                 match value {
@@ -456,42 +420,18 @@ impl Calibration {
         })
     }
 
-    /// The blade model for cutting profile `id`'s board. Each value is the profile's, else the
-    /// machine's, else the default. A profile's run-ons are as measured on its board, so the
-    /// base is set to give them at its thickness, and the machine's growth per mm stays.
-    ///
-    /// # Errors
-    /// For a profile that doesn't exist.
-    pub fn blade(&self, id: &str) -> Result<Blade, Error> {
-        let t = self.thickness(id)?;
+    /// How each head cuts, the tool model: the compiler places lines and run-ons from it and
+    /// the board's thickness.
+    pub fn blade(&self) -> Blade {
         let mut b = Blade::fitted();
         for head in HEADS {
-            let num = |value| {
-                self.num(&Key::Blade {
-                    profile: Some(id.to_owned()),
-                    head,
-                    value,
-                })
-            };
-            let per = self.num(&Key::Blade {
-                profile: None,
-                head,
-                value: BladeValue::RunOnPerMm,
-            })?;
-            let c = head_cut_mut(&mut b, head);
-            c.edge_mm = [
-                num(BladeValue::Edge(Side::Left))?,
-                num(BladeValue::Edge(Side::Right))?,
-            ];
-            c.run_on_per_mm = per;
-            c.run_on_mm = [
-                num(BladeValue::RunOn(End::Start))? - per * t,
-                num(BladeValue::RunOn(End::End))? - per * t,
-            ];
-            c.overlap_ms = num(BladeValue::OverlapMs)?;
-            c.run_out_mm = num(BladeValue::RunOutMm)?;
+            for value in BladeValue::ALL {
+                if let Some(v) = self.raw(&Key::Blade { head, value }).and_then(Val::num) {
+                    *blade_value(b.head_mut(head), value) = v;
+                }
+            }
         }
-        Ok(b)
+        b
     }
 
     /// The program `material` for profile `id`: its name, speed, settle and trims.
@@ -705,7 +645,7 @@ mod tests {
         assert_eq!(c.machine(), Profile::gunnar_601());
         assert_eq!(c.revision(), 0);
         assert!(c.profiles().is_empty());
-        assert!(c.blade("C2").is_err());
+        assert_eq!(c.blade(), Blade::fitted());
         let back = Calibration::from_json(&c.to_json()).expect("reads back");
         assert_eq!(back, c);
     }
@@ -737,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_gives_its_material_and_blade() {
+    fn a_profile_gives_its_material_and_thickness() {
         let c = with_c2();
         assert_eq!(
             c.profiles(),
@@ -756,13 +696,7 @@ mod tests {
                 bevel_round: None
             }
         );
-        // Nothing measured on C2: the machine's blade, its run-ons at 1.4 mm.
-        let b = c.blade("C2").expect("a blade");
-        assert_eq!(b, Blade::fitted());
-        assert_eq!(
-            c.num(&key("profile.C2.bevel.run_on.end")).expect("a value"),
-            2.3 + 1.4
-        );
+        assert_eq!(c.thickness("C2").expect("a thickness"), 1.4);
         assert_eq!(
             c.num(&key("profile.C2.trim.bevel_round")).expect("a value"),
             1.0
@@ -770,24 +704,25 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_overrides_the_machine_which_overrides_the_default() {
+    fn a_blade_value_set_is_the_heads_on_every_board() {
         let c = with_c2()
             .set(
                 &[
-                    Edit::set(key("blade.bevel.edge.left"), 0.5),
-                    Edit::set(key("blade.bevel.edge.right"), 0.5),
-                    Edit::set(key("profile.C2.bevel.edge.left"), 0.47),
-                    Edit::set(key("profile.C2.bevel.run_on.end"), 3.6),
+                    Edit::set(key("blade.bevel.lean"), 45.0),
+                    Edit::set(key("blade.bevel.shortfall.face"), 2.0),
                 ],
                 &at(2),
             )
             .expect("set");
-        let b = c.blade("C2").expect("a blade");
-        assert_eq!(b.bevel.edge_mm, [0.47, 0.5]);
-        // As measured on C2's board, whatever the machine's base and growth.
-        assert!((b.bevel.run_on(1.4)[1] - 3.6).abs() < 1e-12);
-        assert_eq!(b.bevel.run_on_per_mm, Blade::fitted().bevel.run_on_per_mm);
+        let b = c.blade();
+        assert_eq!((b.bevel.lean_deg, b.bevel.shortfall_mm[1]), (45.0, 2.0));
+        assert_eq!(b.bevel.sideways_mm, Blade::fitted().bevel.sideways_mm);
         assert_eq!(b.straight, Blade::fitted().straight);
+        assert_eq!(c.num(&key("blade.bevel.lean")).expect("a value"), 45.0);
+        assert_eq!(
+            c.num(&key("blade.straight.sideways")).expect("a value"),
+            -0.095
+        );
     }
 
     #[test]
