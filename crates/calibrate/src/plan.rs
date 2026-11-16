@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::fit::predict;
+use crate::key::Surface;
 use crate::reading::{Check, Kind, Reading};
 use crate::{Calibration, Error, Sheet};
 
@@ -164,8 +165,45 @@ pub struct Plan {
 pub struct Step {
     /// "Lift the mount out of the frame, push out the window, and lay the mount back up."
     pub instruction: String,
+    /// The pieces as they're held for it, so a front end draws exactly those: the mount alone
+    /// with its window open, the frame alone, the drop-out face up.
+    #[serde(default)]
+    pub pieces: Vec<Piece>,
     /// Reading ids, in order.
     pub readings: Vec<String>,
+}
+
+/// A piece of the cut board as it's held, in the board frame, mm: its outline, the holes in
+/// it, and the side up. Its edges are where the readings' dimensions end.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Piece {
+    /// "the mount".
+    pub name: String,
+    pub surface: Surface,
+    /// Its outline, a closed polygon (the first point not repeated).
+    pub outline: Vec<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<[f64; 2]>>,
+}
+
+impl Piece {
+    /// The rectangle `[x0, y0, x1, y1]`, anticlockwise from its front-left corner.
+    pub(crate) fn rectangle(name: &str, surface: Surface, [x0, y0, x1, y1]: [f64; 4]) -> Piece {
+        Piece {
+            name: name.to_owned(),
+            surface,
+            outline: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            holes: Vec::new(),
+        }
+    }
+
+    /// The piece with the rectangle `[x0, y0, x1, y1]` open in it.
+    pub(crate) fn with_hole(mut self, [x0, y0, x1, y1]: [f64; 4]) -> Piece {
+        self.holes
+            .push(vec![[x0, y0], [x0, y1], [x1, y1], [x1, y0]]);
+        self
+    }
 }
 
 impl Plan {

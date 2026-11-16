@@ -391,8 +391,14 @@ pub struct Plan {
 pub struct Step {
     pub instruction: String,       // "Lift the mount out of the frame, push the window's drop-out
                                    //  out of it, and lay the mount back up, as it lay on the machine."
+    pub pieces: Vec<Piece>,        // as they're held for it, so a front end draws exactly those
     pub readings: Vec<String>,     // reading ids, in order
 }
+
+// A piece as it's held, board frame, mm: the mount with its window open, the frame, the
+// drop-out face up. Its edges are where the readings' dimensions end.
+pub struct Piece { pub name: String, pub surface: Surface, pub outline: Vec<[f64; 2]>,
+                   pub holes: Vec<Vec<[f64; 2]>> }
 
 // calibrate::reading: one reading, described once. The plan shows it, the session checks it,
 // the fit makes it a row, stage 2 reads its comb, `mc601 calibrate read` asks for it.

@@ -257,6 +257,13 @@ mod tests {
         let back = Session::from_json(&s.to_json()).expect("reads");
         assert_eq!(back, s);
         assert!(Session::from_json(&s.to_json().replace(FORMAT, "something-else")).is_err());
+        // Kept before steps gave their pieces, it reads, without them.
+        let mut kept: serde_json::Value = serde_json::from_str(&s.to_json()).expect("JSON");
+        for step in kept["plan"]["steps"].as_array_mut().expect("steps") {
+            step.as_object_mut().expect("a step").remove("pieces");
+        }
+        let old = Session::from_json(&kept.to_string()).expect("reads without pieces");
+        assert!(old.plan.steps.iter().all(|st| st.pieces.is_empty()));
         let later = Calibration::new()
             .set(
                 &[Edit::set(

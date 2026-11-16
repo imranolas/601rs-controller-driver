@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use program::Head;
 
 use crate::key::{BladeValue, Key, Surface};
-use crate::plan::{Line, Plan, Routine, Step, Stock, program};
+use crate::plan::{Line, OFFCUT_MM, Piece, Plan, Routine, Step, Stock, program};
 use crate::proposal::{Change, Proposal};
 use crate::reading::{Comb, CombReading, End, Kind, Reading, Tooth};
 use crate::{Calibration, Error};
@@ -174,6 +174,11 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
         cut_with,
         steps: vec![Step {
             instruction: STEP.to_owned(),
+            pieces: vec![Piece::rectangle(
+                "the offcut",
+                Surface::Back,
+                [0.0, 0.0, OFFCUT_MM, OFFCUT_MM],
+            )],
             readings: readings.iter().map(|r| r.id.clone()).collect(),
         }],
         readings,

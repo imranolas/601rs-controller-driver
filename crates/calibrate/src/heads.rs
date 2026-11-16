@@ -15,7 +15,7 @@ use program::Head;
 
 use crate::fit::{Fit, Prior, Unknown, fit_sheets_with};
 use crate::key::{Axis, BladeValue, Key, Surface};
-use crate::plan::{Line, Plan, Routine, Step, Stock, program};
+use crate::plan::{Line, OFFCUT_MM, Piece, Plan, Routine, Step, Stock, program};
 use crate::proposal::{Change, Proposal, SUSPECT_T};
 use crate::reading::{Edge, Kind, Reading, Side, Span};
 use crate::{Calibration, Error, Sheet};
@@ -215,6 +215,39 @@ impl Spec {
     }
 }
 
+/// The pieces as they're held for step `step` (of [`STEPS`]), each edge where the readings'
+/// dimensions end it: the mount with its window open; the frame; the drop-out face up.
+fn pieces(step: usize, lines: &[Line], blade: &Blade, thickness_mm: f64) -> Vec<Piece> {
+    // A rectangle by its left, right, front and back edges.
+    let rect = |[l, r, f, b]: [E; 4]| {
+        let x = |e| edge_at(lines, e, Axis::X, blade, thickness_mm);
+        let y = |e| edge_at(lines, e, Axis::Y, blade, thickness_mm);
+        [x(l), y(f), x(r), y(b)]
+    };
+    let sides = |side: fn(&'static str) -> E, [l, r, f, b]: [&'static str; 4]| {
+        rect([side(l), side(r), side(f), side(b)])
+    };
+    let (outline, window) = (
+        ["O.left", "O.right", "O.front", "O.back"],
+        ["W.left", "W.right", "W.front", "W.back"],
+    );
+    match step {
+        0 => vec![
+            Piece::rectangle("the mount", Surface::Back, sides(mount, outline))
+                .with_hole(sides(self::window, window)),
+        ],
+        1 => vec![
+            Piece::rectangle("the frame", Surface::Back, [0.0, 0.0, OFFCUT_MM, OFFCUT_MM])
+                .with_hole(sides(frame, outline)),
+        ],
+        _ => vec![Piece::rectangle(
+            "the drop-out",
+            Surface::Face,
+            sides(drop_out, window),
+        )],
+    }
+}
+
 /// Stage 1's plan on `stock`, placed and predicted with calibration `cal`.
 ///
 /// # Errors
@@ -234,6 +267,7 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
             .enumerate()
             .map(|(k, instruction)| Step {
                 instruction: (*instruction).to_owned(),
+                pieces: pieces(k, &lines, &blade, t),
                 readings: SPECS
                     .iter()
                     .filter(|s| s.1 == k)
@@ -382,6 +416,45 @@ mod tests {
             ])
             .expect("fixed");
         assert!(across < 0.09, "{across}");
+    }
+
+    /// Each step holds the pieces its instruction says, the side up its readings are taken on,
+    /// and every reading's dimension runs from an edge of a piece held to an edge of one: the
+    /// drawing and the dimensions agree.
+    #[test]
+    fn each_step_holds_the_pieces_its_readings_span() {
+        let p = default_plan();
+        let names: Vec<Vec<&str>> = p
+            .steps
+            .iter()
+            .map(|s| s.pieces.iter().map(|q| q.name.as_str()).collect())
+            .collect();
+        assert_eq!(names, [["the mount"], ["the frame"], ["the drop-out"]]);
+        let on = |[x, y]: [f64; 2], ring: &[[f64; 2]]| {
+            (0..ring.len()).any(|i| {
+                let ([ax, ay], [bx, by]) = (ring[i], ring[(i + 1) % ring.len()]);
+                let within = |v: f64, a: f64, b: f64| v >= a.min(b) - 1e-9 && v <= a.max(b) + 1e-9;
+                let on_line = ((bx - ax) * (y - ay) - (by - ay) * (x - ax)).abs() < 1e-9;
+                on_line && within(x, ax, bx) && within(y, ay, by)
+            })
+        };
+        for step in &p.steps {
+            for id in &step.readings {
+                let r = p.reading(id).expect("listed");
+                assert!(
+                    step.pieces.iter().all(|q| q.surface == r.surface),
+                    "{id}: read {:?} up",
+                    r.surface
+                );
+                for end in r.dimension {
+                    let held = step
+                        .pieces
+                        .iter()
+                        .any(|q| on(end, &q.outline) || q.holes.iter().any(|h| on(end, h)));
+                    assert!(held, "{id}: {end:?} is on no edge of {:?}", step.pieces);
+                }
+            }
+        }
     }
 
     /// What the default calibration expects, as the design reads: borders of 25 mm less the
