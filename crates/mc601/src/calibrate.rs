@@ -695,6 +695,39 @@ mod tests {
             assert!((v - want).abs() < 1e-6, "{u:?}: {v} against {want}");
             assert!((e - se).abs() < 1e-5, "{u:?}: ± {e} against {se}");
         }
+        // The tool's values the record fixes (CALIBRATION.md §3): the straight slit's width and
+        // sideways offset, the bevel's run across the 1.5 mm board, and each head's plunge (how
+        // much further back a cut starts than it falls short at its end, on the back).
+        let el = Unknown::E(s, false, Face::Any);
+        let er = Unknown::E(s, true, Face::Any);
+        let (ef, eb) = (
+            Unknown::E(b, true, Face::Front),
+            Unknown::E(b, false, Face::Back),
+        );
+        for (what, c, want) in [
+            ("slit width", vec![(el, 1.0), (er, 1.0)], -0.015),
+            ("sideways", vec![(er, 0.5), (el, -0.5)], 0.095),
+            ("bevel run", vec![(ef, -1.0), (eb, -1.0)], 1.71),
+            (
+                "straight plunge",
+                vec![
+                    (Unknown::Drag(s, true), 1.0),
+                    (Unknown::Drag(s, false), -1.0),
+                ],
+                0.765,
+            ),
+            (
+                "bevel plunge",
+                vec![
+                    (Unknown::Drag(b, true), 1.0),
+                    (Unknown::Drag(b, false), -1.0),
+                ],
+                1.575,
+            ),
+        ] {
+            let (v, _) = fit.combination(&c).expect("fixed");
+            assert!((v - want).abs() < 1e-6, "{what}: {v} against {want}");
+        }
         // The profile written with `--profile`, to the micrometre: 6.4125 rounds up there, though
         // the report prints it as 6.412.
         let fitted = fit.profile(&Profile::gunnar_601());

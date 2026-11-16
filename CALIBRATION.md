@@ -1,8 +1,8 @@
 # 601rs — Calibration (design, draft)
 
-**Status:** a design, 15 Nov 2026; steps 1 and 2 of §10 are built. Decided with Imran the same day: one file for `mc601` and
-Bevel, the profile list in it, the shop's fitted numbers as the defaults, and hooks left for
-later (§11). Nothing here is built yet beyond what §1 says exists. It replaces the calibration parts of [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md)
+**Status:** a design, 15–16 Nov 2026. Steps 1 and 2 of §10 are built, and step 3's fit. On
+16 Nov, after tracing GMC's cut geometry in its code (protocol reference §3.3, §7, §7.1):
+the tool model (§3) and the routines rebuilt around it (§5). Decisions are in §11. It replaces the calibration parts of [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md)
 (4.4, 4.5, 4.9). That spec is older than the driver.
 
 **Companions:** [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md) §3.2 (the blade trim), §7 (the
@@ -61,39 +61,97 @@ What exists works. It just can't be reached from an app, and its results don't f
    calibration. The same prediction gives the "expected about" hint, flags a misread, and
    generates the synthetic readings that test the fit.
 
-## 3. What is calibrated
+## 3. What is calibrated: the tool, not the board
 
-Two scopes. **Machine** values belong to the machine and its heads. They change after a knock,
-a head service or a new machine. **Profile** values belong to a board profile (C2, C3, …) on
-this machine's blades. They change with a new board type, a new blade or a different blade
-depth.
+*Adopted 16 Nov (§11). It replaces the per-profile run-ons and edges of the first draft.*
 
-| Value | Scope | Today | Set by | Used by |
-|-------|-------|-------|--------|---------|
-| Head offset X, Y (each head) | machine | `Profile::gunnar_601()` | `heads` | lowering: runner, estimate, compiler's travel |
-| Scale X, Y (steps/mm) | machine | `Profile::gunnar_601()` (40) | `scale` | lowering |
-| Straight slit edges (left, right of travel) | machine | `Blade::fitted()` | `heads` | compiler: where a line goes |
-| Bevel edge on the back, reference board | machine | `Blade::fitted()` | `heads` | compiler (unless the profile has its own) |
-| Thickness | profile | Bevel's `materials.json` | typed (calipers) | compiler (run-on model), validation |
-| Speed %, head settle | profile | Bevel stand-ins | typed | program `material` |
-| Bevel trim: straight edges, closed curves | profile | Bevel stand-ins | typed (hooks: later) | program `material` |
-| Run-on, start and end (each head) | profile | `Blade::gmc()` | `overcut` | compiler |
-| Bevel edge, back and face, on this board | profile | none | `overcut` | compiler; Bevel's face opening |
-| Overlap, run-out (closed curves) | profile | `Blade::gmc()` | `ovals` (later) | compiler |
+**Words.** The **face** is the customer's side of the board; the 601 cuts it face down, so the
+face lies on the sheets under the board. The **back** is up, where the blade enters, and where
+Bevel's designs give a window's edge. "On the face" always means the customer's side, never
+whichever side is up.
 
-**Held, not fitted:** the board origin. A cut shows only the sum of the board origin and a
-head offset (§7), so the origin stays where it is and the head offsets carry the fit. This is
-what `mc601 calibrate` does now.
+GMC calibrates numbers per head and patches each board in its profile (protocol reference §7):
+its thickness rule takes every bevel as 45°, its straight run-on ignores thickness, and the
+shop's profiles raise the thickness of the thicker boards (MSK_2.5 set to 2.7 mm, MSK_4.1 to
+4.6, the 4.6 mm board to 5.0 and a 0.5 mm `OCAddon`) to make up for it. This design describes
+each head physically instead, and works everything else out from the board's thickness: edges
+on both faces, the bevel's run, the run-ons, corners at any angle, for any board.
+
+**Per head** (both heads alike; the straight head is a lean of 0°):
+
+| Value | What it is | From |
+|-------|------------|------|
+| Position X, Y | where the carriage puts the head's line on the registered corner (`P`, §7) | stage 1 |
+| Sideways offset | where the cut sits across the line, in the blade's frame: it turns with the direction of travel, which is how cutting both ways tells it from the position | stage 1 |
+| Slit width | how far the cut's two sides are apart; about none (the board closes behind the blade) | stage 1 |
+| Lean | the blade's angle from vertical across the cut: 0° straight, about 48° bevel (GMC's `Inclination` 42° is to the board). The bevel runs `tan(lean)` mm across per mm of board | stage 1 (back and face) |
+| Tip depth | how far the tip goes past the board's face, into the sheets under it | the sheet count |
+| Start lead, end shortfall | how far the cut starts before the commanded start and stops short of the commanded end, **on the back and on the face**: measured, not derived (below) | stage 2, calibration 1 on the back |
+| Blade edge angle | 37.5° to the spine, one blade in both heads (measured 13 Nov from a photo) | known |
+
+**Per board:** the thickness, **measured with calipers**, never GMC's profile value, which was
+raised to lengthen the run-ons this model works out itself. And the tip depth, if the blade is
+reset for that board. Speed, head settle and trims stay per profile; they aren't geometry.
+
+**What follows** (a face at height `h` above the tip: the face at `d`, the back at `d + t`):
+
+- **Across:** the cut on a face sits `sideways + h × tan(lean)` from the line, its sides half
+  the slit width either side. The bevel's run across the board is `t × tan(lean)`.
+- **Along:** measured, on each face, with combs (§5). The head plunges straight down and lifts
+  straight up (Imran, 16 Nov), so where a cut starts on a face is the blade's cross-section at
+  that height as it plunges, and where it ends is the cutting edge at that height as it lifts:
+  fixed by the blade and the head, which is why it can be measured once and carried to other boards. The blade's shape would
+  predict it given which way its edge faces and where the tip sits, but calibration 1 can't
+  tell those apart: worked through with its back readings, a face that simply trails or leads
+  the back by the edge angle would leave a GMC C10 window joined at its corners on the face
+  (about 0.7 mm at each cut's end, or 2.8 mm at each start), and those windows come out. So
+  each head's start lead and end shortfall are measured on both faces, once per blade; a second
+  board says whether they change with thickness.
+- **Corners:** at a corner turning by `φ`, each face's corner sits where that face's edges meet,
+  so the run-on needed on a face is the neighbouring edge's offset on that face × `tan(φ ÷ 2)`
+  plus that face's end shortfall (or, at a start, less its start lead). A run-on is the least
+  that frees the corner on both faces, plus a chosen margin.
+
+**What calibration 1 already fixes** (its fit, 10 Nov, 1.5 mm board as named, not measured):
+
+| Value | Fitted |
+|-------|--------|
+| Straight slit width | −0.015 ± 0.080 mm: none |
+| Straight sideways offset | 0.095 ± 0.040 mm right of travel |
+| Bevel back edge, face edge | 0.45 and 2.16 ± 0.06 mm outside the line |
+| Bevel run across the board | 1.71 ± 0.08 mm: a lean of 48.7° ± 1.3° |
+| On the back: start lead, end shortfall | straight 1.97, 1.20; bevel 2.22, 0.65 ± 0.13 mm |
+| The plunge (lead less shortfall) | straight 0.77, bevel 1.58 ± 0.19 mm |
+
+**What it can't fix:**
+
+1. **The tip depth.** The shop's rule is to cut through no more than four printer sheets under
+   the board, so about 0.4 mm at most. The sheet count (§5) measures it.
+2. **The start lead and end shortfall on the face.** Calibration 1 read its overruns on the
+   back only. Its four overrun readings taken again on the face, on the same sheet, give them
+   for a program we know exactly; failing that, the face corners of a window GMC cut on C10
+   (does a cut run on past each corner, along which edge, how far); stage 2 measures them.
+3. **Whether the reach changes with thickness.** The combs (§5) cut on a 2.5–2.7 mm board as
+   well as a common one settle it without thick board. GMC's straight run-on doesn't change
+   with thickness at all, and the shop finds thick boards unreliable.
+
+**What isn't geometry** (blade bending in dense board, fibres tearing on the face, the cut
+springing closed, drag with speed, the wobble at a cut's start) becomes a small correction per
+head that starts at zero, allowed per board only if a comb or a check shows one board behaving
+differently. Hooks (§5) are steering, not geometry, and stay separate.
+
+**Held, not fitted:** the board origin. A cut shows only its sum with a head's offset (§7);
+its (0.225, −0.275) mm is GMC's straight head's sideways shift (protocol reference §7).
 
 **Not calibration:** the envelope, the park, speeds and ramps, the clamp pads, the controller
-settings. They stay in `machine::Profile` as defaults. `mc601 check` covers the hardware.
+settings. They stay in `machine::Profile`. `mc601 check` covers the hardware.
 
-**Why the scope matters downstream.** Machine values are applied when a program is lowered, so
-programs stay valid across a machine calibration (PROGRAM_FORMAT §8). Profile values that place
-lines (edges, run-ons) are baked into a program's `path_mm` by the compiler. A program compiled
-before a profile changed is stale. So the compiler's caller stamps `meta.calibration_revision`
-on every program, and Bevel recompiles a sheet when the stamp is older than the profile it
-uses (§9).
+**Downstream.** The head's position is applied when a program is lowered, so programs stay
+valid across it (PROGRAM_FORMAT §8). The rest of the tool places lines and run-ons, which the
+compiler bakes into `path_mm`, so a program compiled before the tool changed is stale: the
+compiler's caller stamps `meta.calibration_revision`, and Bevel recompiles a sheet when the
+stamp is older than the calibration (§9). With per-profile values gone, only a tool change or a
+board's thickness makes a program stale.
 
 ## 4. The calibration file
 
@@ -116,8 +174,8 @@ uses (§9).
     "profile.C2.bevel.run_on.end": 3.6
   },
   "history": [
-    { "revision": 7, "at": "2026-11-15T10:42:00Z", "routine": "overcut",
-      "session": "2026-11-15 10.31 overcut C2",
+    { "revision": 7, "at": "2026-11-15T10:42:00Z", "routine": "runons",
+      "session": "2026-11-15 10.31 runons",
       "changes": [ { "key": "profile.C2.bevel.run_on.end", "before": 3.7, "after": 3.6, "se": 0.15 } ] }
   ]
 }
@@ -169,7 +227,7 @@ steps/mm, …). Whether a change is plausible is the fit's question (§7), not t
   on since, the write is refused (`Error::Moved`) and the caller reads again, so neither
   overwrites the other's change. It writes a temporary file and renames it into place.
 - **A missing file is the defaults**, which are the shop's 601 as fitted (decided, §11). Another
-  shop's 601 starts there and runs `heads` first.
+  shop's 601 starts there and runs stage 1 first (§5).
 
 **Resolving it.** Everything else asks the file, never the defaults directly:
 
@@ -215,47 +273,68 @@ pub fn save(path: &Path, cal: &Calibration, read: u32) -> Result<(), Error>;
 
 ## 5. Routines
 
-| Routine | Scope | Board | What it cuts | Readings | Sets | When |
-|---------|-------|-------|--------------|----------|------|------|
-| `check` | both | an offcut ≥ 130 × 130 of the profile | a 100 mm square mount with an off-centre 40 mm window, compiled as any job | 6 by calipers | nothing by default: pass, or which routine to run | first thing on a doubtful day; after any change |
-| `heads` | machine | an offcut ≥ 140 × 105, 1.2–2 mm | calibration 2's straight strips and bevel window | 11 by calipers | head offsets, straight slit edges, bevel edge (reference board) | new machine; after a knock or head service |
-| `scale` | machine | any board ≥ 960 × 760 | four 16 mm slits in the front and left trim bands, 900 and 700 mm apart | 2 by steel rule | scale X, Y | new machine; once a year |
-| `overcut` | profile | an offcut ≥ 140 × 105 of the profile | a bevel window and four combs (start and end, each head) | 4 by calipers, 4 by eye | run-ons; bevel edge on the back and face | new profile; new blade; corners not freed or overcut showing |
-| `ovals` | profile | later | ovals at overlaps and run-outs | 1 by eye | overlap, run-out | later: GMC's values serve until then |
+*Redesigned 16 Nov (§11): calibration sheet 2's approach, cut raw and fixing each head's values
+on their own, on 150 × 150 mm offcuts, with no slits (a slit has no edge to measure from) and
+every reading checked by another. The drawings, to scale:
+https://claude.ai/artifact/JATu4mFX289ZErPrNZRALL (private).*
 
-**A new machine:** `heads`, `scale`, then each profile's `overcut`, then `check`.
-**A new profile:** type its thickness, speed, settle and trims, then `overcut`, `check`. **A new blade:**
-`overcut` for the profiles it cuts, then `check`.
+| Routine | When | Board | What it cuts | Readings | Sets |
+|---------|------|-------|--------------|----------|------|
+| **Stage 1: the heads** | new machine; after a knock or head service | an offcut 150 × 150, 1.2–2 mm | a 100 mm mount with a 50 mm bevel window, its outline cut anticlockwise | 16 by calipers, none unchecked | each head's position, sideways offset, slit width; the bevel's lean |
+| **Sheet count** | new blade; the depth reset | any board over printer sheets | a short cut with each head | 1 per head: sheets cut through | each head's tip depth |
+| **Stage 2: the run-ons** | new blade | an offcut 150 × 150 of a common board | calibration sheet 2's combs: per head, an end and a start comb, each cut twice with its teeth coming from opposite sides | 8: each comb's first tooth to come free, by flexing the board | each head's start lead and end shortfall, on each face |
+| **Check** | whenever; after any change | none: any mount just cut | — | its 4 borders, the file's values as priors | nothing by default: pass, or which stage to run |
+| **Scale** | new machine; yearly | any sheet ≥ 960 × 760 | two strips cut free from the trim bands | 2 by steel rule, end to end | scale X, Y |
 
-**Each in brief:**
+**A new machine:** stage 1, the sheet count, stage 2, scale, then a check. **A new blade:** the
+sheet count, stage 2. **A new board:** its thickness, by calipers; stage 2 on it only if it misbehaves.
 
-- **`check`** cuts what the shop cuts: a mount compiled from a sheet, with the current
-  calibration, through the compiler. It measures the outside (straight head), the window on the
-  back (bevel) and two borders. The borders show the bevel head against the straight head. Each
-  reading passes within a tolerance (0.2 mm to start with). The verdict names the routine that
-  owns a failure: borders → `heads`, window size → `overcut`. The same fit runs (§7), so its
-  numbers are there to see. This is the routine the shop runs often, so it must be short.
-- **`heads`** is calibration 2 (`testdata/calibration/calibration_2.html`) without the combs,
-  which move to `overcut`. It keeps its strips, its window and its position readings from the
-  board's edges, which only it has. It is cut on a profile's board between 1.2 and 2 mm. The plan
-  takes that profile for its thickness and speed, and writes machine values.
-- **`scale`** costs no board. The slits lie in the front and left 20 mm, which Bevel's trims
-  throw away, clear of the clamp pads. The X slits at 40 and 940 fall before F1 (from 75.5) and
-  between F3 and F4 (598.5 to 963.5). The Y slits at 40 and 740 fall before L1 (from 80.5) and
-  past L3 (to 688.5). The two readings are slit to slit with a steel rule. At 900 mm, a reading to
-  0.25 mm pins the scale to 0.03 %. A change is proposed only beyond 0.1 %, which is 1 mm on a
-  1 m mount. Squareness is open (question 5).
-- **`overcut`** reads the run-on that frees a corner on this board. The combs are calibration 2's,
-  each tooth a step further. The setting is the first tooth that reached (§7). The window gives
-  the bevel edge on this board on the back and, with the drop-out face up, on the face. The two
-  together are the bevel's run across this thickness. Bevel can then show a window's face
-  opening exactly.
+- **Stage 1** (`designs` example, "stage 1"): the window clockwise with the bevel, the outline
+  anticlockwise with the straight head, so the mount stays on the blade's left all round. The
+  mount's size reads one side of the straight cut, the frame's opening (inside jaws, the mount
+  out) the other, the borders the bevel head against the straight with the cut's off-centre
+  cancelled; the drop-out face up gives the bevel's lean; each stock edge is read twice. Window
+  placement ±0.08 mm against calibration sheet 2's ±0.17, for caliper readings scattering
+  0.11 mm. It cuts straight strokes both ways, as the compiler then may.
+- **The sheet count:** six printer sheets under a board, a short cut with each head, and how
+  many sheets each cut through. A sheet is about 0.1 mm; a stack of ten under the calipers
+  gives the exact figure. The shop's rule is no more than four.
+- **Stage 2** (decided 16 Nov, §11): **calibration sheet 2's combs**, each a reference cut and
+  seven teeth whose run-ons are **graded** around the best prediction (calibration 1 and GMC's
+  values at first, the file's after): −1.2, −0.6, −0.3, 0, +0.3, +0.6 and +1.2 mm, fine where
+  the answer most likely falls and coarse at the ends; an end comb's teeth run on past the
+  reference, a start comb's begin past it. **Read by flexing
+  the board** along the reference: a tooth whose cut has gone through to the reference, on both
+  faces, comes free there (Imran, 16 Nov: the board flexes enough that this is plain). Enter the
+  first tooth that does, counting from the shortest: one number per comb, no hairlines to
+  judge and no ruler on a slit. Each comb is cut twice, its teeth coming to the reference from
+  opposite sides, so cuts in both directions are checked (and the tooth's other side). The
+  reference is cut by the same head, keeping the teeth's side on its right as a window's next
+  or last edge keeps its drop-out, in production's order (after the teeth at an end, before
+  them at a start). Eight combs, eight numbers, 64 cuts. With each face's corner where stage 1
+  puts it, a comb's number is the head's reach: on the face that frees last exactly, the other
+  as a bound. The run-on is set there plus a small chosen margin; the tool model estimates any
+  overcut showing on the face. Cut once per blade on a common board; a second on a 2.5–2.7 mm
+  board says whether the reach changes with thickness. **One pass:** a comb that misses (every
+  tooth free, or none) says which way, and only it is cut again, shifted; centred on the file's
+  values after the first calibration, a miss is rare. Steps finer than 0.3 mm aren't worth
+  cutting: whether a corner comes free varies with the board's fibres and the blade's edge by
+  about 0.1–0.2 mm, so finer teeth read erratically, and the margin above the threshold covers
+  it. **Built after the bevel's soft start and the oval entry wait** (§9): how a cut starts
+  changes its start.
+- **Check:** the borders of a mount just cut, production or test; with the file's values known,
+  four readings place the window to ±0.08 mm. A check that disagrees with the file by more than
+  its uncertainty names the stage to run.
+- **Scale:** each strip is cut free from waste and read end to end against two real faces; at
+  900 mm, a rule read to 0.25 mm pins the scale to 0.03 %. 150 mm pieces can't: 0.1 % is
+  0.15 mm there, inside the scatter.
+- **Calibration sheet 2** stays an `mc601` command and in the golden tests, as the record and
+  as a check if straight strokes ever run both ways before stage 1 has been cut.
+- **Ovals: later.** GMC's overlaps and run-outs serve until a shop complaint about joins.
 - **Hooks: later.** A hook is a curve at the start of a cut, more common on the bevel head.
-  GMC's answer is a fixed yaw per profile, its blade trim (3° on C10), found with a test
-  rectangle (protocol reference §3.2). There is probably a better fix than that. It will be
-  looked at on its own, and a routine follows from whatever it finds. Until then each profile's
-  trims are typed, the shop's current values carried over, and nothing here changes how a cut
-  starts.
+  The bevel has no soft start at any thickness in GMC (protocol reference §3.3), the likeliest
+  cause of the wobble on thick board; hooks are looked at again once the driver softens the
+  bevel's start. Until then each profile's trims are typed, the shop's values carried over.
 
 **Every plan is tested** to validate (V1–V10), to keep clear of the clamp pads on its smallest
 board, and to fit the envelope with the default calibration and with plausible errors in it.
@@ -263,7 +342,7 @@ board, and to fit the envelope with the default calibration and with plausible e
 ## 6. A routine as data: the plan
 
 ```rust
-pub enum Routine { Check, Heads, Scale, Overcut }
+pub enum Routine { Heads, Depth, RunOns, Check, Scale }   // stage 1, the sheet count, stage 2, …
 
 /// What the overview lists: title, scope, why and when, minutes, the board it needs.
 pub fn routines() -> Vec<RoutineInfo>;
@@ -300,15 +379,15 @@ pub struct Reading {
 pub enum ReadingKind {
     /// mm. Expected: the current calibration's prediction. Beyond `unusual_mm` from it, ask.
     Length { expected_mm: f64, unusual_mm: f64 },
-    /// One of several, by eye: comb teeth. `none` allowed where it means something
-    /// ("no tooth reached").
+    /// One of several, by eye: a comb's first tooth to come free, or sheets cut through.
+    /// `none` allowed where it means something ("none came free").
     Pick { options: Vec<PickOption>, none: Option<String> },
 }
 ```
 
 The drawing and each reading's dimension are geometry from the driver, so Bevel only draws them
 (Bevel's rule: the front end does no geometry). A pick's options carry their places in the
-drawing too: tooth 3 is the third line of that comb.
+drawing too: tooth 3 is the third of its comb.
 
 **JSON, one reading:**
 
@@ -339,10 +418,12 @@ about the model. An unknown the readings don't settle is reported as such and le
   profile_cut_with)`, which is pure. A session keeps the profile it was cut with. `mc601` checks
   the result against its log, so a disagreement between the two is a test failure, not a
   surprise.
-- **Picks become values with an uncertainty.** A comb's first tooth that reached gives an
-  interval: past the previous tooth, up to this one. The setting is this tooth's value: the
-  least run-on known to free the corner. The uncertainty is half the step. Tooth 1, or none,
-  means the comb missed: the proposal says so and plans a wider comb next time.
+- **Picks become values with an uncertainty.** In a comb (§5), the first tooth to come free
+  gives an interval for the run-on that frees that corner on both faces: past the tooth
+  before, up to this one. With each face's corner where stage 1 puts it, that is the head's
+  reach on each face within half a step: the limiting face exactly, the other as a bound. A
+  comb whose first tooth already comes free, or whose last doesn't, missed: the proposal says
+  so and plans one shifted next time. A sheet count is a depth to half a sheet.
 - **The solve is an SVD** (`nalgebra`, built at step 3), not the normal equations. It says
   which unknowns the readings fix each on its own; unknowns seen only as a sum or a difference
   are reported tied (`Fit::tied`), never one of them fixed at the sum's value, as the normal
@@ -420,7 +501,7 @@ it tomorrow, and fit it again later.
 
 ```rust
 pub struct Session {
-    pub id: String,                       // given by the caller: "2026-11-15 10.31 overcut C2"
+    pub id: String,                       // given by the caller: "2026-11-15 10.31 runons"
     pub plan: Plan,                       // as cut
     pub revision: u32,                    // the calibration it was cut with
     pub cut_with: machine::Profile,       // the profile the runner lowered it with
@@ -481,7 +562,7 @@ pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length
 - **A routine** runs as Prepare → Cut (Cut's own Load and Run) → Measure → Result.
 - **Profiles move** from `data/materials.json` into the calibration file (decided). Board codes
   keep their profile id. Thickness, speed, settle and trims are typed on the Machine page.
-  Run-ons come from `overcut`, or are typed with a note in the history.
+  Run-ons come from the tool (§3), worked out for each board's thickness.
 
 ## 10. Order of work
 
@@ -503,16 +584,24 @@ Each step passes `cargo test` and stops for review.
    shows it, sets and unsets values, removes a profile, lists the history and reverts. Golden,
    in `mc601`: calibration 1's fitted head offsets, set in the file, resolve to the profile its
    fit writes. Writing a fit into the file from `mc601 calibrate` is step 3's proposal.
-3. **Plans, sessions, proposals.** *The fit's part built, 15 Nov:* the SVD solve, what is
-   tied, weights, priors, `precision`, studentised suspects; the record's fit unchanged. `heads` and `overcut` as plans in the board frame, with
-   steps, drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, suspects,
-   `apply`. Synthetic recovery tests. `mc601 calibrate heads|overcut` on the sim, end to end.
-4. **The runner.** `set_profile`.
-5. **`check` and `scale`.**
-6. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
+3. **The fit.** *Built, 16 Nov:* the SVD solve, what is tied, weights, priors, `precision`,
+   combinations, studentised suspects; the record's fit unchanged.
+4. **Settle the tool model** (§3) before building on it: calibration 1's overrun readings
+   taken again on the face, if its sheet is still there; the sheet count; then stage 2's combs on
+   a common board and on a 2.5–2.7 mm one.
+5. **The tool in the compiler and the file.** A `Tool` per head (§3) from which the compiler's
+   per-head cut numbers (`HeadCut`) are worked out for a board's thickness; the calibration
+   file's keys become the tool's (per-profile edges and run-ons go); the fit's unknowns named
+   for them. Golden: GMC's jobs still rebuilt with GMC's numbers.
+6. **The start of a cut.** The bevel's soft start by thickness (the machine crate's plan) and
+   the oval entry's short wait, each switchable, tried against GMC's on thick board.
+7. **Plans, sessions, proposals:** stage 1, the sheet count and stage 2 (combs) as plans, with steps,
+   drawing and dimensions; `predict`, `check`, `fit` over sessions, verdicts, `apply`;
+   synthetic recovery tests; `mc601 calibrate` on the sim, end to end.
+8. **The runner:** `set_profile`. Then **check** and **scale**.
+9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.
 
-`ovals` waits for a shop complaint about joins: GMC's overlaps serve until then. Hooks wait
-for their own look (§5).
+Ovals and hooks wait (§5).
 
 ## 11. Decided, and still open
 
@@ -529,9 +618,26 @@ for their own look (§5).
    bevel head. GMC's per-profile yaw is one fix, probably not the best. It will be looked at on
    its own, and no `trim` routine is planned until then (§5).
 
+**Decided with Imran, 16 Nov:**
+
+5. **Calibrate the tool, not the board** (§3): each head described physically, the board by
+   its measured thickness; GMC's per-profile patches not copied.
+6. **Straight strokes may run both ways,** once stage 1 has measured each side of the cut.
+7. **Calibration on 150 × 150 offcuts, in stages, with no slits** (§5): calibration sheet 2's
+   approach, rebuilt. Sheet 2 stays as the record.
+8. **The tip depth by the sheet count:** the shop cuts through no more than four printer sheets
+   under a board.
+9. **Run-ons by calibration sheet 2's combs** (§5), read by flexing the board: the first tooth
+   whose cut comes free through the reference is the measurement. Each comb cut from both
+   sides, so both directions are checked, and separately for the start and the end (a comb
+   for both would loosen its pieces). One number per comb to enter. Teeth graded ±1.2 mm round
+   the prediction, 0.3 mm apart in the middle; one pass, a comb that misses cut again.
+
 **Still open:**
 
-5. **Squareness.** A third slit would give the diagonal, but 1.1 m is past a steel rule.
-   Measure and report only, or leave it out?
-6. **Blade changes.** Should Bevel record "blade changed" (Cut's Load already asks for one), so
-   the Machine page can suggest `overcut` for the profiles that blade cuts?
+10. **Squareness.** The diagonal of a large piece is past a steel rule. Measure and report
+   only, or leave it out?
+11. **Blade changes.** Should Bevel record "blade changed" (Cut's Load already asks for one), so
+    the Machine page can suggest the sheet count and stage 2?
+12. **Each head's start lead and end shortfall on the face** (§3): calibration 1's overrun
+    readings taken again on the face, if its sheet is still there.
