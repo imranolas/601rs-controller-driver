@@ -542,28 +542,38 @@ expected a border of −24.7 mm. Edges are now ordered as they lie on the board.
 
 ## 8. Sessions: cut, read, fit, apply
 
-*In `mc601`, 16 Nov:* a session folder holds the plan (`plan.json`), its program
-(`stage_1.json`), the run's log, the readings as typed (`readings.txt`), and the fit with its
-proposal (`fit.txt`). The `Session` type below, for Bevel, is still to come.
-
-A session is one run of a routine. It is serialisable, so Bevel can keep it as a file, resume
-it tomorrow, and fit it again later.
+*Built, 16 Nov:* `calibrate::Session`. A session is one run of a routine. It is serialisable,
+so Bevel can keep it as a file, resume it tomorrow, and fit it again later; `mc601` keeps it in
+the session folder as `routine.json`, beside the program (`stage_1.json`, `stage_2.json`), the
+run's log and the fit with its proposal (`fit.txt`).
 
 ```rust
-pub struct Session {
-    pub id: String,                       // given by the caller: "2026-11-15 10.31 runons"
-    pub plan: Plan,                       // as cut
-    pub revision: u32,                    // the calibration it was cut with
-    pub cut_with: machine::Profile,       // the profile the runner lowered it with
+pub struct Session {                      // format "601rs-calibration-session", version 1
+    pub id: String,                       // given by the caller: "2026-11-16 10.31.02 calibrate stage_1"
+    pub revision: u32,                    // the calibration the plan was made with
+    pub plan: Plan,                       // as cut, with the profile it was placed with
     pub cut: Cut,                         // NotYet | Done | Stopped { ops_done }
-    pub readings: BTreeMap<String, Entry>,// value, and "unusual, kept anyway"
+    pub readings: BTreeMap<String, f64>,  // as kept: mm, or a comb's tooth
 }
 
-/// The readings this session can take: those whose cuts all finished.
-pub fn available(s: &Session) -> Vec<&Reading>;
-/// One value, as it is typed: fine, unusual (ask), or not acceptable (why).
-pub fn check(s: &Session, reading: &str, answer: Answer) -> Check;   // a length, or a pick
+impl Session {
+    pub fn new(id, cal: &Calibration, plan: Plan) -> Session;           // not yet cut
+    pub fn available(&self) -> Vec<&Reading>;   // whose cuts all finished (`Reading::needs`)
+    pub fn check(&self, id, value) -> Result<Check, Error>;            // also: its cuts made
+    pub fn record(&mut self, id, value) -> Result<Check, Error>;       // kept, unusual or not
+    pub fn forget(&mut self, id);
+    pub fn sheet(&self) -> Result<Sheet, Error>;                       // lowered, no log
+    pub fn propose(&self, cal: &Calibration) -> Result<Proposal, Error>;  // either stage
+    pub fn from_json(text) -> Result<Session, Error>;  pub fn to_json(&self) -> String;
+}
 ```
+
+An unusual value kept anyway isn't marked: the operator was asked, and a misread still shows
+as a suspect in the fit. If the file has moved on since the plan was made, the proposal says so
+(each change is against now's value). Floats read back exactly (`serde_json`'s
+`float_roundtrip`, on for the workspace), so a session reloaded lowers to the very same steps.
+In `mc601`, a run that stops records how far it got, and `calibrate read` asks only for the
+readings whose cuts were made; `calibrate fit DIR DIR …` fits stage 1 sessions together.
 
 **The flow, as Bevel shows it.**
 
@@ -666,8 +676,10 @@ Each step passes `cargo test` and stops for review.
    gone; the record still fits with `calibrate fit`. *Stage 2 built, 16 Nov:*
    `calibrate::runons` (plan, propose, `simulate`), `mc601 calibrate runons`; its 64 cuts run
    on the simulator as lowering says, and the combs a machine would free give its run-ons back
-   within a tooth, never short. Still to come: the `Session` type, pooling and each change's
-   effect in words.
+   within a tooth, never short. *The `Session` type built, 16 Nov* (§8): `mc601` keeps it as
+   `routine.json`; a stopped run records how far it got and only its finished readings are
+   asked for; `calibrate fit` fits stage 1 sessions together (pooling, as a report). Still to
+   come: each change's effect in words, and pooling in a proposal.
 8. **The runner:** `set_profile`. *Built, 16 Nov:* on the simulator, the run after it sends
    exactly what the new profile lowers to, homing kept, nothing written to the controller.
 9. **A request to Bevel**, written there by Bevel's own process: what §9 lists.

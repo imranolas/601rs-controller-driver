@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+use calibrate::session::Cut;
 use machine::{Capabilities, Host, MachineMm, Profile};
 use program::{Head, Op, Program, Resume};
 use runner::{Event, Outcome, Request, Runner};
@@ -339,6 +340,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, form: Form) -> Res<
         stopping.store(false, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         let ops = p.ops.len();
+        let mut done = 0;
         let result = runner.run(p, &rx, &mut |e| match e {
             Event::Started { ops, estimate_s } => {
                 println!("  started: {ops} ops, about {estimate_s:.0} s");
@@ -346,8 +348,9 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, form: Form) -> Res<
             Event::Op { index, .. } => {
                 println!("  op {}/{ops}: {}", index + 1, op_name(&p.ops[index]));
             }
+            Event::OpDone { index } => done = index + 1,
             // The command line shows ops as they come, not the machine live.
-            Event::OpDone { .. } | Event::Resumed | Event::State(_) => {}
+            Event::Resumed | Event::State(_) => {}
             Event::Paused { next } => println!("  paused before op {}", next + 1),
             Event::Holding {
                 message, resume, ..
@@ -394,6 +397,22 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, form: Form) -> Res<
                 }
             ),
         });
+        // A calibration stage's session keeps how far it was cut: what can be read.
+        let cut = match &result {
+            Ok(Outcome::Finished) => Cut::Done,
+            Ok(Outcome::Cancelled { next }) => Cut::Stopped { ops_done: *next },
+            Err(_) => Cut::Stopped { ops_done: done },
+        };
+        crate::calibrate::cut_ended(&session.dir, cut)?;
+        if has_readings(p) && cut != Cut::Done {
+            anstream::println!(
+                "{}",
+                paint(
+                    DIM,
+                    "  the readings whose cuts were made can still be taken: `mc601 calibrate read`"
+                )
+            );
+        }
         match result {
             Ok(Outcome::Finished) => {
                 log.note(&format!("finished {}", p.id));

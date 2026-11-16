@@ -186,6 +186,8 @@ pub struct Reading {
     /// Where it is taken, in the board frame: from one edge to the other, mm; for a comb, its
     /// reference.
     pub dimension: [[f64; 2]; 2],
+    /// The program's cuts it reads: if one of them didn't finish, it can't be taken.
+    pub needs: Vec<String>,
 }
 
 /// What a reading is.

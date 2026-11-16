@@ -25,7 +25,8 @@ calibrate = { path = "crates/calibrate" }
 
 # external
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact float parsing: a program, plan or session read back cuts where it did when written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serialport = "4"
 thiserror = "2"
 ctrlc = "3"

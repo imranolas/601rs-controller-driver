@@ -14,8 +14,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ::calibrate::proposal::{Proposal, SUSPECT_T, Verdict};
+use ::calibrate::session::Session as RoutineSession;
 use ::calibrate::{
-    CombReading, Face, Fit, Plan, Routine, SentCut, Sheet, Stock, Unknown, Why, fit_sheets,
+    CombReading, Face, Fit, Routine, SentCut, Sheet, Stock, Unknown, Why, fit_sheets,
 };
 use link::Direction;
 use machine::Profile;
@@ -30,8 +31,10 @@ use crate::target::Res;
 
 // ------------------------------------------------------------------ stages 1 and 2
 
-/// A session's plan; its program sits beside it under the program's id.
-const PLAN_FILE: &str = "plan.json";
+/// A stage's session (`calibrate::Session`: its plan, how far it was cut, its readings); its
+/// program sits beside it under the program's id. The record's raw sheets keep their readings
+/// in `readings.txt`.
+const ROUTINE_FILE: &str = "routine.json";
 const READINGS_FILE: &str = "readings.txt";
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Res<()> {
@@ -72,7 +75,11 @@ pub fn stage(port: &str, session: &Session, routine: Routine, stock: &Stock) -> 
     };
     let file = session.dir.join(format!("{}.json", plan.program.id));
     write_json(&file, &plan.program)?;
-    write_json(&session.dir.join(PLAN_FILE), &plan)?;
+    let id = session
+        .dir
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    save_routine(&session.dir, &RoutineSession::new(id, &cal, plan.clone()))?;
     anstream::println!(
         "{}",
         paint(
@@ -92,16 +99,31 @@ pub fn stage(port: &str, session: &Session, routine: Routine, stock: &Stock) -> 
     )
 }
 
-/// The session's plan, if it has one (stage 1 on).
-fn load_plan(dir: &Path) -> Res<Option<Plan>> {
-    let path = dir.join(PLAN_FILE);
+/// The stage's session in `dir`, if it is one.
+fn load_routine(dir: &Path) -> Res<Option<RoutineSession>> {
+    let path = dir.join(ROUTINE_FILE);
     if !path.exists() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", tidy(&path)))?;
     Ok(Some(
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", tidy(&path)))?,
+        RoutineSession::from_json(&text).map_err(|e| format!("{}: {e}", tidy(&path)))?,
     ))
+}
+
+fn save_routine(dir: &Path, routine: &RoutineSession) -> Res<()> {
+    let path = dir.join(ROUTINE_FILE);
+    std::fs::write(&path, routine.to_json()).map_err(|e| format!("{}: {e}", tidy(&path)).into())
+}
+
+/// After a run in `dir`: how far a stage's program was cut, so its readings can be taken (those
+/// whose cuts all finished).
+pub fn cut_ended(dir: &Path, cut: ::calibrate::session::Cut) -> Res<()> {
+    if let Some(mut r) = load_routine(dir)? {
+        r.cut = cut;
+        save_routine(dir, &r)?;
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ the run log
@@ -268,8 +290,8 @@ const NEAR_MM: f64 = 1.5;
 /// plan (stage 1), the fit's proposal for the calibration file, applied if the operator says so.
 pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
     let (_, program, log) = session_files(dir)?;
-    let plan = load_plan(dir)?;
-    let list: Vec<Value> = program
+    let mut routine = load_routine(dir)?;
+    let mut list: Vec<Value> = program
         .meta
         .as_ref()
         .and_then(|m| {
@@ -279,11 +301,32 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let file = dir.join(READINGS_FILE);
-    let mut readings = if file.exists() {
-        read_readings(&file)?
-    } else {
-        HashMap::new()
+    // A stage's readings whose cuts didn't all finish can't be taken.
+    if let Some(r) = &routine {
+        let all = list.len();
+        list.retain(|m| r.is_available(&text_of(m, "name")));
+        if list.len() < all {
+            anstream::println!(
+                "{}",
+                paint(
+                    WARN,
+                    format!(
+                        "{} of {all} readings can't be taken: the cut stopped before their cuts \
+                         were made",
+                        all - list.len()
+                    )
+                )
+            );
+        }
+    }
+    let file = match &routine {
+        Some(_) => dir.join(ROUTINE_FILE),
+        None => dir.join(READINGS_FILE),
+    };
+    let mut readings: HashMap<String, f64> = match &routine {
+        Some(r) => r.readings.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        None if file.exists() => read_readings(&file)?,
+        None => HashMap::new(),
     };
     let combs = if list.iter().any(|m| text_of(m, "kind") == "comb") {
         " (a comb: the first tooth that reached, 0 for none)"
@@ -296,7 +339,11 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
         paint(BOLD, format!("Readings for {}:", program.id)),
         list.len()
     );
-    let save = |readings: &HashMap<String, f64>| -> Res<()> {
+    let save = |readings: &HashMap<String, f64>, routine: &mut Option<RoutineSession>| -> Res<()> {
+        if let Some(r) = routine {
+            r.readings = readings.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            return save_routine(dir, r);
+        }
         let mut text = format!(
             "# {} readings, {} (mc601 calibrate read)\n",
             program.id,
@@ -379,48 +426,46 @@ pub fn read(dir: &Path, op: &Operator) -> Res<bool> {
                 }
             }
             readings.insert(name.clone(), v);
-            save(&readings)?;
+            save(&readings, &mut routine)?;
             break;
         }
     }
-    save(&readings)?;
+    save(&readings, &mut routine)?;
     anstream::println!("{}", paint(DIM, format!("readings: {}", tidy(&file))));
     if readings.is_empty() {
         return Ok(true);
     }
     let profile = crate::calibration::machine();
+    let cal = crate::calibration::current();
     let thickness = program.board.thickness_mm;
-    // Where the cuts went: by lowering the plan again with the profile it was placed with, or,
-    // for the record's raw sheets, from the run log.
-    let sheet = match &plan {
-        Some(p) => p.sheet(tidy(dir), readings)?,
+    // A stage's cuts are where lowering its plan with the profile it was placed with puts them;
+    // the record's raw sheets', where their run logs show. Stage 2's combs give their proposal
+    // directly; anything with lengths is fitted, and reported, first.
+    let (out, fitted, proposal) = match &routine {
+        Some(r) if r.plan.routine == Routine::RunOns => {
+            let p = r.propose(&cal)?;
+            (proposal_text(&p), None, Some(p))
+        }
+        Some(r) => {
+            let (fit, combs) = fit_sheets(&[r.sheet()?])?;
+            let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
+            let p = r.propose(&cal)?;
+            out.push_str(&proposal_text(&p));
+            (out, Some(fitted), Some(p))
+        }
         None => {
             let text =
                 std::fs::read_to_string(&log).map_err(|e| format!("{}: {e}", log.display()))?;
-            Sheet {
+            let sheet = Sheet {
                 label: tidy(dir),
                 program,
                 cuts: cuts_from_log(&text, &profile),
                 readings,
-            }
+            };
+            let (fit, combs) = fit_sheets(&[sheet])?;
+            let (out, fitted) = report(&fit, &combs, thickness, &profile);
+            (out, Some(fitted), None)
         }
-    };
-    let cal = crate::calibration::current();
-    let routine = plan.as_ref().map(|p| p.routine);
-    // Stage 2's combs give their proposal directly; anything with lengths is fitted first.
-    let (out, fitted, proposal) = if routine == Some(Routine::RunOns) {
-        let combs = ::calibrate::comb_readings(&sheet)?;
-        let p = ::calibrate::runons::propose(&combs, &cal, thickness);
-        (proposal_text(&p), None, Some(p))
-    } else {
-        let (fit, combs) = fit_sheets(&[sheet])?;
-        let (mut out, fitted) = report(&fit, &combs, thickness, &profile);
-        let p = (routine == Some(Routine::Heads))
-            .then(|| ::calibrate::heads::propose(&fit, &cal, thickness));
-        if let Some(p) = &p {
-            out.push_str(&proposal_text(p));
-        }
-        (out, Some(fitted), p)
     };
     anstream::print!("\n{out}");
     keep(dir, &out, fitted.as_ref())?;
@@ -552,6 +597,20 @@ pub fn fit(dirs: &[PathBuf], sheets: &[[PathBuf; 3]], profile_out: Option<&Path>
     let profile = crate::calibration::machine();
     let mut all = Vec::new();
     for d in dirs {
+        // A stage's session fits from its plan and readings; stage 2's combs aren't fitted.
+        if let Some(r) = load_routine(d)? {
+            if r.plan.routine == Routine::RunOns {
+                return Err(format!(
+                    "{}: stage 2's combs are read, not fitted: `mc601 calibrate read`",
+                    tidy(d)
+                )
+                .into());
+            }
+            let mut s = r.sheet()?;
+            s.label = tidy(d);
+            all.push(s);
+            continue;
+        }
         let (path, _, log) = session_files(d)?;
         let readings = d.join(READINGS_FILE);
         if !readings.exists() {
@@ -791,6 +850,8 @@ mod tests {
         p.bevel.offset_mm = [-71.50, 1.90];
         p
     }
+
+    use ::calibrate::Plan;
 
     /// Cut `plan` on the simulator to the park, and hold what went down the line to what
     /// lowering the plan gives, cut for cut, so its fit needs no log.

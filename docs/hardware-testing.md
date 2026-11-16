@@ -100,6 +100,9 @@ mc601 calibration history                # what was written, when, by which sess
   uncertainty: moved, within its noise, or large), go into the session's `fit.txt`. Moved values
   are written as one revision if you say so; large ones only if you confirm them; nothing while
   a reading is suspect (measure it again). `mc601 calibration revert N` undoes it.
+- A run that stops keeps its session: `mc601 calibrate read` then asks only for the readings
+  whose cuts were made. Two stage 1 offcuts fit together with `mc601 calibrate fit DIR DIR`
+  (a report, about 1.4 times as precise), if one alone scatters more than you'd like.
 - Stage 2 cuts eight combs on another 150 × 150 offcut of a common board. Leave the board back
   up and flex it along each comb's reference: enter the first tooth that comes free there,
   counting from the left (tooth 1 is the shortest), or 0 if none does. A comb where none, or

@@ -208,6 +208,12 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
                     cuts: c.teeth.iter().map(|t| t.id.clone()).collect(),
                 },
                 dimension: [c.reference.a, c.reference.b],
+                needs: c
+                    .teeth
+                    .iter()
+                    .chain([&c.reference])
+                    .map(|l| l.id.clone())
+                    .collect(),
             })
             .collect(),
     })

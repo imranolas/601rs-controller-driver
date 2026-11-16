@@ -31,6 +31,7 @@ pub mod plan;
 pub mod proposal;
 pub mod runons;
 pub mod sent;
+pub mod session;
 pub mod sheet;
 pub mod store;
 
@@ -43,6 +44,7 @@ pub use key::{Key, Val};
 pub use plan::{Check, Kind, Plan, Reading, Routine, Step, Stock};
 pub use proposal::{Proposal, Verdict};
 pub use sent::{SentCut, cuts_from_bytes, cuts_from_lowering};
+pub use session::Session;
 
 /// What went wrong.
 #[derive(Debug, thiserror::Error)]

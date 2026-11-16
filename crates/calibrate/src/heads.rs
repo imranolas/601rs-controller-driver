@@ -397,6 +397,10 @@ pub fn plan(cal: &Calibration, stock: &Stock) -> Result<Plan, Error> {
                     unusual_mm: UNUSUAL_MM,
                 },
                 dimension: [point(from), point(to)],
+                needs: match s.span {
+                    Span::Width(a, b) => vec![a.cut.to_owned(), b.cut.to_owned()],
+                    Span::FromStock(e) => vec![e.cut.to_owned()],
+                },
             }
         })
         .collect();
