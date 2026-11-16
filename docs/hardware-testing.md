@@ -48,6 +48,15 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 | 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past GMC's drivable range (X 1560 mm): async `*033`, `@Y` limit bit, recovery |
 | 8 | yes | **blades out**: each head down as GMC lowers it, nothing moving (does `i_b` bypass the throttle, so `05` is fast and `01` slow? the lift `00`; the straight head `0A`: you answer); a quarter turn of Z alone, timed, and inside a stream as a corner (does the carriage stand still while the blade turns?); how long after `@X04` a trailing `A` switches; a stream held at the green-button wait filled with 1 mm moves until a flow byte (up to 512 KB): buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it (don't press the button) |
 
+**The room below zero.** The driver takes the carriage to have 7.5 mm below zero after homing:
+GMC's `#OX,300` and `#OY,300` leave each axis that far off its switch before zeroing it
+(SPEC1 p.30), and cuts to the board's left and front edges use it (the straight head reaches
+1.3 mm past the left edge). The simulator models it the same way. Before cutting a real sheet that
+runs to the edge, once stage 3 has homed: cut a scrap board with a straight cut run on past its
+left edge (a sheet with a clean-up line to the edge does). It must finish without `*032` (X
+minus) or `*034` (Y minus). If either comes, the room is smaller than assumed: say so, and
+`machine::Profile::envelope_mm` changes to match.
+
 ## Safety
 
 - Someone at the e-stop for every stage that moves. Scrap board, clear table, head up.

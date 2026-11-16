@@ -184,6 +184,46 @@ fn gmcs_job_runs_to_the_park() {
     assert_eq!(vectors(&sim) - homing, sent);
 }
 
+/// A straight cut run on past the board's left edge, as a clean-up line to the edge is: the
+/// straight head is 6.4 mm right of the carriage, so the carriage goes about 7.2 mm below zero,
+/// into the room homing leaves before the switch (`#OX,300`). It runs, and meets no switch.
+#[test]
+fn a_cut_past_the_boards_left_edge_meets_no_switch() {
+    let (mut r, sim) = ready();
+    let mut program = fixture("g_regular_mount");
+    program.ops = vec![
+        Op::Clamp(Clamp {
+            id: None,
+            label: None,
+            side: ClampSide::Left,
+            turned: Vec::new(),
+        }),
+        Op::Cut(Cut {
+            id: Some("to the edge".into()),
+            label: None,
+            head: Head::Straight,
+            path_mm: vec![[200.0, 300.0], [-1.0, 300.0]],
+            speed_pct: None,
+        }),
+    ];
+    let job = machine::lower(&program, r.profile()).expect("inside the envelope");
+    let leftmost = job
+        .commands()
+        .filter_map(|c| match c {
+            protocol::Command::Vector { x, .. } => Some(*x),
+            _ => None,
+        })
+        .min()
+        .expect("vectors");
+    assert!(
+        leftmost < -250,
+        "the carriage goes below zero: {leftmost} steps"
+    );
+    let (result, events) = run_with(&mut r, &program, |_, _| {});
+    assert_eq!(result.expect("runs"), Outcome::Finished, "{events:?}");
+    assert!(parked(&sim), "{:?}", sim.snapshot());
+}
+
 /// A calibration applied between runs: the next run is placed by the new profile, without
 /// reconnecting or homing again, and nothing is written to the controller.
 #[test]
