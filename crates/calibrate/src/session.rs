@@ -22,6 +22,7 @@ pub const VERSION: u32 = 2;
 
 /// One run of a routine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     format: String,
@@ -39,6 +40,12 @@ pub struct Session {
 
 /// How far the plan's program was cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// In a schema, `CutProgress`: a program's cut is `Cut`.
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(rename = "CutProgress")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Cut {
     NotYet,

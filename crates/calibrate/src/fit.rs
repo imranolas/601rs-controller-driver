@@ -395,6 +395,7 @@ fn solve(rows: &[Row]) -> Solved {
 
 /// One reading less the model.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Leftover {
     pub name: String,
     /// mm.

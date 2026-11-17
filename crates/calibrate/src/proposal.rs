@@ -16,6 +16,7 @@ pub const SUSPECT_T: f64 = 3.5;
 
 /// What a fit proposes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Proposal {
     pub routine: Routine,
     /// How many readings were fitted.
@@ -31,6 +32,7 @@ pub struct Proposal {
 
 /// One value the fit proposes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Change {
     pub key: Key,
     pub label: String,
@@ -47,6 +49,7 @@ pub struct Change {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// Within twice its standard error of the calibration's: kept unless chosen.

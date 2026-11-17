@@ -50,6 +50,7 @@ cargo test -p sim --test fidelity           # only the session-log replays
 cargo fmt --all
 cargo run -p mc601 -- capture testdata/captures/g_init.txt   # decode a GMC capture
 BLESS=1 cargo test -p machine --test golden # rewrite testdata/programs (see Recordings are evidence)
+BLESS=1 cargo test -p program --features schemars   # rewrite program.schema.json from the types
 ```
 
 Once per machine: `rustup target add wasm32-unknown-unknown`.
@@ -116,8 +117,8 @@ yes '' | cargo run -p mc601 -- check --sim --stage 2   # check waits for Enter a
   Behaviour against the controller is tested end to end against the simulator
   (`crates/sim/tests/controller.rs`, `crates/runner/tests/`). Never change an expectation, a
   tolerance or a golden file to make a test pass. If you think one is wrong, stop and say why.
-- **Keep the docs true, in the same commit.** The program format: PROGRAM_FORMAT.md,
-  program.schema.json, and its `version` when §10 says so. The protocol: PROTOCOL_REFERENCE.md.
+- **Keep the docs true, in the same commit.** The program format: PROGRAM_FORMAT.md, the
+  generated program.schema.json (never by hand), and its `version` when §10 says so. The protocol: PROTOCOL_REFERENCE.md.
   Calibration: CALIBRATION.md, with §1 kept current. What the operator does:
   `docs/hardware-testing.md` and `mc601 --help`. The README's crate table and numbers when they
   change.
@@ -130,8 +131,8 @@ yes '' | cargo run -p mc601 -- check --sim --stage 2   # check waits for Enter a
 - **Words.** British spelling (licence, centre, behaviour, optimise). Plain, short sentences in
   docs, comments, help text and commit messages. A comment says why, not what.
 - **Dependencies.** Few and well known: `serde`, `serde_json`, `thiserror`, `serialport`,
-  `ctrlc`, `nalgebra` (in `calibrate` only), and `clap`, `anstream`, `anstyle`, `chrono` in
-  `mc601`. Ask before adding one.
+  `ctrlc`, `nalgebra` (in `calibrate` only), `schemars` (optional, in `program` and
+  `calibrate`), and `clap`, `anstream`, `anstyle`, `chrono` in `mc601`. Ask before adding one.
 - **Commits.** Small, each passing `scripts/check.sh`. The summary names the crate or document,
   a colon, then what changed in a phrase ("sim: the homing offset leaves room below zero, as on
   the 601"). The body says why, then what. One branch per piece of work (`calibrate/m3-plans`).

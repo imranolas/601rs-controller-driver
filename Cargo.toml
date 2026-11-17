@@ -33,6 +33,9 @@ ctrlc = "3"
 # The calibration fit's least squares (SVD), in calibrate only. Pure Rust, so the fit builds
 # for WebAssembly as the rest does.
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+# JSON Schemas of the program and calibration types, for apps that generate their own types from
+# them: the `schemars` feature of `program` and `calibrate`, off by default.
+schemars = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
