@@ -1200,6 +1200,9 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | The right trim per material on this machine and blade (it corrects hooked corners, §3.2) | GMC's per-profile trims (§8) | GMC's procedure: a test rectangle per profile, the corners checked [HELP CA 3800] |
 | The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: the driver's soft start (`#S400` on 4.6 mm) against GMC's (`mc601 run --gmc-bevel-start`, `#S4000`), then if needed a slow lead-in, trim 0 against the profile's |
 | An oval's entry: does moving off 100 ms after the slow head-down, as GMC does, leave a cleaner join than letting the blade settle? | — | an oval window cut both ways, `mc601 run` and `mc601 run --oval-settle` |
+| Does the carriage reach X 164.1 cm, the bevel head at GMC's soft limit (§2.5)? Nothing recorded is past the park, 147.15 cm | yes, as GMC drives it (operator: the 601 cuts jumbo boards and at the right-hand clamp) | hardware-testing.md, "The far end" |
+| At the usual end, are the pads GMC mirrors at the table's right end for Cut Other End in place, so a cut near X 154–156 cm could run over them? | no: only the usual pads are listed | operator |
+| Where along Y does the head first meet the V-groove stub (the push runs 101.5 → 104.5 cm, §4.1)? A move near the back-left corner past it would toggle the switch | past the soft limits | stage 3, by eye |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
 | `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |
