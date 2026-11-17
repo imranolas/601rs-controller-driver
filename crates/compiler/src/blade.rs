@@ -15,7 +15,7 @@
 //!   its farthest from that cut's line, on both faces, less how far it starts early or stops
 //!   short there.
 //!
-//! The **back** is the side up, where the blade enters and where Bevel's designs give an edge;
+//! The **back** is the side up, where the blade enters and where a design gives an edge;
 //! the **face** is the customer's side, down on the sheets.
 
 use program::Head;

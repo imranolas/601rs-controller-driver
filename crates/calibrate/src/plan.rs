@@ -3,7 +3,7 @@
 //! lowering it again with the machine profile it was placed with, so no run log is needed.
 //!
 //! The geometry is the driver's: each reading carries where it is taken on the board, and what
-//! it should read by the calibration the plan was made with, so a front end (Bevel) only draws
+//! it should read by the calibration the plan was made with, so a front end only draws
 //! and asks.
 
 use std::collections::HashMap;

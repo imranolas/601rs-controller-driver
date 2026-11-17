@@ -1,5 +1,5 @@
 //! The machine's calibration (CALIBRATION.md §4), for every command that drives or calibrates:
-//! loaded once, from `--calibration FILE`, else the file `mc601` shares with Bevel
+//! loaded once, from `--calibration FILE`, else the file `mc601` shares with apps
 //! (`calibrate::store::default_path`), and `mc601 calibration`, to see it and change it.
 
 use std::fmt::Write as _;

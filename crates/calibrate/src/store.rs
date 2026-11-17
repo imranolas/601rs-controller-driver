@@ -1,5 +1,5 @@
 //! Where the calibration file lives, and reading and writing it: the crate's only I/O, here so
-//! that `mc601` and Bevel, which share the file (CALIBRATION.md §4), can't disagree about it.
+//! that `mc601` and apps, which share the file (CALIBRATION.md §4), can't disagree about it.
 //!
 //! - The file is `$MC601_CALIBRATION`, else `calibration.json` in [`config_dir`], beside
 //!   `mc601`'s `config.json`.

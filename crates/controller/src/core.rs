@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(core.mode(), Some(Mode::Cutting));
     }
 
-    /// What a stop as a cut starts met (Bevel, 14 Nov): a stop cut short `@M2`, which the
+    /// What a stop as a cut starts met (an app, 14 Nov): a stop cut short `@M2`, which the
     /// controller carried out, and the host went on believing the old mode. Cut short, a switch
     /// leaves the mode unknown; refused, it leaves the old mode standing.
     #[test]

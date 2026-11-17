@@ -1,7 +1,7 @@
 //! A session (CALIBRATION.md §8): one run of a routine, kept so it can be resumed, read later,
 //! and fitted again. It holds the plan as cut (with the machine profile it was placed with), the
 //! calibration's revision then, how far the cut got, and the readings taken so far. It is plain
-//! data, serialisable, so `mc601` keeps it in its session folder and Bevel as a file of its own.
+//! data, serialisable, so `mc601` keeps it in its session folder and an app as a file of its own.
 //!
 //! A cut that stopped keeps its session: a reading whose cuts all finished can still be taken
 //! and fitted; one that needs a cut that never finished can't.

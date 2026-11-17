@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     /// The bevel's sideways default is 0.4525: fitted exactly, with no scatter and so no
-    /// standard error, it rounds to 0.453 and is within the noise, not moved (found by Bevel).
+    /// standard error, it rounds to 0.453 and is within the noise, not moved (found by an app).
     #[test]
     fn a_value_held_finer_than_written_isnt_moved_by_rounding() {
         let cal = Calibration::new();

@@ -647,12 +647,12 @@ cutting speed) with the blade in the board, then accelerates at 3,600 mm/s²:
 | 2.7 mm at 35 % (315 mm/s) | 100 mm/s | ~12 mm |
 | 4.6 mm at 10 % (90 mm/s) | 90 mm/s | no ramp |
 
-**Traced in GMC's code** [GMC; 16 Nov]: the thickness soft start sits inside a test for the
-straight head, so a bevel cut never gets it; its ramp only stretches for a first segment off
+**How GMC does it** [GMC; 16 Nov]: the thickness soft start is for the
+straight head only, so a bevel cut never gets it; its ramp only stretches for a first segment off
 the axes, and its `#S` stays at the head's `StartStop`. The drawn-shape start (`CBStartStop`,
-1000 [GCF]) is in reach of bevel cuts in the code, but the captures show bevel edges at
-`#S4000` and straight edges at `#S1000` in the same job: GMC's lookup of the shape behind a cut
-seems not to find a window's outline (not confirmed: the shape library isn't decompiled). The
+1000 [GCF]) could apply to bevel cuts, but the captures show bevel edges at
+`#S4000` and straight edges at `#S1000` in the same job: GMC seems not to take a
+window's outline for a drawn shape (not confirmed). The
 cutting speed is the profile's speed %, the same on curves and straight edges (the radius
 slowdown is the controller's, §2.4.1). After a head-down GMC waits the profile's `HeadUpDown`
 (250 ms on C10, 400 ms on C12), else the head's `HDSleep`. Above `SafeTurn` (0.2 cm [GCF])
@@ -967,7 +967,7 @@ The cut grows by the same amount at both ends, which matches
 but that is the profile's blade trim (3° on C10, 4° on C11 and C12, §3.2), not the thickness:
 C11 and C12 differ in thickness and both give 783.
 
-**GMC's rule, traced in its code** [GMC; 16 Nov]. GMC splits each contour at corners sharper
+**GMC's rule** [GMC; 16 Nov]. GMC splits each contour at corners sharper
 than the break angle and, for each cut, as the 601 cuts (board face down: `CutFaceUp` false in
 the shop's parameters [GCF]):
 
@@ -1085,7 +1085,7 @@ mark lands on the visible edge.
 [GCF]. The driver's compiler does the same for closed smooth cuts, starting from these values
 (PROGRAM_FORMAT §4.2).
 
-**Traced in GMC's code** [GMC; 16 Nov], beyond the above:
+**How GMC does it** [GMC; 16 Nov], beyond the above:
 
 - **The overlap is a time, so it shrinks with the speed**: the profile's speed % of 900 mm/s
   for `CurveAddon` ms, the radius model capping `CurveMaxRadius` at 50 cm. About 1,580 mm on

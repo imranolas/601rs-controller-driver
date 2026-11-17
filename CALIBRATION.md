@@ -9,11 +9,11 @@ the tool model (§3) and the routines rebuilt around it (§5). Decisions are in 
 overcut) and §8 (the profiles); [`PROGRAM_FORMAT.md`](PROGRAM_FORMAT.md) §3 (the material) and §8
 (the machine profile).
 
-The aim: a framer calibrates the machine and each board profile from **Bevel**. They pick a
+The aim: a framer calibrates the machine and each board profile from **an app**. They pick a
 routine, cut its sheet at the machine, type in what the calipers say, see what will change, and
 accept it. The result is one file that every part reads: the compiler, the runner, `mc601`, and
-Bevel's Arrange and Cut. The driver provides everything except the screens. Bevel's screens stay
-generic: a new routine needs no new UI.
+the apps that lay out and cut sheets. The driver provides everything except the screens. An
+app's screens stay generic: a new routine needs no new UI.
 
 ---
 
@@ -21,7 +21,7 @@ generic: a new routine needs no new UI.
 
 *16 Nov, end of day.* Built on `calibrate/m3-plans` (§10 has each step):
 
-- **The file** (§4): the machine's calibration, one per machine, shared by `mc601` and Bevel,
+- **The file** (§4): the machine's calibration, one per machine, shared by `mc601` and apps,
   with its history and revert. Everything that cuts asks it: `machine()`, `blade()`,
   `material(profile)`, `thickness(profile)`.
 - **The tool model** (§3) in the compiler: each head described physically, lines and run-ons
@@ -44,26 +44,26 @@ generic: a new routine needs no new UI.
 4. If its sheet is still there, calibration 1's overrun readings taken again on the face
    (§10, step 4).
 
-**Waiting on Bevel** (step 9, §10): its Calibrate on the driver's session and
-stage 2; cutting with the file's blade and machine, not the hardcoded defaults; programs
+**Waiting on the apps** (step 9, §10): calibrating from an app, on the driver's sessions
+and stage 2; cutting with the file's blade and machine, not the hardcoded defaults; programs
 compiled again when the calibration is newer; the board profiles in the file.
 
 **Not yet:** pooling sessions in a proposal (a report only, `mc601 calibrate fit DIR DIR`);
-ovals and hooks (§5); Bevel recording a blade change (§11).
+ovals and hooks (§5); an app recording a blade change (§11).
 
 ## 2. Principles
 
 1. **One file per machine.** It holds the calibrated values only. Everything else is the
    driver's defaults. It is read by everything that cuts or predicts a cut.
 2. **A routine is data.** Its plan is a program to cut, the readings to take, a drawing to
-   show them on, and the instructions. Bevel renders plans. It never knows what a comb is.
+   show them on, and the instructions. An app renders plans. It never knows what a comb is.
 3. **Calibration sheets are ordinary programs** in the board frame. They are cut through the
    normal runner with the current calibration: no raw mode, and every safety check applies. The
    fit learns where each cut went by lowering the program again with the profile it was cut
    with. Lowering is pure, so no log is needed.
-4. **Pure, but for the store.** No clock in the library: Bevel and `mc601` pass in the time.
+4. **Pure, but for the store.** No clock in the library: apps and `mc601` pass in the time.
    Its only I/O is `calibrate::store`, the calibration file's path, load and save, kept there so
-   the two front ends that share the file can't disagree about it.
+   the front ends that share the file can't disagree about it.
 5. **Nothing changes without the operator.** The fit proposes. Apply writes a new revision,
    which records what changed, from what, and why. Every revision is kept, and revert is one
    step.
@@ -77,7 +77,7 @@ ovals and hooks (§5); Bevel recording a blade change (§11).
 
 **Words.** The **face** is the customer's side of the board; the 601 cuts it face down, so the
 face lies on the sheets under the board. The **back** is up, where the blade enters, and where
-Bevel's designs give a window's edge. "On the face" always means the customer's side, never
+a design gives a window's edge. "On the face" always means the customer's side, never
 whichever side is up.
 
 GMC calibrates numbers per head and patches each board in its profile (protocol reference §7):
@@ -178,7 +178,7 @@ settings. They stay in `machine::Profile`. `mc601 check` covers the hardware.
 **Downstream.** The head's position is applied when a program is lowered, so programs stay
 valid across it (PROGRAM_FORMAT §8). The rest of the tool places lines and run-ons, which the
 compiler bakes into `path_mm`, so a program compiled before the tool changed is stale: the
-compiler's caller stamps `meta.calibration_revision`, and Bevel recompiles a sheet when the
+compiler's caller stamps `meta.calibration_revision`, and an app recompiles a sheet when the
 stamp is older than the calibration (§9). With per-profile values gone, only a tool change or a
 board's thickness makes a program stale.
 
@@ -213,7 +213,7 @@ board's thickness makes a program stale.
 **Keys.** Each value is one number (or, for a profile's name, text) under a dotted key. One
 value is one history line, so setting an X offset never carries its Y along, and revert is
 exact. `calibrate::key::Key` is the typed form; its text is what the file, the history,
-`mc601` and Bevel's TypeScript use.
+`mc601` and apps use.
 
 | Key | Unit | Default |
 |-----|------|---------|
@@ -243,11 +243,11 @@ steps/mm, …). Whether a change is plausible is the fit's question (§7), not t
   revision *n* writes a new revision equal to *n*, so revert can be reverted too. A typed value
   (thickness, speed) is an entry with no routine. Edits that change nothing make no revision.
 - **Profile ids are the shop's.** The file owns the profile list and each profile's cutting
-  values, since they depend on this machine's blades. Bevel's board list refers to a profile by
+  values, since they depend on this machine's blades. An app's board list refers to a profile by
   id (decided, §11).
 - `deny_unknown_fields`, an unknown key refused, and version 1 refuses other versions.
-- **One file for the machine**, shared by `mc601` and Bevel (decided, §11): a calibration taken
-  from either is the machine's. The path rule is the driver's, so the two can't drift:
+- **One file for the machine**, shared by `mc601` and apps (decided, §11): a calibration taken
+  from any of them is the machine's. The path rule is the driver's, so they can't drift:
   `calibrate::store`, the crate's only I/O. The file is `$MC601_CALIBRATION` if set, else
   `calibration.json` beside `mc601`'s `config.json`: `~/.config/mc601/` (or
   `$XDG_CONFIG_HOME/mc601/`), and `%APPDATA%\mc601\` on Windows, the shop PC. `mc601` takes
@@ -417,7 +417,7 @@ impl Plan {
 ```
 
 The drawing is the program's cuts and each reading's dimension, all geometry from the driver, so
-Bevel only draws them (Bevel's rule: the front end does no geometry). A comb's teeth are named
+a front end only draws them. A comb's teeth are named
 cuts of the program, so the drawing can mark each one.
 
 **JSON, one reading:**
@@ -535,7 +535,7 @@ impl Proposal {
 ```
 
 *Built since:* each change's effect in words (`Change::effect`, worked out on the board the
-routine was cut on, the run-ons by the compiler's own `run_on`); and, found by Bevel, a value
+routine was cut on, the run-ons by the compiler's own `run_on`); and, found by an app, a value
 that rounds to within half a step of the file's (a micrometre, a hundredth of a degree) is
 within the noise whatever its standard error, so readings that fit exactly don't call the
 bevel's 0.4525 moved to 0.453. Pooling sessions in a proposal is still to come.
@@ -556,7 +556,7 @@ expected a border of −24.7 mm. Edges are now ordered as they lie on the board.
 ## 8. Sessions: cut, read, fit, apply
 
 *Built, 16 Nov:* `calibrate::Session`. A session is one run of a routine. It is serialisable,
-so Bevel can keep it as a file, resume it tomorrow, and fit it again later; `mc601` keeps it in
+so an app can keep it as a file, resume it tomorrow, and fit it again later; `mc601` keeps it in
 the session folder as `routine.json`, beside the program (`stage_1.json`, `stage_2.json`), the
 run's log and the fit with its proposal (`fit.txt`).
 
@@ -588,12 +588,12 @@ as a suspect in the fit. If the file has moved on since the plan was made, the p
 In `mc601`, a run that stops records how far it got, and `calibrate read` asks only for the
 readings whose cuts were made; `calibrate fit DIR DIR …` fits stage 1 sessions together.
 
-**The flow, as Bevel shows it.**
+**The flow, as an app shows it.**
 
 1. **Prepare.** The plan's board need in words ("An offcut of C2, at least 140 × 105 mm, into
    the front-left stops"), and the drawing of what will be cut.
 2. **Cut.** The plan's program goes to the station like any sheet: `station.run(program)`.
-   Load, Run, pause, stop, the safe state: Cut's own screens and the runner's rules, unchanged.
+   Load, Run, pause, stop, the safe state: the app's own screens and the runner's rules, unchanged.
    A stop keeps the session: readings that need an op that never finished drop out
    (`needs_ops`). The rest can still be read and fitted.
 3. **Measure.** One step at a time (`steps`), one reading at a time. The drawing shows which
@@ -619,22 +619,22 @@ readings whose cuts were made; `calibrate fit DIR DIR …` fits stage 1 sessions
 | `runner` | *Built, 16 Nov:* `Runner::set_profile(profile)` between jobs (a run holds the runner, so nothing runs meanwhile), so a new revision applies without reopening the session. Homing stays valid: the profile changes the arithmetic, not where the carriage is. It re-runs `configure` if the controller settings differ; a calibration never changes them. |
 | `mc601` | `calibrate` becomes a terminal front end over the crate: `mc601 calibrate <routine> [--profile C2]` (cut, read, fit, apply; `heads` built, 16 Nov); `mc601 calibration show \| history \| set KEY VALUE … \| unset KEY … \| remove-profile ID \| revert N \| path` (built, step 2). `run`, `check`, `probe` and `calibrate` read the file, from `--calibration FILE` or the shared path. `calibrate fit --sheet` keeps fitting the old raw sheets from their logs, for the record and the golden tests. |
 
-**In Bevel** (for Bevel's own spec; the driver is designed to make it possible):
+**In an app** (the driver is designed to make it possible):
 
-- **The Tauri shell** loads the file once and passes it on. It gives `cal.machine()` to
-  `Station::open`, and `cal.blade()`, `cal.material(p)` and `cal.thickness(p)` to Arrange's times and Cut's
-  compile. That replaces the five hardcoded defaults. After an apply, it calls the runner's
-  `set_profile` and marks Arrange's cached times stale.
-- **The pure parts** (`routines`, `plan`, `predict`, `check`, `fit`, `apply`) can go in
-  `design-wasm`, as Arrange's do. The browser build then runs the whole flow against the
-  simulator. Storage and the station stay in the shell, as Cut's do.
-- **A Machine page**, beside the three steps or under settings, holds:
+- **The app** loads the file once and passes it on. It gives `cal.machine()` to the runner's
+  session, and `cal.blade()`, `cal.material(p)` and `cal.thickness(p)` to its time estimates
+  and to `compile`. After an apply, it calls the runner's `set_profile` and marks its cached
+  estimates stale.
+- **The pure parts** (`routines`, `plan`, `predict`, `check`, `fit`, `apply`) build for
+  WebAssembly, so a browser build can run the whole flow against the simulator. Storage and
+  the machine stay native.
+- **A machine page** holds:
   - the overview (`values()`: each value, where it came from, when, ±);
   - each profile's state;
   - the history with revert.
-- **A routine** runs as Prepare → Cut (Cut's own Load and Run) → Measure → Result.
-- **Profiles move** from `data/materials.json` into the calibration file (decided). Board codes
-  keep their profile id. Thickness, speed, settle and trims are typed on the Machine page.
+- **A routine** runs as Prepare → Cut (the app's own Load and Run) → Measure → Result.
+- **Profiles move** from an app's own board list into the calibration file (decided). Board codes
+  keep their profile id. Thickness, speed, settle and trims are typed on the machine page.
   Run-ons come from the tool (§3), worked out for each board's thickness.
 
 ## 10. Order of work
@@ -695,10 +695,8 @@ Each step passes `cargo test` and stops for review.
    come: each change's effect in words, and pooling in a proposal.
 8. **The runner:** `set_profile`. *Built, 16 Nov:* on the simulator, the run after it sends
    exactly what the new profile lowers to, homing kept, nothing written to the controller.
-9. **A request to Bevel**, written there by Bevel's own process: what §9 lists. *Drafted, 16
-   Nov, for Bevel's process to take up (not kept here):* answering Bevel's
-   `docs/driver-requests.md` (`set_profile`; a finely held value no longer called moved by
-   rounding) and listing what's new for its CALIBRATE.md and what §9 asks of it.
+9. **The apps' part:** what §9 lists. *Handed over, 16 Nov:* `set_profile`, a finely held
+   value no longer called moved by rounding, and what §9 asks of an app.
 
 Ovals and hooks wait (§5).
 
@@ -706,10 +704,10 @@ Ovals and hooks wait (§5).
 
 **Decided with Imran, 15 Nov:**
 
-1. **One file for `mc601` and Bevel.** Both drive the same machine from the one shop PC, so a
-   calibration from either is the machine's (§4).
+1. **One file for `mc601` and apps.** They drive the same machine from the one shop PC, so a
+   calibration from any of them is the machine's (§4).
 2. **The profile list is in the calibration file.** A profile's numbers depend on this
-   machine's blades. Bevel's board list refers to a profile by id (§4, §9).
+   machine's blades. An app's board list refers to a profile by id (§4, §9).
 3. **The shop's fitted numbers are the defaults** in `Profile::gunnar_601()` and
    `Blade::fitted()`. A missing file is the shop's 601 as fitted. GMC's numbers stay as
    `Blade::gmc()` for the golden tests.
@@ -739,7 +737,7 @@ Ovals and hooks wait (§5).
 
 **Still open:**
 
-11. **Blade changes.** Should Bevel record "blade changed" (Cut's Load already asks for one), so
-    the Machine page can suggest stage 2?
+11. **Blade changes.** Should an app record "blade changed" (it asks when a board is loaded), so
+    its machine page can suggest stage 2?
 12. **Each head's start lead and end shortfall on the face** (§3): calibration 1's overrun
     readings taken again on the face, if its sheet is still there.

@@ -79,7 +79,7 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 Stage 1 (CALIBRATION.md §5), on a new machine or after a knock or head service: a 100 mm mount
 with a 50 mm bevel window on a 150 × 150 mm offcut, and 16 caliper readings. It sets each head's
 position, the straight slit's offset and width, and the bevel's offset and lean, in the
-calibration file `mc601` shares with Bevel.
+calibration file `mc601` shares with apps.
 
 ```sh
 mc601 calibrate heads --thickness 1.42   # stage 1: plan, cut, then take its readings, fit, offer the changes

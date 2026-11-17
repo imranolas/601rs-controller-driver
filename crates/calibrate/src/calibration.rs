@@ -1,4 +1,4 @@
-//! The calibration file (CALIBRATION.md §4): one per machine, shared by `mc601` and Bevel. It
+//! The calibration file (CALIBRATION.md §4): one per machine, shared by `mc601` and apps. It
 //! holds the calibrated values only, each under its key ([`Key`]), over the driver's defaults:
 //! the shop's 601 as fitted (`machine::Profile::gunnar_601`, `compiler::Blade::fitted`). It
 //! also holds the board profiles, and the history of every change, append-only, so any
@@ -623,7 +623,7 @@ mod tests {
         s.parse().expect(s)
     }
 
-    /// C2 as Bevel's stand-in has it, with GMC's C2 settings.
+    /// C2 as a board list might have it, with GMC's C2 settings.
     fn with_c2() -> Calibration {
         Calibration::new()
             .set(

@@ -52,7 +52,7 @@ Schema: [`program.schema.json`](program.schema.json). Protocol background: [`PRO
 
 > **Registration:** the board's bottom-left corner sits in the machine's front-left corner, by
 > the red button, against the stops, and machine +Y is away from the operator, as here
-> (operator's account, GMC's code and captures: protocol reference §4.1; `mc601 check` stage 3
+> (operator's account, [GMC] and captures: protocol reference §4.1; `mc601 check` stage 3
 > confirmed it). The corner is at machine (0.225, −0.275) mm (Q1).
 >
 > **Clamps:** a cut may run to any edge of the board, but not over a **clamp pad** unless the

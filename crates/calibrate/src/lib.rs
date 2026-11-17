@@ -1,6 +1,6 @@
 //! Calibrating the 601 (CALIBRATION.md): the machine's calibration file, the two routines that
 //! calibrate it, as plans an app can run, their sessions, the fit to the operator's readings,
-//! and what it proposes. Pure but for [`store`]: no clock, so `mc601` and an app (Bevel) use it
+//! and what it proposes. Pure but for [`store`]: no clock, so `mc601` and an app use it
 //! alike.
 //!
 //! - [`calibration`]: the file. The calibrated values over the driver's defaults (the shop's
@@ -9,7 +9,7 @@
 //!   profile's material and thickness.
 //! - [`key`]: what can be calibrated, each value's key (`machine.bevel.offset.x`), unit, words
 //!   and bounds.
-//! - [`store`]: where the file lives, shared by `mc601` and Bevel, and reading and writing it
+//! - [`store`]: where the file lives, shared by `mc601` and apps, and reading and writing it
 //!   without one overwriting the other's change.
 //! - [`plan`]: a routine as data: the program to cut, the steps and readings, what each should
 //!   read and where it is taken; [`heads`] (stage 1) and [`runons`] (stage 2) make them.

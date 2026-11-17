@@ -340,7 +340,7 @@ fn a_board_with_every_pad_turned_is_refused() {
     );
 }
 
-/// Bevel's own example (its `cleanup` tests): a 600 × 500 piece in the trims' corner of a
+/// An app's example: a 600 × 500 piece in the trims' corner of a
 /// 1015 × 815 sheet frees the rest of its strip and the band above it.
 fn bevels_corner() -> Sheet {
     Sheet {
@@ -362,7 +362,7 @@ fn bevels_corner() -> Sheet {
 
 #[test]
 fn clean_up_lines_share_cuts_with_the_pieces_as_the_nester_counts() {
-    // Each of Bevel's three lines is on one of the piece's edges, overlapping or touching it:
+    // Each of the three clean-up lines is on one of the piece's edges, overlapping or touching it:
     // the strip's front line runs on from the piece's bottom edge, the band's line through its
     // top edge, the line up its side is its right edge. Four straight cuts, with or without.
     let with = run(&bevels_corner());

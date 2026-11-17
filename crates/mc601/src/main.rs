@@ -46,7 +46,7 @@ use crate::target::Res;
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// The calibration file [default: the one mc601 shares with Bevel: `mc601 calibration path`]
+    /// The calibration file [default: the one mc601 shares with apps: `mc601 calibration path`]
     #[arg(long, global = true, value_name = "FILE")]
     calibration: Option<PathBuf>,
 }

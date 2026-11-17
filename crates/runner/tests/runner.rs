@@ -298,7 +298,7 @@ fn a_pause_op_holds_until_the_operator_resumes() {
 }
 
 /// A stop from another thread the moment a cut starts lands as the runner switches the
-/// controller to mode 2 for the cut, and cuts the switch short (Bevel, 14 Nov: four times in
+/// controller to mode 2 for the cut, and cuts the switch short (an app, 14 Nov: four times in
 /// four). The controller had switched; the runner, believing mode 1, sent the heads up and
 /// clamps released (`$A02`) unswitched, and the controller refused it (`*001`), leaving the
 /// clamps closed and the stop reported unsafe.

@@ -3,7 +3,7 @@
 //!
 //! A [`Sheet`] is the board as it lies on the machine, face down, in the board frame
 //! (PROGRAM_FORMAT §2), and the contours to cut on it: each a rectangle or an ellipse in an
-//! axis-aligned box (its back edge, as Bevel's design crate gives it), with a tool and the side
+//! axis-aligned box (its back edge, as a design gives it), with a tool and the side
 //! the board is kept on. [`compile`] turns them into cuts and puts them in order:
 //!
 //! - **Bevel rectangles**: four cuts, a window's clockwise and a kept piece's anticlockwise, so
