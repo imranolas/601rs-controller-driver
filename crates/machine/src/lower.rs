@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use program::{ClampSide, Cut, Head as HeadKind, Op, Program, Resume};
 use protocol::{Command, Mode, Radius, Setting, SettingKey, StreamFlags};
 
-use crate::frame::{self, CarriageMm, Pt};
+use crate::frame::{self, CarriageMm, MachineMm, Pt};
 use crate::profile::{Capabilities, Pad, Profile};
 
 /// The speed-table entry cutting uses, and in GMC's form travel too.
@@ -131,9 +131,16 @@ pub enum Error {
         point: usize,
         turn_deg: f64,
     },
-    /// The carriage would leave the machine's soft limits (V10).
-    #[error("{at}: the carriage would reach {carriage_mm}, outside the machine's limits")]
-    OutsideEnvelope { at: At, carriage_mm: CarriageMm },
+    /// A blade would leave the machine's soft limits (V10, [`Profile::reach_mm`]).
+    #[error("{at}: the {head} blade would reach {blade_mm}, outside the machine's limits")]
+    OutsideEnvelope {
+        at: At,
+        head: HeadKind,
+        blade_mm: MachineMm,
+    },
+    /// The carriage would leave its travel ([`Profile::travel_mm`]).
+    #[error("{at}: the carriage would reach {carriage_mm}, outside its travel")]
+    OutsideTravel { at: At, carriage_mm: CarriageMm },
     /// A cut runs over a clamp pad ([`Profile::pads`]) the program hasn't turned out of the way
     /// (the `clamp` op's `turned`): the head would hit it.
     #[error(
@@ -257,7 +264,9 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                 }
                 let z = (profile.scale.z_steps_per_deg * l.blade_deg) as i32;
                 let deg = l.blade_deg;
-                l.travel(At::Op(i), frame::steps(profile, head, p), z, deg)?;
+                let steps = frame::steps(profile, head, p);
+                l.check(At::Op(i), kind, steps)?;
+                l.travel(steps, z, deg);
             }
             Op::Pause(p) => {
                 l.may_turn |= l.released;
@@ -276,7 +285,14 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
 
     l.outputs(l.clamps | profile.neutral_outputs);
     let park = profile.park_steps;
-    l.travel(At::Park, park, 0, 0.0)?;
+    let carriage_mm = profile.carriage_mm(park);
+    if !profile.travel_mm().contains(carriage_mm) {
+        return Err(Error::OutsideTravel {
+            at: At::Park,
+            carriage_mm,
+        });
+    }
+    l.travel(park, 0, 0.0);
     l.outputs(profile.neutral_outputs);
     l.idle();
     Ok(Job {
@@ -454,8 +470,7 @@ impl Lowering<'_> {
     /// travel with a large turn of the blade takes the faster ramp, by its rule for a serial
     /// port [GMC]; in one stream it runs at the travel entry,
     /// with the stream's ramp.
-    fn travel(&mut self, at: At, steps: [i32; 2], z: i32, deg: f64) -> Result<(), Error> {
-        self.check(at, steps)?;
+    fn travel(&mut self, steps: [i32; 2], z: i32, deg: f64) {
         let p = self.profile;
         if self.caps.travel_entry {
             self.send(Command::StreamFlags(StreamFlags {
@@ -493,15 +508,20 @@ impl Lowering<'_> {
         }
         self.carriage = steps;
         self.blade_deg = deg;
-        Ok(())
     }
 
-    fn check(&self, at: At, steps: [i32; 2]) -> Result<(), Error> {
-        let carriage_mm = self.profile.carriage_mm(steps);
-        if self.profile.envelope_mm.contains(carriage_mm) {
+    /// `kind`'s blade, with the carriage at `steps`, is within its reach (V10).
+    fn check(&self, at: At, kind: HeadKind, steps: [i32; 2]) -> Result<(), Error> {
+        let p = self.profile;
+        let blade_mm = p.head(kind).blade(p.carriage_mm(steps));
+        if p.reach_mm(kind).contains(blade_mm) {
             Ok(())
         } else {
-            Err(Error::OutsideEnvelope { at, carriage_mm })
+            Err(Error::OutsideEnvelope {
+                at,
+                head: kind,
+                blade_mm,
+            })
         }
     }
 
@@ -597,25 +617,25 @@ impl Lowering<'_> {
                 });
             };
 
+            for q in &steps {
+                self.check(At::Op(op), kind, *q)?;
+            }
             // Settings can't change inside a stream: in one stream they come first; in GMC's
             // form, the cutting ramp before the head goes down and the rest after.
             if self.caps.travel_entry || self.caps.stream_head {
                 if self.caps.travel_entry {
                     settings(self);
                 }
-                self.travel(At::Op(op), steps[0], z[0], deg(0))?;
+                self.travel(steps[0], z[0], deg(0));
                 if !self.caps.travel_entry {
                     settings(self);
                 }
                 self.head_to(self.clamps | down, settle_down);
             } else {
-                self.travel(At::Op(op), steps[0], z[0], deg(0))?;
+                self.travel(steps[0], z[0], deg(0));
                 self.set(Setting::RampMs(cut_ramp));
                 self.head_to(self.clamps | down, settle_down);
                 settings(self);
-            }
-            for q in &steps[1..] {
-                self.check(At::Op(op), *q)?;
             }
             let points: Vec<[i32; 3]> = (1..=last)
                 .map(|k| [steps[k][0], steps[k][1], z[k]])

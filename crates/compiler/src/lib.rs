@@ -228,7 +228,7 @@ pub fn compile(
         &blade.straight,
         thickness,
         options.straight_away_from_clamps,
-        reach(profile, Head::Straight),
+        reach(profile, Head::Straight, REACH_MARGIN_MM),
     );
     cuts.extend(strokes);
     cuts.extend(cleanup_cuts);
@@ -257,22 +257,20 @@ pub fn compile(
     })
 }
 
-/// How far inside its limits the carriage stays, mm, so rounding to motor steps can't take it out
+/// How far inside its limits a blade stays, mm, so rounding to motor steps can't take it out
 /// (the route's check allows half as much).
-const REACH_MARGIN_MM: f64 = 0.1;
+pub(crate) const REACH_MARGIN_MM: f64 = 0.1;
 
-/// Where on the board `head` can cut, `[x0, y0, x1, y1]`: where the carriage stays inside the
-/// machine's limits (V10).
-fn reach(profile: &Profile, head: Head) -> [f64; 4] {
-    let [dx, dy] = profile.head(head).offset_mm;
+/// Where on the board `head` can cut, `[x0, y0, x1, y1]`: `m` mm inside its reach on the
+/// machine (V10, `Profile::reach_mm`).
+pub(crate) fn reach(profile: &Profile, head: Head, m: f64) -> [f64; 4] {
     let machine::MachineMm([ox, oy]) = profile.board_origin_mm;
-    let e = &profile.envelope_mm;
-    let m = REACH_MARGIN_MM;
+    let r = profile.reach_mm(head);
     [
-        e.x[0] + dx - ox + m,
-        e.y[0] + dy - oy + m,
-        e.x[1] + dx - ox - m,
-        e.y[1] + dy - oy - m,
+        r.x[0] - ox + m,
+        r.y[0] - oy + m,
+        r.x[1] - ox - m,
+        r.y[1] - oy - m,
     ]
 }
 

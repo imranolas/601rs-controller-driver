@@ -245,7 +245,7 @@ straight and bevel (V-groove, score, pens) will come in a later version as new `
 | V7 | Within a `cut`, the direction change between consecutive segments is ≤ the break angle (15°, from the profile). |
 | V8 | `ids`, when present, are unique within the program. |
 | V9 | The `pause` `resume` value is known. |
-| V10 *(machine model)* | Every machine coordinate, after the profile mapping, is inside the machine's soft-limit envelope. |
+| V10 *(machine model)* | Every blade position, after the profile mapping, is within its head's reach: the machine's soft limits, which are the blade's, with the carriage off its minus switches (protocol reference §2.5). |
 | V11 *(machine model)* | No cut runs over a clamp pad that the `clamp` op before it doesn't name in `turned`; every name in `turned` is one of the profile's pads; and `turned` changes only before the first clamping, or after a release and a `pause`. |
 
 V1–V9 need no machine profile, so the designer can check them while editing. V10 and V11 need the

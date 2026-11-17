@@ -422,6 +422,16 @@ For Cut Other End GMC mirrors the left pads at the table's right end, `PageWidth
 [GMC]. The pads on the table's left half are the ones a board up to 78 cm reaches, so they are
 presumably the left clamp's (`40`), and the rest the right clamp's.
 
+**The soft limits are the blade's, not the carriage's** [GMC]. GMC refuses a move whose blade,
+for the head in use, would go more than 5 mm below zero or more than 1 cm past the drivable
+range (`DRX` 156 cm, `DRY` 101.5 cm [GCF]), and only then turns the blade's position into the
+carriage's with the head's offset. So the bevel head, 71.45 mm left of the carriage, cuts to
+X 157 cm with the carriage at 164.1 cm: Cut Other End lays the board against the right-hand
+clamp, and the shop's board list has a 152.5 × 102 cm jumbo [GCF]; the 601 cuts both
+(operator). The driver's limits are GMC's, per head (`machine::Profile::reach_mm`), and the
+carriage also keeps the homing offset's room off its minus switches (§4.1). No capture or
+session yet has the carriage past X 147.15 cm, the park.
+
 A cut that runs over a pad isn't refused: GMC lists the pads with their positions and numbers,
 "Please deactivate the indicated clamps", highlights them, and lets the operator go on once
 they are turned out of the way [GMC]. The driver does the same through the `clamp` op's
@@ -794,10 +804,11 @@ result [GMC]. Its speeds are those of any of its positioning moves: `#C1,0 #R225
 for the run there, and `#R112` for the push and back,
 the fast ramp it gives a move under `FastZMinLenXY` [GMC] [CAP g_init]. The blade's angle picks the way the switch goes: 90° for normal cutting, 270° for
 V-groove (`VGChangeZ` + 180) [GMC]. Heads switched electrically get a 250 ms pulse of `i_dd`
-instead (§2.5) [GMC]. The push goes 30 mm past the 101.5 cm the
-profile allows, so Y's travel reaches at least 104.5 cm. `mc601 --sim` puts the simulator's plus
-switches no further: X at the profile's 156 cm, Y at the stub, each counted from its minus switch
-7.5 mm below zero. Neither plus switch is measured yet (`mc601 check` stage 7) *(sim assumption)*.
+instead (§2.5) [GMC]. The push goes past the soft limits (a blade to 102.5 cm, §2.5), so Y's
+travel reaches at least 104.5 cm. `mc601 --sim` puts the simulator's plus switches no further:
+X where the bevel head's carriage goes at GMC's limit (164.1 cm), Y at the stub, each counted
+from its minus switch 7.5 mm below zero. Neither plus switch is measured yet (`mc601 check`
+stage 7) *(sim assumption)*.
 
 A driver must do the same after homing, before the bevel head cuts: a head left in V-groove
 mode by an earlier job would cut at V-groove depth. Here `machine::vgroove_reset` holds GMC's
@@ -1252,6 +1263,12 @@ The machine controls **XY position and blade rotation** only. Depth is set by ha
 ---
 
 ## 13. Changelog
+
+### 2026-11-17: the soft limits
+
+| Was | Now | Source |
+|-----|-----|--------|
+| The carriage within `DRX` 156 × `DRY` 101.5 cm: the bevel head cut only to board X 148.8 cm, either head to Y 101.7 cm | each head's blade within 5 mm below zero to 1 cm past `DRX` × `DRY`, the carriage off its minus switches: either head cuts to a jumbo board's far edges, the bevel with the carriage at 164.1 cm (§2.5) | GMC; GCF; operator |
 
 ### 2026-11-06: start of a cut and the blade trim
 

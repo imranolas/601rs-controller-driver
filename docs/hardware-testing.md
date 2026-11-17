@@ -45,7 +45,7 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 | 4 | yes | 20 mm square in mode 2, GMC style; `@X` 15 → 14 → 04; exact return; `@B` during the square discards the rest of the path instead of resuming it (stop-now depends on this) |
 | 5 | yes | in-stream `A`/`W`/`I221`/`C`; `@N` progress (does `C` count? the command running or those finished? does it wrap after 9999?); `C1` skips the dead time; `@O50` with `C16`/`C8`; the stream waits for the green button (you press it); a compact path (relative steps without the `L20,` prefix) lands exactly; a second speed entry gives its own feed; whether in-stream `G` applies in sequence or on receipt |
 | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full" (the spec contradicts itself); a 22 KB stream with `#C7,1` and `#C19,400` completes; streaming at full speed does not overrun (else 0x03 comes too late over this link); `@B` while the stream is held discards the queued path, nothing moves afterwards, and `0x02` follows |
-| 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past GMC's drivable range (X 1560 mm): async `*033`, `@Y` limit bit, recovery |
+| 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past where the carriage goes (X 1641.5 mm, the bevel head at GMC's limit): async `*033`, `@Y` limit bit, recovery |
 | 8 | yes | **blades out**: each head down as GMC lowers it, nothing moving (does `i_b` bypass the throttle, so `05` is fast and `01` slow? the lift `00`; the straight head `0A`: you answer); a quarter turn of Z alone, timed, and inside a stream as a corner (does the carriage stand still while the blade turns?); how long after `@X04` a trailing `A` switches; a stream held at the green-button wait filled with 1 mm moves until a flow byte (up to 512 KB): buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it (don't press the button) |
 
 **The room below zero.** The driver takes the carriage to have 7.5 mm below zero after homing:
@@ -55,7 +55,15 @@ GMC's `#OX,300` and `#OY,300` leave each axis that far off its switch before zer
 runs to the edge, once stage 3 has homed: cut a scrap board with a straight cut run on past its
 left edge (a sheet with a clean-up line to the edge does). It must finish without `*032` (X
 minus) or `*034` (Y minus). If either comes, the room is smaller than assumed: say so, and
-`machine::Profile::envelope_mm` changes to match.
+the driver's reach below zero (`machine::Profile::reach_mm`) changes to match.
+
+**The far end.** The driver lets the carriage go to X 1641.5 mm, where the bevel head's blade
+meets GMC's limit (1 cm past `DRX`), as Cut Other End and a jumbo board need. No session yet has
+the carriage past the park, X 1471.5 mm. Before a job relies on it: run a scrap jumbo-sized
+sheet, or a straight cut along a board's right edge with the bevel head, near the right-hand
+clamp, with a hand on the stop. It must finish without `*033` (X plus) or a knock at the end of
+the rail. If either comes, say so: the driver's reach (`machine::Profile::envelope_mm`) changes
+to match.
 
 ## Safety
 
@@ -66,7 +74,7 @@ minus) or `*034` (Y minus). If either comes, the room is smaller than assumed: s
 - Moves are 20–100 mm from the park, into the table, at 30 mm/s by default (`--speed` in
   steps/s, 100–4000). They stay inside the soft limits even if a stop under test fails. Two
   moves leave them: stage 3's V-groove switch reset, GMC's own after homing and at its speeds
-  (3 cm past the soft limit, against the stub at the back), and stage 7's limit-switch drive,
+  (past the carriage's Y travel, against the stub at the back), and stage 7's limit-switch drive,
   only if the controller can see that switch.
   A controller whose homing direction (`&D`) isn't the profile's gets no moves at all.
 - The heads stay up: only the spare bit `0x80` and, after asking, the clamps are switched.

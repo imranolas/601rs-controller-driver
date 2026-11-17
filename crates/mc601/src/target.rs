@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use controller::{Config, Controller, ControllerError, connect, mode};
 use link::tap::{self, Log};
-use machine::{CarriageMm, Profile};
+use machine::Profile;
 use sim::{Sim, SimConfig};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -69,11 +69,10 @@ pub fn tool_config() -> Config {
 }
 
 /// The simulator with the 601's travel as the machine profile gives it (`SimConfig::default()`'s
-/// is a placeholder). The profile's limits are counter positions, from the zero homing leaves
-/// `homing.offset_steps` off each minus switch; the simulator's travel is steps from that switch.
+/// is a placeholder). The carriage's travel is counted from the zero homing leaves
+/// `homing.offset_steps` off each minus switch; the simulator's, from that switch.
 fn sim_config(p: &Profile) -> SimConfig {
-    let e = p.envelope_mm;
-    let mut plus = p.carriage_steps(CarriageMm([e.x[1], e.y[1]]));
+    let mut plus = p.carriage_steps(p.travel_mm().hi());
     // Y travels at least as far as GMC pushes the V-groove switch, past the soft limit
     // (protocol reference §4.1).
     plus[1] = plus[1].max(p.vgroove_switch.map_or(0, |v| v.y_steps));
@@ -145,13 +144,27 @@ pub fn open(
 mod tests {
     use super::*;
 
-    /// The simulator's travel is the profile's limits from the minus switch: homing's 300 steps
-    /// (7.5 mm) below zero, then X to its soft limit at 1560 mm and Y on past its limit to the
-    /// V-groove stub at 1045 mm.
+    /// The simulator's travel is the carriage's from the minus switch: homing's 300 steps (7.5 mm)
+    /// below zero, then X to the bevel head at GMC's limit (1641.45 mm) and Y on past the soft
+    /// limits to the V-groove stub at 1045 mm.
     #[test]
     fn the_simulators_travel_is_the_profiles_from_the_switch() {
         let travel = sim_config(&Profile::gunnar_601()).travel;
-        assert_eq!(travel, [300 + 62_400, 300 + 41_800]);
+        assert_eq!(travel, [300 + 65_658, 300 + 41_800]);
+    }
+
+    /// The default travel, which the runner's tests and other apps' simulators use, reaches as
+    /// far as the 601's.
+    #[test]
+    fn the_default_travel_covers_the_601s() {
+        let (default, the_601) = (
+            SimConfig::default().travel,
+            sim_config(&Profile::gunnar_601()).travel,
+        );
+        assert!(
+            (0..2).all(|a| default[a] >= the_601[a]),
+            "{default:?} < {the_601:?}"
+        );
     }
 
     /// A program runs to its end on the simulator as `mc601 run --sim` builds it: homing,
@@ -161,6 +174,24 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/programs/g_regular_mount.json");
         let program = crate::cut::read(&path).expect("a program");
+        run_on_the_simulator(Profile::gunnar_601(), &program);
+    }
+
+    /// A jumbo board's far edges, cut with the bevel head on the simulator mc601 builds: the
+    /// carriage near the end of its travel meets no limit switch.
+    #[test]
+    fn a_jumbo_boards_far_edges_cut_on_the_simulator() {
+        let json = serde_json::json!({
+            "format": program::FORMAT, "version": program::VERSION, "id": "jumbo",
+            "board": { "width_mm": 1525.0, "height_mm": 1020.0, "thickness_mm": 1.5 },
+            "material": { "name": "MSK_1.5", "speed_pct": 95.0, "head_settle_ms": 250 },
+            "ops": [
+                { "op": "clamp", "side": "both" },
+                { "op": "cut", "head": "bevel", "path_mm": [[1525.0, 40.0], [1525.0, 1000.0]] },
+                { "op": "cut", "head": "bevel", "path_mm": [[1500.0, 1020.0], [40.0, 1020.0]] }
+            ]
+        });
+        let program = program::Program::from_json(&json.to_string()).expect("a program");
         run_on_the_simulator(Profile::gunnar_601(), &program);
     }
 }

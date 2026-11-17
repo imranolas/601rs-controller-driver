@@ -6,7 +6,7 @@ use protocol::{Command, Setting};
 use crate::profile::Capabilities;
 
 use super::*;
-use crate::frame::{CarriageMm, blade_steps, board_point, directions, steps};
+use crate::frame::{CarriageMm, MachineMm, blade_steps, board_point, directions, steps};
 
 fn p601() -> Profile {
     Profile::gunnar_601()
@@ -130,17 +130,24 @@ fn program(thickness_mm: f64, ops: Vec<Op>) -> Program {
 const LAYOUT: [f64; 2] = [21.0, 21.0];
 
 /// A cut along `path`, given from GMC's layout corner ([`LAYOUT`]).
-fn cut(head: HeadKind, path: &[[f64; 2]]) -> Op {
+/// A cut along `path`, board mm.
+fn board_cut(head: HeadKind, path: &[[f64; 2]]) -> Op {
     Op::Cut(Cut {
         id: None,
         label: None,
         head,
-        path_mm: path
-            .iter()
-            .map(|&[x, y]| [x + LAYOUT[0], y + LAYOUT[1]])
-            .collect(),
+        path_mm: path.to_vec(),
         speed_pct: None,
     })
+}
+
+/// A cut along `path`, from the layout's corner.
+fn cut(head: HeadKind, path: &[[f64; 2]]) -> Op {
+    let path: Vec<_> = path
+        .iter()
+        .map(|&[x, y]| [x + LAYOUT[0], y + LAYOUT[1]])
+        .collect();
+    board_cut(head, &path)
 }
 
 /// A machine without clamp pads keeps GMC's whole-edge border.
@@ -196,15 +203,7 @@ fn cuts_turning(turned: &[&str], paths: &[&[[f64; 2]]]) -> Program {
         side: ClampSide::Left,
         turned: turned.iter().map(|s| (*s).to_owned()).collect(),
     })];
-    ops.extend(paths.iter().map(|path| {
-        Op::Cut(Cut {
-            id: None,
-            label: None,
-            head: HeadKind::Bevel,
-            path_mm: path.to_vec(),
-            speed_pct: None,
-        })
-    }));
+    ops.extend(paths.iter().map(|path| board_cut(HeadKind::Bevel, path)));
     program(1.5, ops)
 }
 
@@ -617,9 +616,91 @@ fn the_vgroove_reset_is_gmcs() {
         ]
     );
     assert!(
-        !p.envelope_mm.contains(p.carriage_mm([0, 41_800])),
-        "past the soft limit"
+        !p.travel_mm().contains(p.carriage_mm([0, 41_800])),
+        "past the soft limits"
     );
+}
+
+/// GMC's soft limits are the blade's: each head reaches 1 cm past the drivable range, and the
+/// carriage goes as far as that takes the bevel head, 71.45 mm left of it. Below zero, the room
+/// homing leaves holds the straight head back.
+#[test]
+fn each_head_reaches_gmcs_limits() {
+    let p = p601();
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let bevel = p.reach_mm(HeadKind::Bevel);
+    assert_eq!((bevel.x, bevel.y), ([-5.0, 1570.0], [-5.0, 1025.0]));
+    let straight = p.reach_mm(HeadKind::Straight);
+    assert!(near(straight.x[0], -7.5 + 6.41), "{straight:?}");
+    assert_eq!((straight.x[1], straight.y), (1570.0, [-5.0, 1025.0]));
+    let travel = p.travel_mm();
+    assert!(
+        near(travel.x[0], -7.5) && near(travel.x[1], 1570.0 + 71.45),
+        "{travel:?}"
+    );
+}
+
+/// Each head is held to its own reach, not the carriage's travel: the straight blade to 1 cm
+/// past the drivable range and above the room below zero, the bevel's to 5 mm below zero.
+#[test]
+fn either_head_is_held_to_its_own_reach() {
+    let p = p601();
+    // Each inside the carriage's travel, but past that head's reach (board mm; the board's
+    // corner is 0.225 mm right of zero and 0.275 mm in front of it), clear of the clamp pads.
+    for (head, path) in [
+        (HeadKind::Straight, [[1570.5, 150.0], [1570.5, 250.0]]),
+        (HeadKind::Straight, [[-1.5, 150.0], [-1.5, 250.0]]),
+        (HeadKind::Bevel, [[-5.5, 150.0], [-5.5, 250.0]]),
+        (HeadKind::Bevel, [[150.0, -5.0], [250.0, -5.0]]),
+    ] {
+        let err = lower(&program(1.5, vec![board_cut(head, &path)]), &p).expect_err("refused");
+        assert!(
+            matches!(err, Error::OutsideEnvelope { head: h, .. } if h == head),
+            "{head} {path:?}: {err}"
+        );
+    }
+}
+
+/// A `move` is held to the reach of the head the last cut used, else the straight head's.
+#[test]
+fn a_move_is_held_to_the_reach_of_the_head_in_use() {
+    let p = p601();
+    let to = |x: f64| {
+        Op::Move(program::Move {
+            id: None,
+            label: None,
+            to_mm: [x, 500.0],
+        })
+    };
+    let bevel = board_cut(HeadKind::Bevel, &[[400.0, 400.0], [400.0, 600.0]]);
+    let after_bevel = |x| program(1.5, vec![bevel.clone(), to(x)]);
+    lower(&after_bevel(1569.0), &p).expect("the bevel reaches 1569.225 mm");
+    assert!(lower(&after_bevel(1571.0), &p).is_err(), "past 1570 mm");
+    let err = lower(&program(1.5, vec![to(1575.0)]), &p).expect_err("the straight head");
+    assert!(
+        matches!(
+            err,
+            Error::OutsideEnvelope {
+                head: HeadKind::Straight,
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
+/// Either head cuts to a jumbo board's far edges (1525 × 1020 mm), as GMC does: with Cut Other
+/// End the board lies against the right-hand clamp.
+#[test]
+fn either_head_cuts_to_a_jumbo_boards_far_edges() {
+    let p = p601();
+    for head in HeadKind::ALL {
+        let right = board_cut(head, &[[1525.0, 40.0], [1525.0, 1000.0]]);
+        let back = board_cut(head, &[[40.0, 1020.0], [1500.0, 1020.0]]);
+        let mut jumbo = program(1.5, vec![right, back]);
+        (jumbo.board.width_mm, jumbo.board.height_mm) = (1525.0, 1020.0);
+        lower(&jumbo, &p).unwrap_or_else(|e| panic!("{head}: {e}"));
+    }
 }
 
 #[test]
@@ -669,11 +750,20 @@ fn errors_say_where() {
     );
     assert_eq!(
         Error::OutsideEnvelope {
+            at: At::Op(3),
+            head: HeadKind::Bevel,
+            blade_mm: MachineMm([1.0, -2.0])
+        }
+        .to_string(),
+        "op 3: the bevel blade would reach (1.0, -2.0) mm, outside the machine's limits"
+    );
+    assert_eq!(
+        Error::OutsideTravel {
             at: At::Park,
             carriage_mm: CarriageMm([1.0, -2.0])
         }
         .to_string(),
-        "the park: the carriage would reach (1.0, -2.0) mm, outside the machine's limits"
+        "the park: the carriage would reach (1.0, -2.0) mm, outside its travel"
     );
 }
 
