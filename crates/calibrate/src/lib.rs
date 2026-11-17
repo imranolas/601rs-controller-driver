@@ -24,7 +24,9 @@
 //! - [`sent`]: the cuts a program sent, in carriage millimetres, from lowering it again with the
 //!   profile it was cut with. Lowering is pure, so no run log is needed.
 //!
-//! Depends on `compiler`, `machine` and `program`.
+//! Depends on `compiler`, `machine` and `program`. With the `schemars` feature, every type that
+//! serialises derives `JsonSchema`, for apps that generate their own types from it; a plan's
+//! machine profile is any object.
 
 pub mod calibration;
 pub mod fit;

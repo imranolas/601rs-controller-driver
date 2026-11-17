@@ -20,6 +20,7 @@ use crate::{Calibration, Error, Sheet};
 
 /// A calibration routine (CALIBRATION.md §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Routine {
     /// Stage 1: each head's position and slit, and the bevel's lean.
@@ -144,6 +145,7 @@ pub(crate) fn program(id: &str, routine: Routine, stock: &Stock, lines: &[Line])
 
 /// What to cut and what to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
     pub routine: Routine,
@@ -152,7 +154,11 @@ pub struct Plan {
     /// What to cut, in the board frame.
     pub program: Program,
     /// The machine profile it was placed with, the calibration's: lowering the program with it
-    /// gives where the carriage went.
+    /// gives where the carriage went. Its schema is any object: an app keeps it, never reads it.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "serde_json::Map<String, serde_json::Value>")
+    )]
     pub cut_with: Profile,
     /// The readings, grouped by how the pieces are held, in the order to take them.
     pub steps: Vec<Step>,
@@ -161,6 +167,7 @@ pub struct Plan {
 
 /// Readings taken with the pieces held one way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     /// "Lift the mount out of the frame, push out the window, and lay the mount back up."
@@ -176,6 +183,7 @@ pub struct Step {
 /// A piece of the cut board as it's held, in the board frame, mm: its outline, the holes in
 /// it, and the side up. Its edges are where the readings' dimensions end.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Piece {
     /// "the mount".

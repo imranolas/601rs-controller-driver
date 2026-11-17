@@ -24,6 +24,7 @@ pub const VERSION: u32 = 1;
 
 /// The machine's calibration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Calibration {
     format: String,
@@ -39,6 +40,7 @@ pub struct Calibration {
 
 /// One revision: what changed, when, and why.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub revision: u32,
@@ -57,6 +59,12 @@ pub struct Entry {
 
 /// One value's change, as the file held it: none is the default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// In a schema, `EntryChange`: the proposal's is `Change`.
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(rename = "EntryChange")
+)]
 #[serde(deny_unknown_fields)]
 pub struct Change {
     pub key: Key,
@@ -141,6 +149,7 @@ impl Why {
 
 /// A value as the overview shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ValueState {
     pub key: Key,
     pub label: String,
@@ -156,6 +165,7 @@ pub struct ValueState {
 
 /// When a value last changed, and how.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Last {
     pub revision: u32,
     pub at: String,

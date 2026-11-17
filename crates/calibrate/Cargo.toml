@@ -13,9 +13,13 @@ machine.workspace = true
 nalgebra.workspace = true
 program.workspace = true
 protocol.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+schemars = ["dep:schemars", "program/schemars"]
 
 [lints]
 workspace = true

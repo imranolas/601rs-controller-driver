@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Axis {
     X,
@@ -41,6 +42,7 @@ impl Axis {
 
 /// A side of the board: the back, up, where the blade enters; the face, the customer's, down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Back,
@@ -89,6 +91,7 @@ pub enum ProfileValue {
 /// heads' offsets, the blade, then each profile. The scale isn't one: X and Y each move alone
 /// on their own rails, at GMC's 40 steps/mm, which its captures match (CALIBRATION.md §5).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub enum Key {
     /// Where a head's blade is from the carriage (`machine::Head::offset_mm`).
@@ -104,6 +107,7 @@ pub enum Key {
 
 /// A value: a number, or (a profile's name) text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum Val {
     Num(f64),

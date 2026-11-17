@@ -4,6 +4,9 @@
 //! The semantic rules (V4 segment length, V5 within board, V7 break angle, V8 unique ids)
 //! will live in `validate`, which is still to come; V10 (machine envelope) needs a
 //! machine profile and belongs to the machine model (`machine::lower` checks it).
+//!
+//! With the `schemars` feature the types derive `JsonSchema`. `program.schema.json` is
+//! generated from them, and a test holds it to them.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,38 +17,57 @@ pub const VERSION: u32 = 1;
 
 pub type PointMm = [f64; 2];
 
+/// One compiled machine run for one board (PROGRAM_FORMAT.md). Rules V4, V5, V7, V8 and V10
+/// need code beyond its types and schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Program {
+    #[cfg_attr(feature = "schemars", schemars(extend("const" = FORMAT)))]
     pub format: String,
+    #[cfg_attr(feature = "schemars", schemars(extend("const" = VERSION)))]
     pub version: u32,
+    #[cfg_attr(feature = "schemars", schemars(length(min = 1)))]
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")
+    )]
     pub meta: Option<serde_json::Value>,
     pub board: Board,
     pub material: Material,
+    #[cfg_attr(feature = "schemars", schemars(length(min = 1)))]
     pub ops: Vec<Op>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Board {
+    #[cfg_attr(feature = "schemars", schemars(extend("exclusiveMinimum" = 0)))]
     pub width_mm: f64,
+    #[cfg_attr(feature = "schemars", schemars(extend("exclusiveMinimum" = 0)))]
     pub height_mm: f64,
+    #[cfg_attr(feature = "schemars", schemars(extend("exclusiveMinimum" = 0)))]
     pub thickness_mm: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Material {
     pub name: String,
+    #[cfg_attr(feature = "schemars", schemars(range(min = 1, max = 100)))]
     pub speed_pct: f64,
+    #[cfg_attr(feature = "schemars", schemars(range(max = 5000)))]
     pub head_settle_ms: u32,
     #[serde(default)]
     pub blade_angle_offset_deg: BladeOffsets,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BladeOffsets {
     #[serde(default)]
@@ -58,6 +80,7 @@ pub struct BladeOffsets {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Head {
     Straight,
@@ -94,6 +117,7 @@ impl std::str::FromStr for Head {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ClampSide {
     Left,
@@ -103,6 +127,7 @@ pub enum ClampSide {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Resume {
     StartButton,
@@ -110,6 +135,7 @@ pub enum Resume {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     Clamp(Clamp),
@@ -141,6 +167,7 @@ impl Op {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Clamp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +182,7 @@ pub struct Clamp {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Cut {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,12 +190,15 @@ pub struct Cut {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub head: Head,
+    #[cfg_attr(feature = "schemars", schemars(length(min = 2)))]
     pub path_mm: Vec<PointMm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(range(min = 1, max = 100)))]
     pub speed_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Move {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,12 +209,14 @@ pub struct Move {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Pause {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[cfg_attr(feature = "schemars", schemars(length(min = 1)))]
     pub message: String,
     pub resume: Resume,
 }

@@ -15,7 +15,8 @@ Order ──▶ Design ──(compiler)──▶ PROGRAM ──(runner + machine
                      this document defines this boundary
 ```
 
-Schema: [`program.schema.json`](program.schema.json). Protocol background: [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md).
+Schema: [`program.schema.json`](program.schema.json), generated from the `program` crate's types
+(`BLESS=1 cargo test -p program --features schemars`). Protocol background: [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md).
 
 ---
 

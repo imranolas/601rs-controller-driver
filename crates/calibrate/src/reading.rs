@@ -11,6 +11,7 @@ use crate::key::{Axis, Surface};
 
 /// A side of a cut, as it travels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Left,
@@ -19,6 +20,7 @@ pub enum Side {
 
 /// An end of a cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum End {
     Start,
@@ -46,6 +48,7 @@ impl End {
 
 /// An edge: one side of a cut, read on one side of the board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
     /// The cut, by its id in the program.
@@ -59,6 +62,7 @@ pub struct Edge {
 
 /// What a length by calipers spans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Span {
     /// From the board's edge against the stops to `edge`, along `axis`.
@@ -79,6 +83,7 @@ impl Span {
 
 /// A comb (stage 2): a reference cut and teeth whose run-ons are graded, the shortest first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Comb {
     pub head: Head,
@@ -94,6 +99,7 @@ pub struct Comb {
 /// One tooth of a comb: its cut, and how far it runs on past the reference (at a start, how
 /// far before it it begins), mm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Tooth {
     pub cut: String,
@@ -102,6 +108,7 @@ pub struct Tooth {
 
 /// What a reading is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// A length, by calipers, mm.
@@ -119,6 +126,7 @@ pub enum Kind {
 
 /// One reading.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
     /// "W.width".
