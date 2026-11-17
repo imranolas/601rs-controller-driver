@@ -795,7 +795,9 @@ for the run there, and `#R112` for the push and back,
 the fast ramp it gives a move under `FastZMinLenXY` [GMC] [CAP g_init]. The blade's angle picks the way the switch goes: 90° for normal cutting, 270° for
 V-groove (`VGChangeZ` + 180) [GMC]. Heads switched electrically get a 250 ms pulse of `i_dd`
 instead (§2.5) [GMC]. The push goes 30 mm past the 101.5 cm the
-profile allows, so Y's travel reaches at least 104.5 cm.
+profile allows, so Y's travel reaches at least 104.5 cm. `mc601 --sim` puts the simulator's plus
+switches no further: X at the profile's 156 cm, Y at the stub, each counted from its minus switch
+7.5 mm below zero. Neither plus switch is measured yet (`mc601 check` stage 7) *(sim assumption)*.
 
 A driver must do the same after homing, before the bevel head cuts: a head left in V-groove
 mode by an earlier job would cut at V-groove depth. Here `machine::vgroove_reset` holds GMC's

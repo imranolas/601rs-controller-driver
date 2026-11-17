@@ -28,12 +28,13 @@ pub struct SimConfig {
     pub version: String,
     pub homed_at_start: bool,
     pub start_position: [i64; 3],
-    /// X and Y travel limits in steps from each axis's minus switch, where the switches are
-    /// (Z is rotary and unlimited). Homing zeroes the counter the homing offset (`#O`) off the
-    /// switch [SPEC1 p.30], so after `#OX,300` the X switch lies 300 steps below zero, as on the
-    /// 601. Placeholder until the diagnostic tool measures the envelope; covers every
-    /// coordinate in the captures (X up to 58860 = park, Y up to 41800 in g_init).
-    pub envelope: [(i64, i64); 2],
+    /// X and Y travel, steps from each axis's minus switch to its plus switch (Z is rotary and
+    /// unlimited). Homing zeroes the counter the homing offset (`#O`) off the minus switch
+    /// [SPEC1 p.30], so after `#OX,300` the X switch lies 300 steps below zero, as on the 601.
+    /// The default is a placeholder until the diagnostic tool measures the travel: after
+    /// `#O` 300 its counter reaches X 59700 and Y 42700, past every coordinate in the captures
+    /// (the park at X 58860, Y 41800 in g_init).
+    pub travel: [i64; 2],
     /// Simulated duration of homing one axis.
     pub homing_time_per_axis: Duration,
     /// Mode-2 input buffer in bytes, as `@H` counts it: 100 % (65 KB on the 601: 1 % per
@@ -55,7 +56,7 @@ pub struct SimConfig {
     pub steps_per_mm: f64,
     /// Input definitions present at start (`&I<n>` → `port,bit,invert`). Empty by default,
     /// like the 601 as far as the captures show (`&I240,000h,0,0` [CAP g_init]). Limit errors
-    /// come from the envelope either way.
+    /// come from the travel either way.
     pub input_defs: Vec<(u8, String)>,
     /// Parameter writes applied at power-on, as mode-0 commands (`#C1,200`).
     pub parameters: Vec<String>,
@@ -67,7 +68,7 @@ impl Default for SimConfig {
             version: "@V2.00/55W 19.10.10 2807001".to_owned(),
             homed_at_start: false,
             start_position: [0, 0, 0],
-            envelope: [(0, 60_000), (0, 43_000)],
+            travel: [60_000, 43_000],
             homing_time_per_axis: Duration::from_secs(3),
             buffer_capacity: 65_360,
             buffer_uncounted: 7_990,
@@ -1119,9 +1120,9 @@ impl SimCore {
         let endless = kind == Kind::Jog && (0..3).any(|a| (to[a] - from[a]).abs() >= ENDLESS_JOG);
         let mut to = to;
         let mut limit_error = None;
-        for (axis, (lo, hi)) in self.cfg.envelope.iter().enumerate() {
+        for (axis, travel) in self.cfg.travel.iter().enumerate() {
             // The switches, in the counter's steps.
-            let (lo, hi) = (lo - self.origin[axis], hi - self.origin[axis]);
+            let (lo, hi) = (-self.origin[axis], travel - self.origin[axis]);
             // Error numbers per axis: minus = 32 + 2·axis, plus = 33 + 2·axis [SPEC p.37–38]
             let base = 32 + 2 * axis as u16;
             if to[axis] < lo {

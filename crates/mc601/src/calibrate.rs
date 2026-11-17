@@ -526,28 +526,7 @@ mod tests {
     /// Cut `plan` on the simulator to the park, and hold what went down the line to what
     /// lowering the plan gives, command for command, so its fit needs no log.
     fn cut_on_the_simulator(plan: &Plan) {
-        const SPEEDUP: f64 = 20.0;
-        let (link, sim) = sim::spawn(
-            sim::SimConfig {
-                homed_at_start: false,
-                ..sim::SimConfig::default()
-            },
-            SPEEDUP,
-        );
-        let (ctl, _) = controller::connect(link, controller::Config::default()).expect("connects");
-        let mut r = runner::Runner::new(
-            ctl,
-            plan.cut_with.clone(),
-            runner::Config {
-                speedup: SPEEDUP,
-                ..runner::Config::default()
-            },
-        );
-        r.configure().expect("configures");
-        r.home().expect("homes");
-        let (_requests, rx) = std::sync::mpsc::channel();
-        let outcome = r.run(&plan.program, &rx, &mut |_| {}).expect("runs");
-        assert_eq!(outcome, runner::Outcome::Finished);
+        let sim = crate::target::run_on_the_simulator(plan.cut_with.clone(), &plan.program);
         let received = sim.received();
         let mut sent = received.iter();
         let job = machine::lower(&plan.program, &plan.cut_with).expect("lowers");

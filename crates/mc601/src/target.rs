@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use controller::{Config, Controller, ControllerError, connect, mode};
 use link::tap::{self, Log};
+use machine::{CarriageMm, Profile};
 use sim::{Sim, SimConfig};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -18,7 +19,7 @@ pub const SIM_LIMITS: &str = "sim-limits";
 
 /// Simulator speed-up: homing takes 3 s per axis on the model; at 10× the whole check
 /// runs in about a minute.
-const SIM_SPEEDUP: f64 = 10.0;
+pub(crate) const SIM_SPEEDUP: f64 = 10.0;
 
 /// Does `port` name the simulator rather than a serial port?
 pub fn is_sim_port(port: &str) -> bool {
@@ -67,6 +68,43 @@ pub fn tool_config() -> Config {
     }
 }
 
+/// The simulator with the 601's travel as the machine profile gives it (`SimConfig::default()`'s
+/// is a placeholder). The profile's limits are counter positions, from the zero homing leaves
+/// `homing.offset_steps` off each minus switch; the simulator's travel is steps from that switch.
+fn sim_config(p: &Profile) -> SimConfig {
+    let e = p.envelope_mm;
+    let mut plus = p.carriage_steps(CarriageMm([e.x[1], e.y[1]]));
+    // Y travels at least as far as GMC pushes the V-groove switch, past the soft limit
+    // (protocol reference §4.1).
+    plus[1] = plus[1].max(p.vgroove_switch.map_or(0, |v| v.y_steps));
+    SimConfig {
+        homed_at_start: false,
+        steps_per_mm: p.scale.x_steps_per_mm,
+        travel: std::array::from_fn(|a| i64::from(plus[a] + p.homing.offset_steps[a])),
+        ..SimConfig::default()
+    }
+}
+
+/// Home and run `program` to its end on the simulator `mc601` builds for `profile`; the
+/// simulator, for what went down the line.
+#[cfg(test)]
+pub(crate) fn run_on_the_simulator(profile: Profile, program: &program::Program) -> Sim {
+    const SPEEDUP: f64 = 20.0;
+    let (link, sim) = sim::spawn(sim_config(&profile), SPEEDUP);
+    let (ctl, _) = connect(link, Config::default()).expect("connects");
+    let config = runner::Config {
+        speedup: SPEEDUP,
+        ..runner::Config::default()
+    };
+    let mut r = runner::Runner::new(ctl, profile, config);
+    r.configure().expect("configures");
+    r.home().expect("homes");
+    let (_requests, rx) = std::sync::mpsc::channel();
+    let outcome = r.run(program, &rx, &mut |_| {}).expect("runs");
+    assert_eq!(outcome, runner::Outcome::Finished);
+    sim
+}
+
 /// Open `port` (or the simulator for `sim`), log every byte to `log_path`, connect.
 pub fn open(
     port: &str,
@@ -79,29 +117,7 @@ pub fn open(
     log.note(&format!("mc601 {cmd} {port}"));
 
     let (link, sim) = if is_sim_port(port) {
-        // The machine as its profile describes it (SimConfig::default() is the placeholder
-        // the capture replays need).
-        let p = crate::calibration::machine();
-        let (e, sc) = (p.envelope_mm, p.scale);
-        let steps = |mm: f64, scale: f64| (mm * scale).round() as i64;
-        let mut config = SimConfig {
-            homed_at_start: false,
-            steps_per_mm: sc.x_steps_per_mm,
-            envelope: [
-                (
-                    steps(e.x[0], sc.x_steps_per_mm),
-                    steps(e.x[1], sc.x_steps_per_mm),
-                ),
-                // Y travels at least as far as GMC pushes the V-groove switch, past the
-                // soft limit (protocol reference §4.1).
-                (
-                    steps(e.y[0], sc.y_steps_per_mm),
-                    steps(e.y[1], sc.y_steps_per_mm)
-                        .max(p.vgroove_switch.map_or(0, |v| i64::from(v.y_steps))),
-                ),
-            ],
-            ..SimConfig::default()
-        };
+        let mut config = sim_config(&crate::calibration::machine());
         if port == SIM_LIMITS {
             config.input_defs = [239, 240, 243, 244]
                 .map(|n| (n, "001h,0,0".to_owned()))
@@ -123,4 +139,28 @@ pub fn open(
     })?;
     log.note(&format!("connected: {version}"));
     Ok((ctl, version, Target { sim, log, log_path }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The simulator's travel is the profile's limits from the minus switch: homing's 300 steps
+    /// (7.5 mm) below zero, then X to its soft limit at 1560 mm and Y on past its limit to the
+    /// V-groove stub at 1045 mm.
+    #[test]
+    fn the_simulators_travel_is_the_profiles_from_the_switch() {
+        let travel = sim_config(&Profile::gunnar_601()).travel;
+        assert_eq!(travel, [300 + 62_400, 300 + 41_800]);
+    }
+
+    /// A program runs to its end on the simulator as `mc601 run --sim` builds it: homing,
+    /// GMC's V-groove switch reset against the stub, then the cuts.
+    #[test]
+    fn a_program_runs_on_the_simulator_mc601_builds() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/programs/g_regular_mount.json");
+        let program = crate::cut::read(&path).expect("a program");
+        run_on_the_simulator(Profile::gunnar_601(), &program);
+    }
 }
