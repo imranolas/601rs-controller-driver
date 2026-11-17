@@ -442,7 +442,7 @@ fn limit_switch_shows_in_switches() {
 }
 
 fn sim_brake_into_limit(jog: &mut Controller<mode::Jog>) {
-    // The sim envelope ends at X 60000; an endless jog runs into the plus limit.
+    // The simulator's travel ends at X 66000; an endless jog runs into the plus limit.
     let err = jog.wait_idle(Duration::from_secs(30)).expect_err("limit");
     assert!(
         matches!(

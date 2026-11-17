@@ -1,6 +1,6 @@
 //! The cuts' order, and the program's ops.
 
-use machine::{CarriageMm, Profile, frame, pads_hit};
+use machine::{Profile, frame, pads_hit};
 use program::{Clamp, Cut, Head, Op};
 use route::{Job, Problem, Travel, Way};
 
@@ -193,21 +193,12 @@ pub(crate) struct Pads {
     pub held_by: Vec<String>,
 }
 
-/// How far inside its limits the carriage stays, mm, so rounding to motor steps can't take it
-/// out.
-const REACH_MARGIN_MM: f64 = 0.05;
-
-/// `head` can follow `path`: the carriage stays inside the machine's limits (V10). On the 601
-/// the carriage may go 7.5 mm below zero (the homing offset), so the straight head, 6.4 mm right
-/// of it, reaches past the board's left edge; the bevel head, 71.5 mm left, not past ~1,488 mm.
+/// `head` can follow `path`: every point is within its reach (V10). On the 601 the straight head
+/// reaches past the board's left edge, and either head to the table's right end.
 fn reachable(profile: &Profile, head: Head, path: &[[f64; 2]]) -> bool {
-    let h = profile.head(head);
-    let e = &profile.envelope_mm;
-    let m = REACH_MARGIN_MM;
-    path.iter().all(|&p| {
-        let CarriageMm([x, y]) = h.carriage(frame::machine_mm(profile, p));
-        x >= e.x[0] + m && x <= e.x[1] - m && y >= e.y[0] + m && y <= e.y[1] - m
-    })
+    let [x0, y0, x1, y1] = crate::reach(profile, head, crate::REACH_MARGIN_MM / 2.0);
+    path.iter()
+        .all(|&[x, y]| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
 }
 
 /// What a cut cuts, for the run log: each contour's id (or `c` and its number) and the side,

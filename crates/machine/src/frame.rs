@@ -2,7 +2,8 @@
 //!
 //! Three frames, all in millimetres: the **board**'s ([`Pt`], the program's); the
 //! **machine**'s ([`MachineMm`]: where a blade is, from home); and the **carriage**'s
-//! ([`CarriageMm`]: where the carriage is, the frame of the steps and the soft limits). A blade
+//! ([`CarriageMm`]: where the carriage is, the frame of the steps). The soft limits are the
+//! blade's ([`Profile::reach_mm`]). A blade
 //! is at the carriage plus its head's offset ([`Head::carriage`], [`Head::blade`]).
 
 use std::fmt;
@@ -31,10 +32,19 @@ impl CarriageMm {
     }
 }
 
+fn write_mm(f: &mut fmt::Formatter<'_>, [x, y]: [f64; 2]) -> fmt::Result {
+    write!(f, "({x:.1}, {y:.1}) mm")
+}
+
 impl fmt::Display for CarriageMm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [x, y] = self.0;
-        write!(f, "({x:.1}, {y:.1}) mm")
+        write_mm(f, self.0)
+    }
+}
+
+impl fmt::Display for MachineMm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_mm(f, self.0)
     }
 }
 

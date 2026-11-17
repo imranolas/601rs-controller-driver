@@ -7,7 +7,7 @@
 //! | 4 | yes | a mode-2 square the way GMC does it: `@X` 15 → 14 → 04, exact return; `@B` mid-path discards the rest |
 //! | 5 | yes | v1.00 in-stream `A`/`W`/`I`/`C`, `@N` progress, `C1` vs dead time, `@O` with `C8`/`C16`; compact paths, a second speed entry, in-stream `G`, what `@N` counts and how wide it is |
 //! | 6 | yes | buffer size via `@H`; which of `0x02`/`0x03` means "full"; `#C19` watchdog during a long stream; no overrun at full speed; `@B` on a held stream discards it |
-//! | 7 | yes | `@S` loses the position; a limit switch arrives as an async `*03x` and shows in `@Y` (the drive towards it ends 20 mm past GMC's drivable range) |
+//! | 7 | yes | `@S` loses the position; a limit switch arrives as an async `*03x` and shows in `@Y` (the drive towards it ends 20 mm past the carriage's travel) |
 //! | 8 | yes | the heads down with the blades out (`i_b` and the throttle, the lift, the straight head); a Z-only vector inside a stream (the corner pivot); how long after `@X04` a trailing `A` switches; a stream held at `I221` filled until a flow byte: buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it |
 //!
 //! Safety rules:
@@ -58,14 +58,14 @@ fn step_20mm() -> i32 {
     20 * steps_per_mm()
 }
 
-/// End of the X drivable range in steps: GMC's `DRX` 156 cm [GCF], its own soft-limit basis and
-/// the profile's envelope. A fitted X+ limit switch sits at or just beyond it.
-fn x_drivable() -> i32 {
+/// The end of the carriage's travel in X, steps: the bevel head's blade at GMC's limit
+/// (`Profile::travel_mm`). A fitted X+ limit switch sits at or just beyond it.
+fn x_travel_end() -> i32 {
     let p = profile();
-    (p.envelope_mm.x[1] * p.scale.x_steps_per_mm).round() as i32
+    p.carriage_steps(p.travel_mm().hi())[0]
 }
 
-/// How far past the drivable range stage 7 may drive while looking for the limit switch.
+/// How far past the carriage's travel stage 7 may drive while looking for the limit switch.
 fn limit_overtravel() -> i32 {
     step_20mm()
 }
@@ -196,10 +196,11 @@ fn reach() -> i32 {
     REACH_MM * steps_per_mm()
 }
 
-/// The way into the table from the park, X and Y: towards the middle of the envelope. On the
-/// 601 that is towards home in X (the park is at the far end) and away from it in Y.
+/// The way into the table from the park, X and Y: towards the middle of the carriage's travel.
+/// On the 601 that is towards home in X (the park is at the far end) and away from it in Y.
 fn inward() -> [i32; 2] {
     let p = profile();
+    let travel = p.travel_mm();
     let towards_middle = |park: i32, [lo, hi]: [f64; 2], scale: f64| {
         if f64::from(park) > (lo + hi) / 2.0 * scale {
             -1
@@ -208,8 +209,8 @@ fn inward() -> [i32; 2] {
         }
     };
     [
-        towards_middle(p.park_steps[0], p.envelope_mm.x, p.scale.x_steps_per_mm),
-        towards_middle(p.park_steps[1], p.envelope_mm.y, p.scale.y_steps_per_mm),
+        towards_middle(p.park_steps[0], travel.x, p.scale.x_steps_per_mm),
+        towards_middle(p.park_steps[1], travel.y, p.scale.y_steps_per_mm),
     ]
 }
 
@@ -1612,10 +1613,10 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
         );
         return Ok(p);
     }
-    // Drive no further than just past the drivable range: a mapped input is not proof of a
+    // Drive no further than just past the carriage's travel: a mapped input is not proof of a
     // working switch, and if it never trips the move must end on its own, not at the frame.
     let target = if switch.side == Side::Plus {
-        x_drivable() + limit_overtravel()
+        x_travel_end() + limit_overtravel()
     } else {
         -limit_overtravel()
     };
@@ -1623,7 +1624,7 @@ fn stage7(mut p: Params, ctx: &mut Ctx) -> Res<Params> {
     let distance = u64::from((target - x).unsigned_abs());
     let prompt = format!(
         "Drive X slowly (10 mm/s) towards the {switch} limit switch until it trips: at most {} mm, \
-         to X {} mm (20 mm past GMC's drivable range). Hand on the e-stop; Ctrl-C brakes.",
+         to X {} mm (20 mm past the carriage's travel). Hand on the e-stop; Ctrl-C brakes.",
         (target - x).abs() / steps_per_mm(),
         target / steps_per_mm()
     );
@@ -2177,7 +2178,7 @@ mod tests {
             [px + step_20mm(), py + step_20mm()],
         ];
         for steps in corners {
-            assert!(p.envelope_mm.contains(p.carriage_mm(steps)), "{steps:?}");
+            assert!(p.travel_mm().contains(p.carriage_mm(steps)), "{steps:?}");
         }
         assert_eq!(
             inward(),

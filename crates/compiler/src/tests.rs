@@ -299,8 +299,9 @@ fn the_same_sheet_gives_the_same_program() {
 
 #[test]
 fn an_edge_out_of_the_head_s_reach_is_refused() {
-    // The bevel head sits 71.5 mm left of the carriage: it can't reach past about 1,488 mm.
-    let s = sheet(1550.0, 300.0, vec![window([1450.0, 100.0, 1540.0, 200.0])]);
+    // A blade reaches 1 cm past the drivable range, X 1570 mm on the machine: a window on a
+    // board wider than the page runs past it.
+    let s = sheet(1650.0, 300.0, vec![window([1560.0, 100.0, 1640.0, 200.0])]);
     assert_eq!(
         compile(
             &s,

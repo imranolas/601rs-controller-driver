@@ -109,7 +109,7 @@ pub use lower::{
 };
 pub use profile::{
     Accel, Capabilities, ClampPads, Clamps, ControllerConfig, DeadTime, Envelope, Head, Heads,
-    Homing, Line, Pad, Profile, RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
+    Homing, Line, Pad, Profile, RadiusSlowdown, Scale, SoftStart, Travel, VGrooveSwitch,
 };
 
 #[cfg(test)]

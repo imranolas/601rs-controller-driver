@@ -74,7 +74,8 @@ pub struct Profile {
     /// The sharpest turn a cut may make at one point, degrees (PROGRAM_FORMAT V7). A sharper
     /// corner must be separate cuts.
     pub break_angle_deg: f64,
-    /// Where the carriage may go, machine millimetres (soft limits, V10).
+    /// Where any head's blade may go, machine millimetres (soft limits, V10). The carriage also
+    /// keeps off its minus switches: [`Profile::reach_mm`] is both, for one head.
     pub envelope_mm: Envelope,
     /// Where the carriage parks at the end of a job, steps.
     pub park_steps: [i32; 2],
@@ -366,7 +367,7 @@ pub struct RadiusSlowdown {
     pub steepness: u32,
 }
 
-/// The carriage's range: where it may go, in carriage mm.
+/// Where a blade may go: a range in X and Y, machine mm.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope {
@@ -375,9 +376,39 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn contains(&self, CarriageMm([x, y]): CarriageMm) -> bool {
-        (self.x[0]..=self.x[1]).contains(&x) && (self.y[0]..=self.y[1]).contains(&y)
+    pub fn contains(&self, MachineMm(p): MachineMm) -> bool {
+        within(self.x, self.y, p)
     }
+}
+
+/// Where the carriage goes: a range in X and Y, carriage mm ([`Profile::travel_mm`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Travel {
+    pub x: [f64; 2],
+    pub y: [f64; 2],
+}
+
+impl Travel {
+    pub fn contains(&self, CarriageMm(p): CarriageMm) -> bool {
+        within(self.x, self.y, p)
+    }
+
+    /// Its far corner, both plus ends.
+    pub fn hi(&self) -> CarriageMm {
+        CarriageMm([self.x[1], self.y[1]])
+    }
+
+    /// The smallest travel holding both.
+    fn hull(self, o: Travel) -> Travel {
+        Travel {
+            x: [self.x[0].min(o.x[0]), self.x[1].max(o.x[1])],
+            y: [self.y[0].min(o.y[0]), self.y[1].max(o.y[1])],
+        }
+    }
+}
+
+fn within(x: [f64; 2], y: [f64; 2], [px, py]: [f64; 2]) -> bool {
+    (x[0]..=x[1]).contains(&px) && (y[0]..=y[1]).contains(&py)
 }
 
 impl Head {
@@ -476,16 +507,12 @@ impl Profile {
                 steepness: 1,
             },
             break_angle_deg: 15.0,
-            // [GCF] DRX 156 cm, DRY 101.5 cm: GMC's own soft-limit basis, until the diagnostic
-            // tool measures the envelope. Below zero: homing leaves X and Y 300 steps (7.5 mm)
-            // off their switches before zeroing them (`homing.offset_steps`), so the carriage has
-            // that much room below zero before it meets a switch. GMC uses it to cut to the
-            // board's edge: its page check lets a cut run 2 mm past the front and left edges
-            // [GMC], with the straight head 6.4 mm right of the carriage. With it the straight
-            // head reaches 1.3 mm past the board's left edge and 5.3 mm past its front.
+            // GMC's soft limits, the blade's: 5 mm below zero to 1 cm past DRX 156 × DRY 101.5 cm
+            // [GMC; GCF] (protocol reference §2.5). The bevel carriage goes to 1641.45 mm; the
+            // straight head reaches 1.3 mm past the board's left edge and 4.7 mm past its front.
             envelope_mm: Envelope {
-                x: [-7.5, 1560.0],
-                y: [-7.5, 1015.0],
+                x: [-5.0, 1570.0],
+                y: [-5.0, 1025.0],
             },
             // [GCF] AutoParkX/Y 140 × 20 cm, the bevel blade's position: its carriage less the
             // bevel's offset, 147.15 × 19.81 cm [CAP].
@@ -520,6 +547,33 @@ impl Profile {
             HeadKind::Bevel => &self.bevel,
             HeadKind::Straight => &self.straight,
         }
+    }
+
+    /// Where `kind`'s blade may go (V10): within [`Profile::envelope_mm`], and no nearer the minus
+    /// switches than the carriage can go, the homing offset below zero. GMC uses that room to cut
+    /// to the board's edge: its page check lets a cut run 2 mm past the front and left edges [GMC].
+    pub fn reach_mm(&self, kind: HeadKind) -> Envelope {
+        let [ox, oy, _] = self.homing.offset_steps;
+        let MachineMm([x0, y0]) = self.head(kind).blade(self.carriage_mm([-ox, -oy]));
+        let e = self.envelope_mm;
+        Envelope {
+            x: [e.x[0].max(x0), e.x[1]],
+            y: [e.y[0].max(y0), e.y[1]],
+        }
+    }
+
+    /// Where the carriage goes: as far as either head's reach takes it.
+    pub fn travel_mm(&self) -> Travel {
+        let [a, b] = HeadKind::ALL.map(|kind| {
+            let (h, r) = (self.head(kind), self.reach_mm(kind));
+            let CarriageMm([x0, y0]) = h.carriage(MachineMm([r.x[0], r.y[0]]));
+            let CarriageMm([x1, y1]) = h.carriage(MachineMm([r.x[1], r.y[1]]));
+            Travel {
+                x: [x0, x1],
+                y: [y0, y1],
+            }
+        });
+        a.hull(b)
     }
 
     /// The clamps that hold a board `width_mm` wide at the usual end of the table: the left one,

@@ -27,10 +27,7 @@ use crate::config::tidy;
 use crate::operator::{Confirm, Operator};
 use crate::session::Session;
 use crate::style::{BAD, DIM, GOOD, paint};
-use crate::target::{self, Res, Target};
-
-/// The simulator runs this much faster than life (as `target` spawns it).
-const SIM_SPEEDUP: f64 = 10.0;
+use crate::target::{self, Res, SIM_SPEEDUP, Target};
 
 /// A program read and checked: its file, and its estimated run time.
 struct Loaded {
@@ -39,7 +36,7 @@ struct Loaded {
     estimate_s: f64,
 }
 
-fn read(file: &Path) -> Res<Program> {
+pub(crate) fn read(file: &Path) -> Res<Program> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(Program::from_json(&text).map_err(|e| format!("{}: {e}", file.display()))?)
 }
