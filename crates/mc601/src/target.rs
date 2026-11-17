@@ -81,7 +81,7 @@ pub fn open(
     let (link, sim) = if is_sim_port(port) {
         // The machine as its profile describes it (SimConfig::default() is the placeholder
         // the capture replays need).
-        let p = machine::Profile::gunnar_601();
+        let p = crate::calibration::machine();
         let (e, sc) = (p.envelope_mm, p.scale);
         let steps = |mm: f64, scale: f64| (mm * scale).round() as i64;
         let mut config = SimConfig {

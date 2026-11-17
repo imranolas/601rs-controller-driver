@@ -24,7 +24,7 @@ this document and cites it rather than repeating it.
 | **[RADIUS]** | A flowchart of the controller's radius slowdown ("Tangentialverzögerung, Steuerung Weissenberger") that comes with the manual. |
 | **[GMC]** | How GMC, Gunnar's own software for the 601, does it: learned from studying GMC 4.0 and 5.0, and not reproduced here. The captures were made with GMC 4.0.502.683. |
 | **[CAP name]** | GMC serial captures in `testdata/captures/` (`g_*.txt`, UTF-16 export of a software port monitor, 1-second timestamps, no line settings). `mc601 capture <file>` decodes them. |
-| **[SESSION name]** | Logs written by `mc601` at the machine, in `testdata/sessions/` and `testdata/calibration/`. |
+| **[SESSION name]** | Logs written by `mc601` at the machine, in `testdata/sessions/`. |
 | **[GCF]** | GMC's machine and tool parameters for the 601 (its `.gcf` file; not included). |
 | **[SYS]** | The controller parameter file for the 601 that GMC installs (`CNCCON_2.00_601.SYS`; not included). |
 | **[HELP …]** | GMC's user documentation: [HELP RN] its release notes, and **[HELP CA n]** page n of its Configuration Assistant (calibration of borders, overcuts, trims, the throttle, COE). |
@@ -407,6 +407,26 @@ GMC sleeps `HeadUpDown` ms (200–500 by profile, §8) after switching a head [G
 and `20` the **right**, as the capture notes label `42` and `22`. The `.gcf` names (`i_pr` on
 `40`, `i_pl` on `20`) do not name the side.
 
+**Where the clamps press** [GCF] [GMC]. The 601 is set up with clamp pads (`Clamps` true), not
+a vacuum table, so GMC checks a layout against each pad, not against the whole-edge borders
+`SysBx`/`SysBy` (those apply only on a machine with neither) [GMC]. Positions are pad centres
+in cm from the table's front-left corner, where boards register:
+
+| Pads | Along | Centres (cm) |
+|------|-------|--------------|
+| `ClampsX` | the front edge, reaching `ClampHeight` 2 cm in | 9.7, 32.7, 57.7, 98.5, 123.2, 146.2 |
+| `ClampsY` | the left edge, reaching 2 cm in | 10.2, 32.7, 66.7 |
+
+Each pad is `ClampWidth` 4.3 cm along its edge [GCF]; GMC's default parameters have the same.
+For Cut Other End GMC mirrors the left pads at the table's right end, `PageWidth` 156 cm
+[GMC]. The pads on the table's left half are the ones a board up to 78 cm reaches, so they are
+presumably the left clamp's (`40`), and the rest the right clamp's.
+
+A cut that runs over a pad isn't refused: GMC lists the pads with their positions and numbers,
+"Please deactivate the indicated clamps", highlights them, and lets the operator go on once
+they are turned out of the way [GMC]. The driver does the same through the `clamp` op's
+`turned` (PROGRAM_FORMAT §4.1).
+
 ### 2.6 Inputs, outputs and errors
 
 **Logical inputs** [SPEC1 p.11]. Inputs are debounced for 2 ms and read every program cycle
@@ -494,7 +514,7 @@ exchange is the probe's first question.
 | **Feed law** | **`#G20 = 360 × Speed%`** steps/s = **9 × Speed% mm/s**; 100 % = 900 mm/s | [GMC]: `AbsMaxSpeed × Speed% / 100` with `AbsMaxSpeed = 36000` [GCF], `#C11,0`. Matches the speed sweep exactly [CAP g_multi_Cx_*]. GMC's speed reduction factor is 1 on the 601. |
 | **Rapid (travel)** | `#G20,36000` = 900 mm/s (`PosSpeed = 100 %`) | [GCF] `PosSpeed`; [GMC] |
 | **Ramp law** | §3.1 | |
-| **Bevel blade inclination** | **42°** | [GCF] `Heads[Bevelled].Inclination` |
+| **Bevel blade inclination** | **42° to the board, so 48° from vertical** (§7) | [GCF] `Heads[Bevelled].Inclination`; how GMC reads it [GMC] |
 | **Curve segment length** | One spacing per curve, picked by the curve's smallest radius from the `Distances` table: radius < 5 cm → 20/cm (0.5 mm); < 10 cm → 10/cm (1 mm); < 40 cm → 5/cm (2 mm); < 200 cm → 1/cm (10 mm). This is a chord **length**, not a deviation tolerance. On a constant radius the chords stray 0.001–0.006 mm in most bands (up to 0.03 mm for 10 mm chords just over 40 cm radius), and use 1–6× the points a 0.02 mm tolerance needs; more where the radius varies. The oval: 1,107 vectors over 928 mm (1.9 laps, §7.1), 0.28–1.27 mm apart (median 0.77); within 0.02 mm the same path needs 316 (§5). See the note below. | [GCF] `Distances`; [GMC]; [CAP g_oval_mount] |
 | **BreakAngle** | 15°. Over USB, GMC ends a smooth run of curve points at any joint sharper than this. It is not the controller's braking angle, which GMC sets to 90° (`#B20,90`) | [GCF]; [GMC] |
 
@@ -627,11 +647,25 @@ cutting speed) with the blade in the board, then accelerates at 3,600 mm/s²:
 | 2.7 mm at 35 % (315 mm/s) | 100 mm/s | ~12 mm |
 | 4.6 mm at 10 % (90 mm/s) | 90 mm/s | no ramp |
 
+**How GMC does it** [GMC; 16 Nov]: the thickness soft start is for the
+straight head only, so a bevel cut never gets it; its ramp only stretches for a first segment off
+the axes, and its `#S` stays at the head's `StartStop`. The drawn-shape start (`CBStartStop`,
+1000 [GCF]) could apply to bevel cuts, but the captures show bevel edges at
+`#S4000` and straight edges at `#S1000` in the same job: GMC seems not to take a
+window's outline for a drawn shape (not confirmed). The
+cutting speed is the profile's speed %, the same on curves and straight edges (the radius
+slowdown is the controller's, §2.4.1). After a head-down GMC waits the profile's `HeadUpDown`
+(250 ms on C10, 400 ms on C12), else the head's `HDSleep`. Above `SafeTurn` (0.2 cm [GCF])
+GMC lifts the blade and then the head after every edge; on thinner board the head stays down
+between a window's edges with only the blade out (`$A40`), as the C10 capture shows.
+
 Operators see a wobble at the start of cuts on thick board that changes with the cutting speed.
 The profile's speed % is the only start setting that varies with thickness for the bevel, so
 that fits. Whether the cause is the jump, the acceleration or the blade trim (§3.2) is open
-(§10). The machine layer's plan: a start speed scaled with thickness for both heads, and a slow
-lead-in if needed (`crates/machine/src/lib.rs`, "Starting a cut").
+(§10). The driver softens the bevel's start too (16 Nov): `#S` from 4000 down to 400 as the
+board goes from 2 to 3.5 mm, and 400 on thicker board, the ramp unchanged
+(`machine::SoftStart::bevel`; `crates/machine/src/lib.rs`, "Starting a cut"). `mc601 run
+--gmc-bevel-start` cuts as GMC does, to compare.
 
 ---
 
@@ -919,8 +953,8 @@ axis**: the blade's protrusion is set by hand on the holder.
 *(From the captures and the `.gcf`.)*
 
 Thickness compensation shows up as **toolpath extension (overcut)** in X/Y, not as any `#`
-parameter. A bevel blade at 42° has its bottom edge lagging its top edge, so thicker board needs
-the cut to run further past each corner.
+parameter. The bevel blade leans, so its edge on the far side of the board lags its edge on
+the near side, and thicker board needs the cut to run further past each corner.
 
 | Profile | Thickness | Y start → end | Cut length (steps) |
 |---------|-----------|---------------|--------------------|
@@ -933,16 +967,81 @@ The cut grows by the same amount at both ends, which matches
 but that is the profile's blade trim (3° on C10, 4° on C11 and C12, §3.2), not the thickness:
 C11 and C12 differ in thickness and both give 783.
 
-**Model:** `overcut ≈ thickness × tan(42°)` (geometric baseline) **+** per-head sub-millimetre
-trims [GCF]:
+**GMC's rule** [GMC; 16 Nov]. GMC splits each contour at corners sharper
+than the break angle and, for each cut, as the 601 cuts (board face down: `CutFaceUp` false in
+the shop's parameters [GCF]):
 
-| Head | FrontOvercut (Begin/End) mm | BackOvercut (Begin/End) mm | trash_overcut | NC |
-|------|------------------------------|-----------------------------|---------------|-----|
-| Bevelled | −0.18 / 0.082 | −0.12 / 0.22 | 0.2 | −0.02 |
-| Straight | −0.05 / 0.23 | 0 / 0 | 0 | −0.05 |
+1. **The line** moves sideways by the head's `NC` ÷ 2 (the `.gcf`'s lengths are in cm): the
+   bevel's line 0.1 mm into the window, the straight head's 0.25 mm to the right of travel.
+   The straight head's shift is what lands GMC's layout edges at X 601–602 and Y 761–762 steps
+   (§4.2): the driver's board origin, (0.225, −0.275) mm, is this shift less a step's rounding,
+   not a property of the corner. The fitted head offsets absorb it.
+2. **The start and the end.** Face down, a thickness-dependent head (the bevel) takes its
+   **back** trims and the others (the straight) their **front** trims; the bevel's front trims
+   and the straight head's back trims apply only face up.
+   - Bevel: start `BackBegin + StartV`, end `BackEnd + StartV`, and the profile's `OCAddon` at
+     both ends. `StartV` is where this edge and its neighbour, each moved out by the board's
+     thickness, meet: `thickness × tan(turn ÷ 2)` at a corner turning by `turn`, so the
+     thickness at a square corner and none at a joint under about 1.7°. From the design's
+     corners that is −1.2 + t and 2.2 + t mm; from the line's own corners, 0.1 mm inside,
+     −1.1 + t and 2.3 + t, the compiler's `Blade::gmc`. The table above: 48 steps (1.2 mm) more
+     at each end for 1.2 mm more board, 76 (1.9 mm) for 1.9 mm.
+   - Straight: start `FrontBegin` (−0.5 mm), end `FrontEnd` (2.3 mm), whatever the board.
+   - At a corner turning the other way, as an L-shaped window's inner corner does, the bevel
+     adds `trash_overcut` (2 mm) and twice `StartV` more, unless that corner is where the
+     contour starts.
+3. **No thickness offset of the line.** GMC's design is the opening on the back. Only when
+   cutting face up does it move a bevel line, by `thickness × tan(90° − Inclination)`, so that
+   the back opening stays the design; face down the blade already enters on the back.
+4. **Closed smooth curves** (ovals) take no start or end trims and no thickness term (they have
+   no corner): their overlap and run-out (§7.1) do that work.
 
-⚠️ Open: how Begin/End × Front/Back map onto each cut. Test cuts, one trim at a time, would
-settle it.
+The trims [GCF], in cm:
+
+| Head | FrontOvercut (Begin/End) | BackOvercut (Begin/End) | trash_overcut | NC |
+|------|--------------------------|-------------------------|---------------|-----|
+| Bevelled | −0.18 / 0.082 (face up only) | **−0.12 / 0.22** | 0.2 | −0.02 |
+| Straight | **−0.05 / 0.23** | 0 / 0 (face up only) | 0 | −0.05 |
+
+Of the profiles, only C16 (5 mm) sets an `OCAddon`: 0.05 cm.
+
+**The inclination is to the board, not to vertical** [GMC; GCF]. `Inclination` 42° is the
+blade's angle to the board: cutting face up, GMC takes the bevel's run across the board as
+`thickness × tan(90° − 42°)`, 1.11 mm per mm. Face down, as the 601 cuts, GMC never uses it.
+It reads it the other way, `tan(Inclination)`, only in two modes the 601 has off (bevelled
+outside cuts, an F1 default, and always cutting outside contours from the back), and computes
+that twice more without using it; its description says only "the inclination of the blade in
+the orthogonal direction". Calibration 1 agrees with 42° to the board: the bevel's run measured
+1.71 ± 0.08 mm on 1.5 mm board, 48.7° ± 1.3° from vertical; 48° predicts 1.67 mm, 42° from
+vertical 1.35 mm, 4.5 standard errors off.
+
+**Where GMC falls short**, each to be confirmed at the machine before the driver departs from
+it:
+
+- **The thickness term takes the bevel as 45°.** At every corner GMC moves the edges out by the
+  board's thickness, where its own inclination says 1.11 × the thickness. With the blade's
+  edge at 37.5° to its spine (measured 13 Nov) leaning 48°, a cut's ends lag its tip by about
+  `tan 37.5° ÷ cos 48° = 1.15` mm per mm of board, against GMC's 1.0. A base trim set on thin
+  board then leaves thick board short, by about 0.5 mm at 5 mm. The shop's only `OCAddon` is
+  0.5 mm, on C16 (5 mm), which is what that predicts; C12 (4.6 mm) has none, so this suggests,
+  not proves.
+- **One set of trims per head.** A profile can only add the same `OCAddon` at both ends; the
+  start and end can't differ by board.
+- **One sideways shift per head** (`NC`). The slit's two sides aren't modelled. With strokes in
+  one direction only (the straight head's +X and +Y), the shift is indistinguishable from the
+  head offset: calibration must cut both ways to tell them apart.
+- **The inclination read two ways**, as above, under an ambiguous description.
+- **The trash overcut depends on where the contour starts**, so the same corner can get it or
+  not.
+- **No soft start for the bevel at any thickness** (§3.3): every bevel cut jumps to 100 mm/s,
+  or to its cutting speed, with the blade in the board, and only the straight head's start
+  softens with thickness. The likeliest cause of the wobble operators see at the start of
+  thick-board bevel cuts.
+- **The drawn-shape gentle start reaches straight edges but not bevel windows** (§3.3),
+  apparently because GMC's lookup misses a window's outline rather than by design.
+- **Curves** (§7.1): the start is wherever the shape's outline begins, never chosen; the entry
+  waits the head's 100 ms whatever the profile; the run-out is dropped without a word when a
+  curve's points are unevenly spaced.
 
 ### 7.1 Closed smooth shapes: the overlap lap
 
@@ -985,6 +1084,27 @@ mark lands on the visible edge.
 
 [GCF]. The driver's compiler does the same for closed smooth cuts, starting from these values
 (PROGRAM_FORMAT §4.2).
+
+**How GMC does it** [GMC; 16 Nov], beyond the above:
+
+- **The overlap is a time, so it shrinks with the speed**: the profile's speed % of 900 mm/s
+  for `CurveAddon` ms, the radius model capping `CurveMaxRadius` at 50 cm. About 1,580 mm on
+  C10 at 95 %; about 170 mm on C12 at 10 %.
+- **The run-out** ramps over the overlap's last points (its last half when the overlap is
+  more than a third of the path), on the side set by the head's orientation and whether the
+  board is face up, and then GMC drops the last point, so the full run-out is never quite
+  reached (0.31 mm off on the captured oval, for 0.3). GMC skips the run-out, logging it only
+  to its debug file, when a curve's point spacing varies more than tenfold.
+- **The start** is wherever the shape's outline begins: GMC sets only the direction (a bevel
+  contour clockwise when cutting face down), never the start point. Its ovals start at the top
+  (§4), so the entry always falls at the same place on the curve.
+- **The entry**: an oval window (not an outer contour) goes down with `i_t` alone, through the
+  Z head's throttle, and GMC waits only the head's `HDSleep` (100 ms on the bevel), not the
+  profile's `HeadUpDown`, before moving off while the blade is still coming down. How far it
+  travels during the entry depends on the throttle screw and the cutting speed; the overlap,
+  being a time, cuts back over it whatever the speed.
+- **No thickness term**: a smooth closed curve has no corner, so no `StartV` (§7), and face
+  down no line offset; only the bevel's 0.1 mm `NC` shift.
 
 ---
 
@@ -1050,7 +1170,7 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Compact follow-on vectors on 2.00; after `G`, `A`, `W`? | accepted | stage 5 |
 | Does a second speed entry give its own feed? | yes | stage 5 |
 | In-stream `G`: in sequence or on receipt? | in sequence (stage 5, 2026-11-10); the sim still applies it on receipt | stage 5 |
-| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` counts; the running command; no wrap (10001 after 9998) (stage 5, 2026-11-10); the sim still leaves `C` out | stage 5 |
+| `@N`: does `C` count? the running command or the finished ones? width; wrap after 9999? | `C` counts; the running command; no wrap (10001 after 9998) (stage 5, 2026-11-10), and the sim counts it too | stage 5 |
 | Which of `0x02`/`0x03` means "full"? | **`0x03`**, as the byte table says: filling a held stream, `0x03` came at 72,340 bytes (`@H98`, about 1 KB before full, not the prose's ~200 bytes) and nothing before it (stage 8, 2026-11-10). The simulator still warns 200 bytes before full | stage 8 |
 | Buffer size | **about 73 KB**: behind a held `I221`, `@H` reads 0 until about 8 KB are in, then rises 1 % per ~650 bytes (1 % at 8.6 KB, 50 % at 40.6 KB, 95 % at 70 KB), so it counts the last ~65 KB (stage 8, 2026-11-10; stage 6's 2200 bytes read `@H0` for this reason). The simulator models both parts | stage 8 |
 | Does `0x03` come in time through a USB adapter (no overrun at full speed)? | yes | stage 6 |
@@ -1065,7 +1185,8 @@ soft start (§3.3) · GMC's overlap lap on closed curves (§7.1) · GMC's pauses
 | Do the 2° turn limit, the tangent rule and GMC's overlap and run-out values cut clean? | GMC's values | test cuts |
 | Does `i_b` bypass the Z head's throttle (§2.5: `01` is the throttled, delayed blade entry for curves)? | **yes**: blades out, `$01` brought the bevel head down slowly and `$05` fast; the lift `$00` after `$05` raised the blade with the head still down; `$0A` lowered the straight head alone (stage 8, 2026-11-10, operator watching) | stage 8 |
 | The right trim per material on this machine and blade (it corrects hooked corners, §3.2) | GMC's per-profile trims (§8) | GMC's procedure: a test rectangle per profile, the corners checked [HELP CA 3800] |
-| The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: `#S4000` against `#S400`, with and without a slow lead-in, trim 0 against the profile's |
+| The wobble at the start of thick-board bevel cuts: the jump to `#S`, the acceleration, or the trim? | — | thick-board test cuts: the driver's soft start (`#S400` on 4.6 mm) against GMC's (`mc601 run --gmc-bevel-start`, `#S4000`), then if needed a slow lead-in, trim 0 against the profile's |
+| An oval's entry: does moving off 100 ms after the slow head-down, as GMC does, leave a cleaner join than letting the blade settle? | — | an oval window cut both ways, `mc601 run` and `mc601 run --oval-settle` |
 | Overcut mapping (§7) | — | test cuts, one trim at a time |
 | Radius slowdown variant (p.9 or [RADIUS]) | — | not needed |
 | `@@`, `@V7`/`@V8`, `#C37`, `#C52`, `*069` | — | not needed to drive the machine |

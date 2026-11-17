@@ -1,5 +1,8 @@
 # 601rs — Diagnostic & Calibration Tool Spec
 
+> **Superseded for calibration** by [`CALIBRATION.md`](CALIBRATION.md) (4.4, 4.5 and 4.9 here).
+> This is the first plan, written before the driver; it is kept as the record.
+
 **Companion to:** `PROTOCOL_REFERENCE.md` (the reference says *what the machine
 does*; this says *how to methodically measure the rest and keep it calibrated*).
 

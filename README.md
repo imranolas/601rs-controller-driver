@@ -31,10 +31,18 @@ macOS, Linux or Windows. `mc601` is its command line.
   pace with the line, so a stop never waits behind a backlog of queued vectors.
 - **Checks the machine** (`mc601 probe`, `mc601 check`): eight stages, from read-only questions to
   every move, asking before each step and logging every byte both ways.
-- **Calibrates the heads** (`mc601 calibrate`): cut one sheet, type in what the ruler says, and a
-  least-squares fit of the blade model gives each head's offset, drag and slit.
-- **Orders the cuts** ([`route`](crates/route)) so the head travels least within the cutting
-  rules, and **nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs.
+- **Calibrates the heads** (`mc601 calibrate heads | runons`, [`CALIBRATION.md`](CALIBRATION.md)):
+  two routines on 150 × 150 mm offcuts. Stage 1 cuts a mount with a bevel window and takes 16
+  caliper readings for each head's position, its slit and the bevel's lean; stage 2 cuts combs,
+  read by flexing the board, for how far each head reaches along a cut on each face. Each
+  proposes its changes, ± their uncertainty, in words, and writes the chosen ones as a revision
+  of the machine's calibration file (`mc601 calibration`), which everything that cuts reads.
+- **Nests mats onto sheets** ([`nest`](crates/nest)) and into other mats' drop-outs, and
+  **compiles a laid-out sheet into a program** ([`compiler`](crates/compiler)): each cut placed
+  by the calibrated tool model, for the board's thickness, and run on past its corners until it
+  meets the next cut on both faces, ovals with their overlap, shared
+  edges cut once, in the order ([`route`](crates/route)) that travels least within the cutting
+  rules, clear of the clamp pads or with the operator told which to turn.
 - **Simulates the controller** ([`sim`](crates/sim)), held to the real thing: `cargo test`
   replays every serial capture of GMC and every session log from the machine against it.
 
@@ -57,7 +65,8 @@ rest.
 
 ```mermaid
 flowchart LR
-    mats["mats + board type"] --> nestc["nest"] --> routec["route"] --> comp["compiler<br/>(planned)"] --> prog["program<br/>(JSON)"]
+    mats["mats + board type"] --> nestc["nest"] --> comp["compiler"] --> prog["program<br/>(JSON)"]
+    comp --> routec["route"]
     prog --> run["runner"]
     cli["mc601"] --> run
     run --> mach["machine"]
@@ -74,8 +83,8 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 |-------|--------------|
 | `station` *(planned)* | Service on the machine PC: the queue, an HTTP API and events for apps; starts cuts only from the machine's own screen. |
 | [`nest`](crates/nest) | Places mats on sheets of their board type, and in other mats' drop-outs: three-stage guillotine layouts by iterative beam search (after PackingSolver), offcuts before full sheets, every layout checked before it is returned. |
-| `compiler` *(planned)* | Geometry and a profile in, a program out: flattening, overcut, overlap, cut order. |
-| `profile` *(planned)* | Board types: speed, trims, overcut, overlap, start speed. |
+| [`calibrate`](crates/calibrate) | Calibrating the machine ([`CALIBRATION.md`](CALIBRATION.md)): the calibration file (head offsets, each head's tool model, the board profiles, with its history), shared by `mc601` and apps and read by everything that cuts; the two routines as plans an app can run, their sessions, the least-squares fit, and proposals with verdicts and effects, applied to the file as revisions. Where each cut went comes from lowering, no log needed. |
+| [`compiler`](crates/compiler) | A laid-out sheet to a program: rectangles and ovals placed by the blade model (fitted from calibration, GMC's overcuts), run on past their corners, ovals flattened with their overlap and run-out, shared edges one stroke, an order that keeps the clamp rules and travels least, the clamp pads to turn. Checked against GMC's own jobs. |
 | [`route`](crates/route) | The cut order: which cut next and which way round, so the head travels least, within the cutting rules. |
 | [`runner`](crates/runner) | Drives the cutter: configures the controller, homes, runs programs and manual moves; pause, cancel, holds, stop now, a safe state after any failure, events. |
 | [`machine`](crates/machine) | The machine model, pure: profile, mm and degrees to steps, each cut lowered as one unit (GMC's form, held to its captures, or one stream per cut), soft limits, run time, the line's byte budget. |
@@ -84,7 +93,7 @@ Each layer is a crate, and a crate depends only on crates below it in this table
 | [`link`](crates/link) | Reader and writer halves: a serial port paced to the line, an in-memory pair, a byte tap. |
 | [`sim`](crates/sim) | The controller simulator behind an in-memory link, for tests and dry runs; checked against every GMC capture and session log. |
 | [`program`](crates/program) | The program format: types, parsing, validation. |
-| [`mc601`](crates/mc601) | The command line: `run`, `calibrate`, `check`, `probe`, `logs`, `config`, `ports`, `capture`. |
+| [`mc601`](crates/mc601) | The command line: `run`, `calibrate`, `calibration`, `check`, `probe`, `logs`, `config`, `ports`, `capture`. |
 
 **Invariant:** commands this software must never send (mode 9 file transfer, firmware upload,
 parameter save `#W`) cannot be represented in `protocol::Command`.
@@ -167,7 +176,8 @@ blanked.
 
 - [`PROTOCOL_REFERENCE.md`](PROTOCOL_REFERENCE.md): the wire protocol, the cut sequence, calibration, with citations
 - [`PROGRAM_FORMAT.md`](PROGRAM_FORMAT.md): the program format, the contract between the compiler and the runner
-- [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md): the calibration and diagnostic routines
+- [`CALIBRATION.md`](CALIBRATION.md): calibrating the machine and each board profile, from an app (a design)
+- [`DIAGNOSTIC_TOOL_SPEC.md`](DIAGNOSTIC_TOOL_SPEC.md): the calibration and diagnostic routines (the first plan)
 - [`docs/hardware-testing.md`](docs/hardware-testing.md): running `mc601 probe` and `mc601 check` at the machine
 
 ## Build and test

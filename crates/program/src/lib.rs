@@ -57,11 +57,40 @@ pub struct BladeOffsets {
     pub bevel_round: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Head {
     Straight,
     Bevel,
+}
+
+impl Head {
+    pub const ALL: [Head; 2] = [Head::Bevel, Head::Straight];
+
+    /// Its name, as a file has it: `straight`, `bevel`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Head::Straight => "straight",
+            Head::Bevel => "bevel",
+        }
+    }
+}
+
+impl std::fmt::Display for Head {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.word())
+    }
+}
+
+impl std::str::FromStr for Head {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Head, String> {
+        Head::ALL
+            .into_iter()
+            .find(|h| h.word() == s)
+            .ok_or_else(|| format!("there's no head {s:?}"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +148,10 @@ pub struct Clamp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub side: ClampSide,
+    /// The clamp pads the operator turns out of the way for the cuts that follow, by the
+    /// machine profile's names (`F3`, `L1`): those cuts may run over them (§4.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turned: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,5 +209,17 @@ impl Program {
             return Err(ProgramError::UnsupportedVersion(p.version));
         }
         Ok(p)
+    }
+
+    /// The clamp pads the operator turns out of the way before the program runs: its first
+    /// `clamp` op's. Any later change comes with a release and a `pause` of its own (§4.1).
+    pub fn turned_at_start(&self) -> &[String] {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Clamp(c) => Some(c.turned.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }

@@ -48,6 +48,15 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 | 7 | yes | `@S` loses the position (then re-homes); if the X limit input is mapped, drives slowly into it, but no further than 20 mm past GMC's drivable range (X 1560 mm): async `*033`, `@Y` limit bit, recovery |
 | 8 | yes | **blades out**: each head down as GMC lowers it, nothing moving (does `i_b` bypass the throttle, so `05` is fast and `01` slow? the lift `00`; the straight head `0A`: you answer); a quarter turn of Z alone, timed, and inside a stream as a corner (does the carriage stand still while the blade turns?); how long after `@X04` a trailing `A` switches; a stream held at the green-button wait filled with 1 mm moves until a flow byte (up to 512 KB): buffer size, which byte means full, `#C19` fed by `@H`, `@B` empties it (don't press the button) |
 
+**The room below zero.** The driver takes the carriage to have 7.5 mm below zero after homing:
+GMC's `#OX,300` and `#OY,300` leave each axis that far off its switch before zeroing it
+(SPEC1 p.30), and cuts to the board's left and front edges use it (the straight head reaches
+1.3 mm past the left edge). The simulator models it the same way. Before cutting a real sheet that
+runs to the edge, once stage 3 has homed: cut a scrap board with a straight cut run on past its
+left edge (a sheet with a clean-up line to the edge does). It must finish without `*032` (X
+minus) or `*034` (Y minus). If either comes, the room is smaller than assumed: say so, and
+`machine::Profile::envelope_mm` changes to match.
+
 ## Safety
 
 - Someone at the e-stop for every stage that moves. Scrap board, clear table, head up.
@@ -76,25 +85,56 @@ mc601 check --sim-limits               # same, with limit inputs mapped (stage 7
 
 ## Calibrating the heads
 
-Once per blade or holder change, cut the machine-and-head sheet raw: no profile, offset or trim
-is applied, so nothing it measures inherits an earlier estimate. The layout and what to measure
-are in `testdata/calibration/calibration_2.html`.
+Stage 1 (CALIBRATION.md §5), on a new machine or after a knock or head service: a 100 mm mount
+with a 50 mm bevel window on a 150 × 150 mm offcut, and 16 caliper readings. It sets each head's
+position, the straight slit's offset and width, and the bevel's offset and lean, in the
+calibration file `mc601` shares with apps.
 
 ```sh
-mc601 calibrate cut          # write the sheet, cut it raw, then take its readings and fit them
-mc601 calibrate read         # take (or correct) the latest session's readings later
-mc601 calibrate fit --all    # fit every calibration session that has readings, together
+mc601 calibrate heads --thickness 1.42   # stage 1: plan, cut, then take its readings, fit, offer the changes
+mc601 calibrate runons --thickness 1.42  # stage 2: the combs, after stage 1, once per blade
+mc601 calibrate read                     # take (or correct) the latest session's readings later
+mc601 calibration history                # what was written, when, by which session
 ```
 
-- Offcut 140 × 105 mm or larger, 1.5 mm, in the front-left corner against the left clamp.
-- After the cut, `mc601` asks for each reading in turn: what to measure, on which face, and
-  roughly what to expect. A value far from that is questioned before it is kept. Comb answers
-  are tooth numbers (0 if none reached). Each value is saved as it is typed, so stopping early
-  loses nothing; `calibrate read` shows the saved values and Enter keeps them.
-- The fit reads each cut's exact carriage steps from the run log, so the profile current at the
-  time doesn't matter. Its report and a profile with the fitted head offsets
-  (`fit.txt`, `profile.json`) go into the session. Change the profile only where the fit says
-  a value has moved (more than twice its uncertainty).
-- A sheet kept outside the data folder fits too: `mc601 calibrate fit --sheet PROGRAM LOG
-  READINGS` (calibration 1: `testdata/calibration/calibration_1.json`, `.run.log`,
-  `.readings.txt`), alone or with sessions.
+- An offcut at least 150 × 150 mm, 1.2 to 2 mm board best, face down into the front-left stops.
+  Measure its thickness with calipers first: the bevel's lean is its run across it.
+  `--profile ID` cuts at a profile's speed and settle, and takes its thickness unless given.
+- After the cut, `mc601` asks for each reading in turn, grouped by how the pieces are held: what
+  to measure, on which face, and what the calibration expects. A value more than 1 mm from that
+  is questioned before it is kept. Each value is saved as it is typed, so stopping early loses
+  nothing; `calibrate read` shows the saved values and Enter keeps them.
+- Where the cuts went comes from lowering the session's plan again with the profile it was cut
+  with, so no log is needed. The fit, and what it proposes for each value (before → after ± its
+  uncertainty: moved, within its noise, or large), go into the session's `fit.txt`. Moved values
+  are written as one revision if you say so; large ones only if you confirm them; nothing while
+  a reading is suspect (measure it again). `mc601 calibration revert N` undoes it.
+- A run that stops keeps its session: `mc601 calibrate read` then asks only for the readings
+  whose cuts were made. Two stage 1 offcuts fit together with `mc601 calibrate fit DIR DIR`
+  (a report, about 1.4 times as precise), if one alone scatters more than you'd like.
+- Stage 2 cuts eight combs on another 150 × 150 offcut of a common board. Leave the board back
+  up and flex it along each comb's reference: enter the first tooth that comes free there,
+  counting from the left (tooth 1 is the shortest), or 0 if none does. A comb where none, or
+  every one, comes free moves the file's value so the next stage 2 is centred past it: cut it
+  again. Once on 2.5 to 2.7 mm board too, to see whether the reach changes with thickness.
+- `mc601 calibrate fit --all` pools every stage 1 session that has readings.
+
+## Starting cuts on thick board
+
+Before stage 2's combs (CALIBRATION.md §5), since how a cut starts changes how far it reaches,
+compare the driver's start with GMC's. GMC's own jobs are ready as programs:
+
+```sh
+mc601 run testdata/programs/g_multi_C12.json                     # twin windows, MSK_4.1: the bevel starts at 10 mm/s
+mc601 run testdata/programs/g_multi_C12.json --gmc-bevel-start   # the same, as GMC: the bevel jumps to 100 mm/s
+mc601 run testdata/programs/g_oval_mount.json                    # the oval moves off 100 ms after its blade starts down, as GMC
+mc601 run testdata/programs/g_oval_mount.json --oval-settle      # the same, the blade fully down first
+```
+
+- The windows on MSK_4.1 (at least 371 × 321 mm), into the front-left stops as GMC lays them.
+  Look at the start of each bevel edge on the face: the wobble, if any, and whether the corners
+  come free. Note which run was which.
+- The oval on any 1.5 mm board (at least 201 × 291 mm): look at the join where the cut started,
+  on the face.
+- Keep the better of each pair by leaving its switch off (the default) or saying so: the
+  defaults are the driver's soft start and GMC's oval entry.

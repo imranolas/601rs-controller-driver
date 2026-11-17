@@ -1,6 +1,7 @@
 //! What `mc601` remembers between runs: the machine's serial port and the data folder, in
-//! `~/.config/mc601/config.json` (or `$XDG_CONFIG_HOME/mc601/`, or the file `$MC601_CONFIG`
-//! names). The data folder holds the sessions (`mc601 logs`); it defaults to
+//! `config.json` in `mc601`'s folder (`~/.config/mc601/`, `$XDG_CONFIG_HOME/mc601/`, or
+//! `%APPDATA%\mc601\` on Windows: `calibrate::store::config_dir`, beside the calibration
+//! file), or the file `$MC601_CONFIG` names. The data folder holds the sessions (`mc601 logs`); it defaults to
 //! `~/Documents/mc601`, and `$MC601_DATA` overrides it.
 
 use std::path::{Path, PathBuf};
@@ -28,10 +29,7 @@ pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("MC601_CONFIG") {
         return p.into();
     }
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map_or_else(|| home().join(".config"), PathBuf::from)
-        .join("mc601")
-        .join("config.json")
+    calibrate::store::config_dir().join("config.json")
 }
 
 impl Config {

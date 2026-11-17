@@ -81,18 +81,20 @@
 //! head at every thickness, so each bevel edge jumps from rest to 100 mm/s (or straight to the
 //! cutting speed, if lower) with the blade in the board. Operators see a wobble at the start on
 //! thick board. GMC softens the start only for the straight head (protocol reference §3.3).
-//! The machine layer softens it for both:
-//! - **A start speed per job, by thickness:** `#S` from the head's 4000 steps/s down to 400
-//!   (10 mm/s), linearly from 2 mm to 3.5 mm of board (GMC's rule, without its jump at 3.5 mm).
-//!   A job is one board, so it is set once with the other parameters. Travel loses a few
-//!   milliseconds; the tightest curves, whose speed is `#S`, slow down too, which suits thick
-//!   board.
-//! - **The ramp stays one per job** (above), not GMC's 700 ms on thick board, which would slow
-//!   every travel move. If the start still wobbles, begin the cut with a few millimetres at a
-//!   third, slow speed entry: the controller starts at that speed and should accelerate into the
-//!   cut without a mode switch (to confirm with the test cuts).
-//! - Which of these the wobble needs, and whether the blade trim plays a part, is for test cuts
-//!   on thick board (protocol reference §10).
+//! This crate softens both ([`SoftStart`]):
+//! - **The straight head as GMC:** a longer ramp and a lower `#S`, by the board's thickness.
+//! - **The bevel head (`SoftStart::bevel`):** `#S` from the head's 4000 steps/s down to 400
+//!   (10 mm/s), linearly from 2 mm to 3.5 mm of board (GMC's rule, without its jump at 3.5 mm),
+//!   and 400 on thicker board. The ramp stays the cut's, not GMC's 700 ms on thick board, which
+//!   would slow the travel that shares it.
+//! - **An oval's entry (`Head::closed_settle_ms`):** after the slow head-down the bevel waits
+//!   only 100 ms, as GMC does, so the blade comes down through the throttle while the carriage
+//!   moves and the overlap cuts back over its entry. The full settle would plunge it at one
+//!   place on the edge that shows.
+//!
+//! Each can be switched off (`mc601 run --gmc-bevel-start`, `--oval-settle`), to compare with
+//! test cuts on thick board (protocol reference §10). If the bevel's start still wobbles, a few
+//! millimetres at a third, slow speed entry would start it slower still, without a mode switch.
 
 mod estimate;
 pub mod frame;
@@ -102,12 +104,12 @@ mod profile;
 pub use estimate::{Estimate, Host, OpEstimate, estimate};
 pub use frame::{CarriageMm, MachineMm};
 pub use lower::{
-    At, ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, park,
-    vgroove_reset,
+    At, ENTRY, Error, Job, MIN_SEGMENT_MM, SMOOTH_TURN_DEG, Step, TRAVEL_ENTRY, lower, pads_hit,
+    park, vgroove_reset,
 };
 pub use profile::{
-    Accel, Capabilities, Clamps, ControllerConfig, DeadTime, Envelope, Head, Homing, Line, Profile,
-    RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
+    Accel, Capabilities, ClampPads, Clamps, ControllerConfig, DeadTime, Envelope, Head, Heads,
+    Homing, Line, Pad, Profile, RadiusSlowdown, Scale, SoftStart, VGrooveSwitch,
 };
 
 #[cfg(test)]

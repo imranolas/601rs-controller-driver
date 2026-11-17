@@ -32,7 +32,7 @@ use program::{ClampSide, Cut, Head as HeadKind, Op, Program, Resume};
 use protocol::{Command, Mode, Radius, Setting, SettingKey, StreamFlags};
 
 use crate::frame::{self, CarriageMm, Pt};
-use crate::profile::{Capabilities, Profile};
+use crate::profile::{Capabilities, Pad, Profile};
 
 /// The speed-table entry cutting uses, and in GMC's form travel too.
 pub const ENTRY: u8 = 20;
@@ -134,8 +134,30 @@ pub enum Error {
     /// The carriage would leave the machine's soft limits (V10).
     #[error("{at}: the carriage would reach {carriage_mm}, outside the machine's limits")]
     OutsideEnvelope { at: At, carriage_mm: CarriageMm },
-    /// A cut comes nearer the board's left or front edge than the clamps allow
-    /// ([`Profile::clamp_border_mm`]): the head would hit them.
+    /// A cut runs over a clamp pad ([`Profile::pads`]) the program hasn't turned out of the way
+    /// (the `clamp` op's `turned`): the head would hit it.
+    #[error(
+        "op {op}: the segment to point {point} runs over clamp {pad}; turn it out of the way \
+         and name it in the clamp op's `turned`"
+    )]
+    OnClamp {
+        op: usize,
+        point: usize,
+        pad: String,
+    },
+    /// A `clamp` op changes which pads are turned while the board is clamped: a pad is turned
+    /// by hand with the clamps open, so the clamps must be released (`side: none`) and a
+    /// `pause` given to the operator first.
+    #[error(
+        "op {op}: the clamp pads can only be turned with the clamps open: release them and \
+         pause first"
+    )]
+    TurnedWhileClamped { op: usize },
+    /// A `clamp` op turns a pad the profile doesn't have.
+    #[error("op {op}: there is no clamp {pad} to turn")]
+    UnknownClamp { op: usize, pad: String },
+    /// On a machine without clamp pads, a cut comes nearer the board's left or front edge than
+    /// [`Profile::clamp_border_mm`]: the head would hit the clamps.
     #[error(
         "op {op}: point {point} at {x:.2}, {y:.2} mm is within {border_x} mm of the left edge or \
          {border_y} mm of the front edge, where the head would hit the clamps"
@@ -169,6 +191,10 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
         settings: HashMap::new(),
         streaming: false,
         out: Vec::new(),
+        pads: profile.pads(),
+        turned: Vec::new(),
+        released: true,
+        may_turn: true,
     };
     let r = profile.radius_slowdown;
     for (reg, v) in [
@@ -198,7 +224,29 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
     let mut ops = Vec::with_capacity(program.ops.len());
     for (i, op) in program.ops.iter().enumerate() {
         match op {
-            Op::Clamp(c) => l.clamp(c.side),
+            Op::Clamp(c) => {
+                if let Some(pad) = c
+                    .turned
+                    .iter()
+                    .find(|t| !l.pads.iter().any(|p| &p.name == *t))
+                {
+                    return Err(Error::UnknownClamp {
+                        op: i,
+                        pad: pad.clone(),
+                    });
+                }
+                // Pads are turned by hand with the clamps open: before the program, or in a pause
+                // after a release.
+                let same = c.turned.len() == l.turned.len()
+                    && c.turned.iter().all(|t| l.turned.contains(t));
+                if !same && !l.may_turn {
+                    return Err(Error::TurnedWhileClamped { op: i });
+                }
+                l.turned.clone_from(&c.turned);
+                l.released = c.side == ClampSide::None;
+                l.may_turn &= l.released;
+                l.clamp(c.side);
+            }
             Op::Cut(c) => l.cut(i, c)?,
             Op::Move(mv) => {
                 let kind = l.head.unwrap_or(HeadKind::Straight);
@@ -212,6 +260,7 @@ pub fn lower(program: &Program, profile: &Profile) -> Result<Job, Error> {
                 l.travel(At::Op(i), frame::steps(profile, head, p), z, deg)?;
             }
             Op::Pause(p) => {
+                l.may_turn |= l.released;
                 l.idle();
                 l.out.push(Step::Hold {
                     message: p.message.clone(),
@@ -333,6 +382,13 @@ struct Lowering<'a> {
     /// Stream commands sent since the last wait until idle.
     streaming: bool,
     out: Vec<Step>,
+    /// The clamp pads, and those the last `clamp` op turned out of the way.
+    pads: Vec<Pad>,
+    turned: Vec<String>,
+    /// The clamps are open (the last `clamp` op released them, or there was none yet).
+    released: bool,
+    /// The operator can turn pads now: before any clamping, or in a pause since a release.
+    may_turn: bool,
 }
 
 impl Lowering<'_> {
@@ -458,21 +514,32 @@ impl Lowering<'_> {
         if !is_pct(speed) {
             return Err(Error::BadNumber { at: At::Op(op) });
         }
-        let [bx, by] = p.clamp_border_mm;
-        // A hair of slack: GMC's own layouts cut exactly on the border.
-        if let Some((point, &[x, y])) = cut
-            .path_mm
-            .iter()
-            .enumerate()
-            .find(|&(_, &[x, y])| x < bx - 1e-6 || y < by - 1e-6)
+        if self.pads.is_empty() {
+            let [bx, by] = p.clamp_border_mm;
+            // A hair of slack: GMC's own layouts cut exactly on the border.
+            if let Some((point, &[x, y])) = cut
+                .path_mm
+                .iter()
+                .enumerate()
+                .find(|&(_, &[x, y])| x < bx - 1e-6 || y < by - 1e-6)
+            {
+                return Err(Error::NearClamps {
+                    op,
+                    point,
+                    x,
+                    y,
+                    border_x: bx,
+                    border_y: by,
+                });
+            }
+        } else if let Some((point, pad)) = pads_hit(&self.pads, &cut.path_mm)
+            .into_iter()
+            .find(|(_, pad)| !self.turned.contains(&pad.name))
         {
-            return Err(Error::NearClamps {
+            return Err(Error::OnClamp {
                 op,
                 point,
-                x,
-                y,
-                border_x: bx,
-                border_y: by,
+                pad: pad.name.clone(),
             });
         }
         let strokes = strokes(op, &cut.path_mm, p.break_angle_deg)?;
@@ -497,6 +564,12 @@ impl Lowering<'_> {
 
         self.head = Some(kind);
         let settle = m.head_settle_ms;
+        // On a closed curve the blade may still be coming down as the cut starts.
+        let settle_down = if closed {
+            head.closed_settle_ms.unwrap_or(settle)
+        } else {
+            settle
+        };
         let cut_ramp = p.ramp_ms(p.accel.cut);
         let feed = p.speed(speed);
         for stroke in strokes {
@@ -534,11 +607,11 @@ impl Lowering<'_> {
                 if !self.caps.travel_entry {
                     settings(self);
                 }
-                self.head_to(self.clamps | down, settle);
+                self.head_to(self.clamps | down, settle_down);
             } else {
                 self.travel(At::Op(op), steps[0], z[0], deg(0))?;
                 self.set(Setting::RampMs(cut_ramp));
-                self.head_to(self.clamps | down, settle);
+                self.head_to(self.clamps | down, settle_down);
                 settings(self);
             }
             for q in &steps[1..] {
@@ -577,8 +650,9 @@ impl Lowering<'_> {
     }
 
     /// The cut's ramp and start speed where they differ from the usual (protocol reference
-    /// §3.3): GMC's soft start for the straight head by the board's thickness, and its longer
-    /// ramp for a cut whose first segment runs off the axes [GMC].
+    /// §3.3): the soft start by the board's thickness ([`SoftStart`]: GMC's for the straight
+    /// head, a gentler start speed for the bevel), and GMC's longer ramp for a cut whose first
+    /// segment runs off the axes [GMC].
     fn start(&self, kind: HeadKind, first_deg: f64, cut_ramp: u16) -> (Option<u16>, Option<u32>) {
         let p = self.profile;
         let cut = f64::from(cut_ramp);
@@ -588,11 +662,17 @@ impl Lowering<'_> {
             (cut * (1.0 + d) / factor).min(f64::from(p.max_diagonal_ramp_ms))
         };
         let diagonal_ramp = (d != 0.0).then(diagonal);
+        let s = p.soft_start;
+        let t = self.program.board.thickness_mm;
         match kind {
-            HeadKind::Bevel => (diagonal_ramp.map(|r| r as u16), None),
+            HeadKind::Bevel => {
+                let f = ((t - s.thin_mm) / (s.thick_mm - s.thin_mm)).clamp(0.0, 1.0);
+                let start = f64::from(p.start_speed);
+                let speed = (s.bevel && f > 0.0)
+                    .then(|| (start - (start - f64::from(s.slow_speed)) * f) as u32);
+                (diagonal_ramp.map(|r| r as u16), speed)
+            }
             HeadKind::Straight => {
-                let s = p.soft_start;
-                let t = self.program.board.thickness_mm;
                 if t < s.thin_mm {
                     return (diagonal_ramp.map(|r| r as u16), Some(s.thin_speed));
                 }
@@ -647,4 +727,23 @@ fn strokes(op: usize, path: &[Pt], break_deg: f64) -> Result<Vec<&[Pt]>, Error> 
     }
     out.push(&path[from..]);
     Ok(out)
+}
+
+/// The pads a cut along `path` passes over, each with the first point it reaches past one, in
+/// path order. A path of one point is a point.
+pub fn pads_hit<'p>(pads: &'p [Pad], path: &[Pt]) -> Vec<(usize, &'p Pad)> {
+    let mut out: Vec<(usize, &Pad)> = Vec::new();
+    let segments = path
+        .windows(2)
+        .enumerate()
+        .map(|(k, w)| (k + 1, w[0], w[1]))
+        .chain(path.first().filter(|_| path.len() == 1).map(|&a| (0, a, a)));
+    for (point, a, b) in segments {
+        for pad in pads {
+            if pad.hit(a, b) && !out.iter().any(|(_, p)| p.name == pad.name) {
+                out.push((point, pad));
+            }
+        }
+    }
+    out
 }

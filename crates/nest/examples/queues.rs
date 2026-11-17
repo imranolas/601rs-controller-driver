@@ -53,6 +53,7 @@ fn queue(rng: &mut Rng, mats: u32) -> Instance {
             copies,
             profit: None,
             rotate: rng.next() % 4 != 0,
+            group: None,
         });
     }
     let (w, h, trim) = SHEET;

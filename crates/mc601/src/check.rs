@@ -44,9 +44,9 @@ const ENTRY: u8 = 20;
 /// A second entry, at half the speed: stage 5 checks that each vector's entry picks its feed,
 /// which is how one stream can travel and cut at different speeds.
 const TRAVEL_ENTRY: u8 = 21;
-/// The machine's facts, from its profile (`machine::Profile`).
+/// The machine's facts, from its profile (`machine::Profile`), calibrated.
 fn profile() -> Profile {
-    Profile::gunnar_601()
+    crate::calibration::machine()
 }
 
 /// X/Y scale [GCF `MachineScale` 400 /cm].

@@ -1,15 +1,11 @@
 //! `mc601 run`: cut programs (PROGRAM_FORMAT.md) on the machine through the runner, one after
-//! another, asking before each: GMC's own jobs (`testdata/programs`) and calibration sheets.
+//! another, asking before each: GMC's own jobs (`testdata/programs`), an app's, and the calibration
+//! stages' sheets (`mc601 calibrate`), which are ordinary programs in the board frame.
 //!
 //! Programs run streamed (the capabilities stages 5, 6 and 8 confirmed on the 601: compact
 //! paths, the head in the stream, a travel entry, flow control): each cut's travel, head down,
 //! settle, path and head up in mode 2, cut after cut, the stream breaking only where a setting
 //! must change in mode 0 (the start speed `#S` between the heads). `--gmc` runs GMC's form.
-//!
-//! A calibration sheet (`meta.calibration.frame` = `carriage`, from `mc601 calibrate sheet`)
-//! is cut raw, with [`Profile::raw`]: its points are carriage positions, and no offset, trim or
-//! clamp border of the profile is applied. It is first checked against the profile's clamp
-//! border and soft limits all the same, placed where the profile thinks the heads are.
 //!
 //! Every program is lowered and checked before anything moves. The machine is configured as the
 //! profile says and homed as GMC homes it (offered each time; required if it doesn't know its
@@ -22,7 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use machine::{Capabilities, Host, MachineMm, Profile};
+use calibrate::session::Cut;
+use machine::{Capabilities, Host, Profile};
 use program::{Head, Op, Program, Resume};
 use runner::{Event, Outcome, Request, Runner};
 
@@ -42,53 +39,22 @@ struct Loaded {
     estimate_s: f64,
 }
 
-/// Whether `program` is a calibration sheet in carriage coordinates, to be cut raw.
-pub fn is_raw(program: &Program) -> bool {
-    program
-        .meta
-        .as_ref()
-        .and_then(|m| m.pointer("/calibration/frame"))
-        .and_then(serde_json::Value::as_str)
-        == Some("carriage")
-}
-
-/// A raw program's cuts in the board frame, where `profile` thinks each head is: what to check
-/// it against the clamp border with.
-fn as_board(program: &Program, profile: &Profile) -> Program {
-    let MachineMm([ox, oy]) = profile.board_origin_mm;
-    let mut p = program.clone();
-    for op in &mut p.ops {
-        if let Op::Cut(c) = op {
-            let [dx, dy] = profile.head(c.head).offset_mm;
-            for pt in &mut c.path_mm {
-                *pt = [pt[0] + dx - ox, pt[1] + dy - oy];
-            }
-        }
-    }
-    p
-}
-
 fn read(file: &Path) -> Res<Program> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(Program::from_json(&text).map_err(|e| format!("{}: {e}", file.display()))?)
 }
 
-/// Whether `program` is a calibration sheet with readings to take.
+/// Whether `program` is a calibration stage's sheet, with readings to take (its plan's).
 fn has_readings(program: &Program) -> bool {
     program
         .meta
         .as_ref()
-        .and_then(|m| m.pointer("/calibration/readings"))
+        .and_then(|m| m.get("calibration"))
         .is_some()
 }
 
-/// Lower `program` with `profile` (raw for a calibration sheet, after checking it in the board
-/// frame with `checked`).
-fn load(file: &str, program: Program, profile: &Profile, checked: &Profile) -> Res<Loaded> {
-    if is_raw(&program) {
-        machine::lower(&as_board(&program, checked), checked)
-            .map_err(|e| format!("{file}: placed with the profile's offsets: {e}"))?;
-    }
+/// Lower `program` with `profile`.
+fn load(file: &str, program: Program, profile: &Profile) -> Res<Loaded> {
     let job = machine::lower(&program, profile).map_err(|e| format!("{file}: {e}"))?;
     let estimate_s = machine::estimate(&job, profile, &Host::default()).total_s;
     Ok(Loaded {
@@ -131,7 +97,12 @@ fn describe(l: &Loaded) -> String {
 
 fn op_name(op: &Op) -> String {
     let name = match op {
-        Op::Clamp(c) => format!("clamp {:?}", c.side).to_lowercase(),
+        Op::Clamp(c) if c.turned.is_empty() => format!("clamp {:?}", c.side).to_lowercase(),
+        Op::Clamp(c) => format!(
+            "{}, {} turned out of the way",
+            format!("clamp {:?}", c.side).to_lowercase(),
+            c.turned.join(", ")
+        ),
         Op::Cut(c) => {
             let len: f64 = c
                 .path_mm
@@ -153,24 +124,37 @@ fn op_name(op: &Op) -> String {
     }
 }
 
+/// How a run sends its cuts, where it differs from the machine profile: to compare with GMC's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Form {
+    /// Each cut as GMC sends it: settings, head and path as separate steps.
+    pub gmc: bool,
+    /// Bevel cuts started as GMC starts them, at full start speed on thick board, not softly.
+    pub gmc_bevel_start: bool,
+    /// An oval's blade let settle fully before it moves, not GMC's 100 ms.
+    pub oval_settle: bool,
+}
+
 /// Cut `files` in `session`: each program is copied into the session folder first, and a
 /// calibration sheet that finishes offers to take its readings there and then.
-pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> Res<bool> {
-    let profile = Profile {
-        capabilities: if gmc_form {
+pub fn run(port: &str, files: &[PathBuf], session: &Session, form: Form) -> Res<bool> {
+    let mut profile = Profile {
+        capabilities: if form.gmc {
             Capabilities::default()
         } else {
             Capabilities::all()
         },
-        ..Profile::gunnar_601()
+        ..crate::calibration::machine()
     };
-    let programs: Vec<Program> = files.iter().map(|f| read(f)).collect::<Res<_>>()?;
-    let raw = programs.iter().filter(|p| is_raw(p)).count();
-    if raw > 0 && raw < programs.len() {
-        return Err(
-            "a calibration sheet is cut raw: run it on its own, not with other programs".into(),
-        );
+    if form.gmc_bevel_start {
+        profile.soft_start.bevel = false;
+        println!("bevel cuts start as GMC's: at full start speed, whatever the board");
     }
+    if form.oval_settle {
+        profile.bevel.closed_settle_ms = None;
+        println!("an oval's blade settles fully before it moves");
+    }
+    let programs: Vec<Program> = files.iter().map(|f| read(f)).collect::<Res<_>>()?;
     // The session keeps what was cut, under the file's own name (unless it is there already).
     for (k, f) in files.iter().enumerate() {
         if f.parent() == Some(session.dir.as_path()) {
@@ -188,17 +172,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
         };
         std::fs::copy(f, &to).map_err(|e| format!("{}: {e}", f.display()))?;
     }
-    let checked = profile.clone();
-    let form = if gmc_form { "GMC's form" } else { "streamed" };
-    let profile = if raw > 0 {
-        println!(
-            "{form}, raw: points are carriage positions; no offset, trim or clamp border is applied"
-        );
-        profile.raw()
-    } else {
-        println!("{form}");
-        profile
-    };
+    println!("{}", if form.gmc { "GMC's form" } else { "streamed" });
     let loaded: Vec<Loaded> = files
         .iter()
         .zip(programs)
@@ -206,7 +180,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
             let name = f
                 .file_name()
                 .map_or_else(|| tidy(f), |n| n.to_string_lossy().into_owned());
-            load(&name, p, &profile, &checked)
+            load(&name, p, &profile)
         })
         .collect::<Res<_>>()?;
     for l in &loaded {
@@ -287,9 +261,18 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
     for l in &loaded {
         let p = &l.program;
         let b = &p.board;
+        let turned = p.turned_at_start();
+        let turn = if turned.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Turn clamp pads {} out of the way first.",
+                turned.join(", ")
+            )
+        };
         let ask = format!(
             "Cut {}: load a {} × {} mm board, {} mm thick, into the front-left corner against \
-             the left clamp. The heads come down. (about {:.0} s)",
+             the left clamp.{turn} The heads come down. (about {:.0} s)",
             p.id, b.width_mm, b.height_mm, b.thickness_mm, l.estimate_s
         );
         match op.confirm(&ask) {
@@ -306,6 +289,7 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
         stopping.store(false, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         let ops = p.ops.len();
+        let mut done = 0;
         let result = runner.run(p, &rx, &mut |e| match e {
             Event::Started { ops, estimate_s } => {
                 println!("  started: {ops} ops, about {estimate_s:.0} s");
@@ -313,7 +297,9 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
             Event::Op { index, .. } => {
                 println!("  op {}/{ops}: {}", index + 1, op_name(&p.ops[index]));
             }
-            Event::OpDone { .. } | Event::Resumed => {}
+            Event::OpDone { index } => done = index + 1,
+            // The command line shows ops as they come, not the machine live.
+            Event::Resumed | Event::State(_) => {}
             Event::Paused { next } => println!("  paused before op {}", next + 1),
             Event::Holding {
                 message, resume, ..
@@ -360,6 +346,22 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
                 }
             ),
         });
+        // A calibration stage's session keeps how far it was cut: what can be read.
+        let cut = match &result {
+            Ok(Outcome::Finished) => Cut::Done,
+            Ok(Outcome::Cancelled { next }) => Cut::Stopped { ops_done: *next },
+            Err(_) => Cut::Stopped { ops_done: done },
+        };
+        crate::calibrate::cut_ended(&session.dir, cut)?;
+        if has_readings(p) && cut != Cut::Done {
+            anstream::println!(
+                "{}",
+                paint(
+                    DIM,
+                    "  the readings whose cuts were made can still be taken: `mc601 calibrate read`"
+                )
+            );
+        }
         match result {
             Ok(Outcome::Finished) => {
                 log.note(&format!("finished {}", p.id));
@@ -373,7 +375,11 @@ pub fn run(port: &str, files: &[PathBuf], session: &Session, gmc_form: bool) -> 
                 } else if has_readings(p) {
                     anstream::println!(
                         "{}",
-                        paint(DIM, "  simulator: nothing to measure, so no readings")
+                        paint(
+                            DIM,
+                            "  simulator: nothing was cut to measure; `mc601 calibrate read` \
+                             takes readings typed in, to try the fit"
+                        )
                     );
                 }
             }

@@ -138,6 +138,13 @@ impl<M: ModeMarker> Controller<M> {
         M::MODE
     }
 
+    /// The controller is known to be in this mode: it acknowledged switching to it, and no
+    /// switch has been cut short since. After a stop or a timeout during a switch it may be in
+    /// another, so switch again (to this mode too) before relying on it.
+    pub fn mode_confirmed(&self) -> bool {
+        self.session.mode() == Some(M::MODE)
+    }
+
     /// `@X`
     pub fn status(&mut self) -> Result<Status> {
         let cmd = Command::Status;
@@ -242,7 +249,19 @@ impl<M: ModeMarker> Controller<M> {
     pub fn wait_until(
         &mut self,
         timeout: Duration,
+        done: impl FnMut(&Status) -> bool,
+    ) -> Result<Status> {
+        self.wait_until_with(timeout, done, |_, _| Ok(()))
+    }
+
+    /// As [`Controller::wait_until`], handing each status to `watch` first, so the caller can
+    /// ask more while it waits: where the carriage is, how far through the stream it has got.
+    /// Still one request at a time, and a stop still goes straight out.
+    pub fn wait_until_with(
+        &mut self,
+        timeout: Duration,
         mut done: impl FnMut(&Status) -> bool,
+        mut watch: impl FnMut(&mut dyn Ask, &Status) -> Result<()>,
     ) -> Result<Status> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -252,6 +271,7 @@ impl<M: ModeMarker> Controller<M> {
                 let code = self.error_code().ok();
                 return Err(ControllerError::Fault { status, code });
             }
+            watch(self, &status)?;
             if done(&status) {
                 return Ok(status);
             }
@@ -456,5 +476,24 @@ impl Controller<mode::Cutting> {
             });
         }
         self.session.stream(command)
+    }
+}
+
+/// What can be asked in any mode, for a caller watching a wait
+/// ([`Controller::wait_until_with`]).
+pub trait Ask {
+    /// `@L<a>`: an axis's position, steps.
+    fn position_steps(&mut self, axis: Axis) -> Result<i32>;
+    /// `@N`: the number of the mode-2 command running.
+    fn command_counter(&mut self) -> Result<u32>;
+}
+
+impl<M: ModeMarker> Ask for Controller<M> {
+    fn position_steps(&mut self, axis: Axis) -> Result<i32> {
+        Controller::position_steps(self, axis)
+    }
+
+    fn command_counter(&mut self) -> Result<u32> {
+        Controller::command_counter(self)
     }
 }

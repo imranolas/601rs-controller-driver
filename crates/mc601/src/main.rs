@@ -7,6 +7,7 @@
 //! (`mc601 config`), else the only USB-serial port plugged in (`config`).
 
 mod calibrate;
+mod calibration;
 mod check;
 mod config;
 mod cut;
@@ -21,7 +22,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use link::Direction;
 use link::capture;
 use link::tap::printable;
@@ -45,6 +46,9 @@ use crate::target::Res;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// The calibration file [default: the one mc601 shares with apps: `mc601 calibration path`]
+    #[arg(long, global = true, value_name = "FILE")]
+    calibration: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -52,13 +56,21 @@ enum Command {
     /// Cut programs, asking before each
     #[command(
         after_help = "Examples:\n  mc601 run job.json\n  mc601 run job.json --sim          \
-                            a dry run on the simulator\n  mc601 run calibration_2.json      a \
-                            calibration sheet: cut raw, then its readings"
+                            a dry run on the simulator"
     )]
     Run(RunArgs),
     /// Calibrate the heads: cut the sheet, take its readings, fit them
     #[command(subcommand)]
     Calibrate(CalibrateCommand),
+    /// Show the machine's calibration, change a value, or go back to an earlier revision
+    #[command(
+        after_help = "Examples:\n  mc601 calibration\n  mc601 calibration history\n  \
+                            mc601 calibration set machine.bevel.offset.x -71.462\n  \
+                            mc601 calibration set profile.C2.name \"Mount board 1.4\" \
+                            profile.C2.thickness_mm 1.4 profile.C2.speed_pct 95 \
+                            profile.C2.head_settle_ms 200\n  mc601 calibration revert 3"
+    )]
+    Calibration(CalibrationArgs),
     /// List recent sessions
     Logs(LogsArgs),
     /// Ask the controller read-only questions; nothing moves (stage 1)
@@ -104,6 +116,12 @@ struct RunArgs {
     /// Send each cut as GMC does (settings, head and path as separate steps)
     #[arg(long)]
     gmc: bool,
+    /// Start bevel cuts as GMC does, at full start speed on thick board, not softly: to compare
+    #[arg(long)]
+    gmc_bevel_start: bool,
+    /// Let an oval's blade settle fully before it moves, not GMC's 100 ms: to compare
+    #[arg(long)]
+    oval_settle: bool,
 }
 
 #[derive(Args)]
@@ -123,45 +141,61 @@ struct CheckArgs {
 
 #[derive(Subcommand)]
 enum CalibrateCommand {
-    /// Cut the machine-and-head sheet raw, take its readings and fit them
+    /// Stage 1, the heads: cut a mount and window on an offcut, take 16 readings, fit them, and
+    /// offer the changes to the calibration file
     #[command(
-        after_help = "The sheet needs a 1.5 mm offcut of at least 140 × 105 mm in the front-left \
-                            corner. What to measure: testdata/calibration/calibration_2.html"
+        after_help = "The offcut: at least 150 × 150 mm, face down into the front-left \
+                            stops; 1.2 to 2 mm board is best. Measure its thickness with calipers \
+                            first.\n\nExamples:\n  mc601 calibrate heads --thickness 1.42\n  \
+                            mc601 calibrate heads --profile C2\n  \
+                            mc601 calibrate heads --sim --thickness 1.5"
     )]
-    Cut(MachineArgs),
-    /// Take a calibration session's readings, then fit them [default: the latest session]
+    Heads(StageArgs),
+    /// Stage 2, the run-ons: cut eight combs on an offcut, read them by flexing the board, and
+    /// offer each head's reach to the calibration file
+    #[command(
+        after_help = "The offcut: at least 150 × 150 mm of a common board, face down \
+                            into the front-left stops; measure its thickness with calipers \
+                            first. Once per blade, after stage 1; once on 2.5 to 2.7 mm board \
+                            too, to see whether the reach changes with thickness.\n\nExamples:\n  \
+                            mc601 calibrate runons --thickness 1.42\n  \
+                            mc601 calibrate runons --profile C2"
+    )]
+    Runons(StageArgs),
+    /// Take a calibration session's readings, then fit them, and for stage 1 offer the changes
+    /// [default: the latest session]
     Read {
         /// The session folder
         session: Option<PathBuf>,
     },
-    /// Fit calibration sessions together
+    /// Fit stage 1 sessions together: a report, and what they would propose
     #[command(
         after_help = "Examples:\n  mc601 calibrate fit --all\n  mc601 calibrate fit \
-                            \"~/Documents/mc601/sessions/2026-11-10 14.32.05 calibrate calibration_2\"\n  \
-                            mc601 calibrate fit --sheet calibration_1.json calibration_1.run.log \
-                            calibration_1.readings.txt"
+                            \"~/Documents/mc601/sessions/2026-11-16 10.31.02 calibrate stage_1\""
     )]
     Fit(FitArgs),
-    /// Write the sheet's program to a file, to look at or cut with `mc601 run`
-    Sheet {
-        /// Where to write it
-        out: PathBuf,
-    },
+}
+
+#[derive(Args)]
+struct StageArgs {
+    #[command(flatten)]
+    machine: MachineArgs,
+    /// The offcut's thickness, mm, as measured with calipers [default: its profile's]
+    #[arg(long, value_name = "MM")]
+    thickness: Option<f64>,
+    /// The board profile it is cut from, in the calibration file: its speed and settle, and
+    /// its thickness unless given
+    #[arg(long, value_name = "ID")]
+    profile: Option<String>,
 }
 
 #[derive(Args)]
 struct FitArgs {
     /// Calibration session folders
     sessions: Vec<PathBuf>,
-    /// Every calibration session in the data folder that has readings
+    /// Every stage 1 session in the data folder that has readings
     #[arg(long)]
     all: bool,
-    /// A sheet kept elsewhere: its program, run log and readings
-    #[arg(long, num_args = 3, value_names = ["PROGRAM", "LOG", "READINGS"], action = ArgAction::Append)]
-    sheet: Vec<PathBuf>,
-    /// Also write a profile with the fitted head offsets to FILE
-    #[arg(long, value_name = "FILE")]
-    profile: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -172,6 +206,49 @@ struct LogsArgs {
     /// Print only the latest session's folder (`open "$(mc601 logs --last)"`)
     #[arg(long)]
     last: bool,
+}
+
+#[derive(Args)]
+struct CalibrationArgs {
+    #[command(subcommand)]
+    command: Option<CalibrationCommand>,
+}
+
+#[derive(Subcommand)]
+enum CalibrationCommand {
+    /// Every value: the file's, or the driver's default [the default command]
+    Show {
+        /// Only the values the file sets
+        #[arg(long)]
+        set: bool,
+    },
+    /// Every change, oldest first
+    History,
+    /// Set values, as one revision: KEY VALUE [KEY VALUE ...]
+    Set {
+        #[arg(required = true, num_args = 2.., value_names = ["KEY", "VALUE"], allow_negative_numbers = true)]
+        pairs: Vec<String>,
+        /// Why, for the history
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Put values back to the driver's default, as one revision
+    Unset {
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+        /// Why, for the history
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove a board profile and all its values
+    RemoveProfile {
+        /// The profile's id (C2)
+        id: String,
+    },
+    /// Every value as it was at REVISION, as a new revision
+    Revert { revision: u32 },
+    /// Print where the calibration file is
+    Path,
 }
 
 #[derive(Args)]
@@ -216,9 +293,24 @@ fn parse_stages(v: &str) -> Result<Stages, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let needs_calibration = matches!(
+        cli.command,
+        Command::Run(_)
+            | Command::Calibrate(_)
+            | Command::Calibration(_)
+            | Command::Probe(_)
+            | Command::Check(_)
+    );
+    if needs_calibration {
+        if let Err(e) = calibration::init(cli.calibration.clone()) {
+            anstream::eprintln!("{} {e}", paint(BAD, "error:"));
+            return ExitCode::FAILURE;
+        }
+    }
     let result = match cli.command {
         Command::Run(a) => run(a),
         Command::Calibrate(c) => calibrate_command(c),
+        Command::Calibration(a) => calibration_command(a),
         Command::Logs(a) => logs(a),
         Command::Probe(m) => machine_check("probe", &m, false, &[], 0),
         Command::Check(a) => machine_check("check", &a.machine, a.sim_limits, &a.stage.0, a.speed),
@@ -255,7 +347,14 @@ fn open_session(
     anstream::println!(
         "{} on {on}  {}",
         paint(style::BOLD, cmd),
-        paint(DIM, format!("· session {}", tidy(&session.dir)))
+        paint(
+            DIM,
+            format!(
+                "· session {} · {}",
+                tidy(&session.dir),
+                calibration::describe()
+            )
+        )
     );
     Ok((port, session))
 }
@@ -283,7 +382,12 @@ fn run(a: RunArgs) -> Res<bool> {
         .collect();
     let (port, session) = open_session("run", &what.join(" "), &a.machine, false)?;
     require_terminal(&port, "run")?;
-    finish(&session, cut::run(&port, &a.programs, &session, a.gmc))
+    let form = cut::Form {
+        gmc: a.gmc,
+        gmc_bevel_start: a.gmc_bevel_start,
+        oval_settle: a.oval_settle,
+    };
+    finish(&session, cut::run(&port, &a.programs, &session, form))
 }
 
 /// Record how a session ended, and pass the result on.
@@ -298,11 +402,8 @@ fn finish(session: &Session, r: Res<bool>) -> Res<bool> {
 
 fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
     match c {
-        CalibrateCommand::Cut(m) => {
-            let (port, session) = open_session("calibrate", "calibration_2", &m, false)?;
-            require_terminal(&port, "calibrate cut")?;
-            finish(&session, calibrate::cut(&port, &session))
-        }
+        CalibrateCommand::Heads(a) => calibrate_stage(::calibrate::Routine::Heads, a),
+        CalibrateCommand::Runons(a) => calibrate_stage(::calibrate::Routine::RunOns, a),
         CalibrateCommand::Read { session } => {
             let data = Config::load()?.data_dir();
             let dir = match session {
@@ -315,22 +416,34 @@ fn calibrate_command(c: CalibrateCommand) -> Res<bool> {
             let data = Config::load()?.data_dir();
             let mut dirs = f.sessions;
             if f.all {
-                dirs.extend(calibrate::sessions_with_readings(&data));
+                dirs.extend(calibrate::stage_1_sessions(&data));
             }
-            let triples: Vec<[PathBuf; 3]> = f
-                .sheet
-                .chunks(3)
-                .map(|c| [c[0].clone(), c[1].clone(), c[2].clone()])
-                .collect();
-            if dirs.is_empty() && triples.is_empty() {
-                return Err(
-                    "nothing to fit: give session folders, --all, or --sheet PROGRAM LOG READINGS"
-                        .into(),
-                );
-            }
-            calibrate::fit(&dirs, &triples, f.profile.as_deref())
+            calibrate::fit(&dirs)
         }
-        CalibrateCommand::Sheet { out } => calibrate::sheet(&out),
+    }
+}
+
+/// `mc601 calibrate heads | runons`.
+fn calibrate_stage(routine: ::calibrate::Routine, a: StageArgs) -> Res<bool> {
+    let stock = calibrate::stock(a.profile.as_deref(), a.thickness)?;
+    let what = match routine {
+        ::calibrate::Routine::Heads => "stage_1",
+        ::calibrate::Routine::RunOns => "stage_2",
+    };
+    let (port, session) = open_session("calibrate", what, &a.machine, false)?;
+    require_terminal(&port, &format!("calibrate {}", routine.name()))?;
+    finish(&session, calibrate::stage(&port, &session, routine, &stock))
+}
+
+fn calibration_command(a: CalibrationArgs) -> Res<bool> {
+    match a.command.unwrap_or(CalibrationCommand::Show { set: false }) {
+        CalibrationCommand::Show { set } => calibration::show(set),
+        CalibrationCommand::History => calibration::history(),
+        CalibrationCommand::Set { pairs, note } => calibration::set(&pairs, note),
+        CalibrationCommand::Unset { keys, note } => calibration::unset(&keys, note),
+        CalibrationCommand::RemoveProfile { id } => calibration::remove_profile(&id),
+        CalibrationCommand::Revert { revision } => calibration::revert(revision),
+        CalibrationCommand::Path => calibration::print_path(),
     }
 }
 
@@ -569,20 +682,14 @@ mod tests {
             "a program is required"
         );
         assert!(Cli::try_parse_from(["mc601", "run", "a.json", "--sim", "--port", "x"]).is_err());
-        let cli = Cli::try_parse_from([
-            "mc601",
-            "calibrate",
-            "fit",
-            "--sheet",
-            "p",
-            "l",
-            "r",
-            "--all",
-        ])
-        .expect("parses");
+        let cli =
+            Cli::try_parse_from(["mc601", "calibrate", "fit", "a", "b", "--all"]).expect("parses");
         let Command::Calibrate(CalibrateCommand::Fit(f)) = cli.command else {
             panic!("not fit")
         };
-        assert_eq!((f.sheet.len(), f.all), (3, true));
+        assert_eq!((f.sessions.len(), f.all), (2, true));
+        assert!(
+            Cli::try_parse_from(["mc601", "calibrate", "fit", "--sheet", "p", "l", "r"]).is_err()
+        );
     }
 }

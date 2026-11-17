@@ -13,6 +13,9 @@
 //! blade angles from the path's direction and the material's trim, the ramps, speeds, dead
 //! times and soft start, the head and clamp outputs, and the park.
 //!
+//! GMC's jobs are lowered with GMC's start: the bevel's soft start on thick board, this crate's
+//! own (`SoftStart::bevel`), is off.
+//!
 //! Two differences are deliberate:
 //! - On thin board GMC hops between the edges of an opening with the bevel head down and only
 //!   the blade out (`$A40`). This crate raises the head for every travel (`$A42`), as GMC does
@@ -272,6 +275,7 @@ fn program_from(job: &Job, profile: &Profile) -> Program {
                 id: None,
                 label: None,
                 side,
+                turned: Vec::new(),
             }));
             clamped = true;
         }
@@ -371,7 +375,8 @@ fn differences(
     tolerance: [i32; 2],
     ignore: impl Fn(&Motion, &str) -> bool,
 ) -> Vec<String> {
-    let profile = Profile::gunnar_601();
+    let mut profile = Profile::gunnar_601();
+    profile.soft_start.bevel = false;
     let program = fixture(job, &profile);
     let ours: Vec<String> = lower(&program, &profile)
         .expect("lowers")

@@ -7,8 +7,19 @@
 //! [`configure`](Runner::configure) the controller as the machine profile needs,
 //! [`home`](Runner::home), [`park`](Runner::park), [`clamp`](Runner::clamp), or
 //! [`run`](Runner::run) a program, reporting [`Event`]s and taking [`Request`]s between cuts.
+//! Between runs it takes a new machine profile ([`set_profile`](Runner::set_profile)): a
+//! calibration applied while the machine stays connected and homed.
 //! Its [`stop_handle`](Runner::stop_handle) stops the machine at once from any thread. The
 //! station runs it on a thread of its own. `tests/runner.rs` drives it against the simulator.
+//!
+//! **Live state.** While it works, the runner reads the machine's state as it waits and pushes
+//! [`Event::State`] ([`MachineState`]: heads, clamps, where the blade is over the board, moving,
+//! homed, the op, and its [steps](OpSteps): how many done, and which is running) when it
+//! changes, the position and the count no more often than [`Config::state_every`]. [`subscribe`](Runner::subscribe) hears every event, runs' and
+//! manual operations' alike, without a callback; between runs, the station calls
+//! [`refresh`](Runner::refresh) now and then and hears only what changed. The state is read
+//! from the controller, never predicted, and only once a stream is written, so path data keeps
+//! the line (the `live` module says how).
 //!
 //! What it owns:
 //! - **State:** homed (from `@X` flag 4), head, clamps, the run. No motion before homing.
@@ -103,8 +114,11 @@
 //! pacing has a bug.
 
 mod error;
+mod live;
 mod run;
 mod session;
 
 pub use error::{Cause, Error, Mismatch};
+pub use live::{MachineState, OpSteps, StepKind};
+pub use machine::Heads;
 pub use run::{Config, Event, Outcome, Request, Runner};

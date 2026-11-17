@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use controller::{Controller, Mode, ModeMarker, Setting, SettingKey, Status, mode};
+use controller::{Ask, Controller, Mode, ModeMarker, Setting, SettingKey, Status, mode};
 use protocol::{Axis, Command};
 
 use crate::error::Cause;
@@ -83,10 +83,16 @@ impl Session {
         self.ctl.as_ref().map(|c| any!(c, c => c.mode()))
     }
 
-    /// Switch to `to` (`@M<n>`), unless already there. The controller refuses while anything
-    /// moves (`*028`); a refused switch leaves the session in its old mode.
+    /// Switch to `to` (`@M<n>`), unless known to be there already: after a switch cut short (a
+    /// stop as a cut starts) the controller may be in either mode, so the switch is made again.
+    /// The controller refuses while anything moves (`*028`); a refused switch leaves the session
+    /// in its old mode.
     pub(crate) fn switch(&mut self, to: Mode) -> R<()> {
-        if self.mode() == Some(to) {
+        let confirmed = self
+            .ctl
+            .as_ref()
+            .is_some_and(|c| any!(c, c => c.mode_confirmed()));
+        if self.mode() == Some(to) && confirmed {
             return Ok(());
         }
         let ctl = self.ctl.take().ok_or(Cause::Lost)?;
@@ -132,6 +138,21 @@ impl Session {
         done: impl FnMut(&Status) -> bool,
     ) -> R<Status> {
         Ok(any!(self.ctl()?, c => c.wait_until(timeout, done))?)
+    }
+
+    /// As [`Session::wait_until`], with `watch` asking more at each poll.
+    pub(crate) fn wait_until_with(
+        &mut self,
+        timeout: Duration,
+        done: impl FnMut(&Status) -> bool,
+        watch: impl FnMut(&mut dyn Ask, &Status) -> controller::Result<()>,
+    ) -> R<Status> {
+        Ok(any!(self.ctl()?, c => c.wait_until_with(timeout, done, watch))?)
+    }
+
+    /// `@N<n>`: number the mode-2 commands from here.
+    pub(crate) fn set_command_counter(&mut self, value: u32) -> R<()> {
+        Ok(any!(self.ctl()?, c => c.set_command_counter(value))?)
     }
 
     pub(crate) fn wait_idle(&mut self, timeout: Duration) -> R<Status> {

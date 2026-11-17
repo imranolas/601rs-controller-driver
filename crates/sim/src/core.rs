@@ -28,9 +28,11 @@ pub struct SimConfig {
     pub version: String,
     pub homed_at_start: bool,
     pub start_position: [i64; 3],
-    /// X and Y travel limits in steps (Z is rotary and unlimited). Placeholder until the
-    /// diagnostic tool measures the envelope; covers every coordinate in the captures
-    /// (X up to 58860 = park, Y up to 41800 in g_init).
+    /// X and Y travel limits in steps from each axis's minus switch, where the switches are
+    /// (Z is rotary and unlimited). Homing zeroes the counter the homing offset (`#O`) off the
+    /// switch [SPEC1 p.30], so after `#OX,300` the X switch lies 300 steps below zero, as on the
+    /// 601. Placeholder until the diagnostic tool measures the envelope; covers every
+    /// coordinate in the captures (X up to 58860 = park, Y up to 41800 in g_init).
     pub envelope: [(i64, i64); 2],
     /// Simulated duration of homing one axis.
     pub homing_time_per_axis: Duration,
@@ -178,6 +180,9 @@ enum Item {
     },
     /// `C8` / `C16`: speed override on / off from here [SPEC1 p.35].
     Override(bool),
+    /// Any other `C`: its flag acts when it arrives, but it still takes its turn in the
+    /// buffer and advances `@N`, as the machine's does (stage 5, 2026-11-10).
+    Flags,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +222,9 @@ pub struct SimCore {
     c: BTreeMap<u16, i64>,
     clock: String,
     offsets: [i64; 3],
+    /// Where each counter's zero lies, in steps from the axis's minus switch: the homing offset
+    /// once homed, moved by every counter set or clear (`$C`, `#L`, `#P`).
+    origin: [i64; 3],
     axis_params: BTreeMap<String, String>,
     counters: BTreeMap<u8, i64>,
     error: u16,
@@ -325,6 +333,7 @@ impl SimCore {
             c,
             clock: "1,1,2026,0,0,0".to_owned(),
             offsets: [0; 3],
+            origin: [0; 3],
             axis_params: BTreeMap::new(),
             counters: BTreeMap::new(),
             error: 0,
@@ -796,8 +805,7 @@ impl SimCore {
                         } else {
                             (v as f64 * self.cfg.steps_per_mm / 1000.0) as i64
                         };
-                        self.pos[axis] = steps;
-                        self.path_target[axis] = steps;
+                        self.set_counter(axis, steps);
                         true
                     }
                     _ => false,
@@ -938,13 +946,12 @@ impl SimCore {
             }
             'C' => {
                 if arg.is_empty() {
-                    self.pos = [0; 3];
+                    (0..3).for_each(|axis| self.set_counter(axis, 0));
                 } else if let Some((axis, _)) = arg.chars().next().and_then(axis_index) {
-                    self.pos[axis] = 0;
+                    self.set_counter(axis, 0);
                 } else {
                     return push_err(out, 12);
                 }
-                self.path_target = self.pos;
                 push_ack(out);
             }
             'B' => self.brake(now, out),
@@ -1036,7 +1043,7 @@ impl SimCore {
                 } else if bits & 16 != 0 {
                     Item::Override(false)
                 } else {
-                    return;
+                    Item::Flags
                 }
             }
             // Wait until input n is high (`In`) or low (`I-n`); an undefined input does not
@@ -1085,6 +1092,13 @@ impl SimCore {
 
     // ------------------------------------------------------------------ time
 
+    /// Set `axis`'s counter to `value` where the carriage stands: its zero moves, not the axis.
+    fn set_counter(&mut self, axis: usize, value: i64) {
+        self.origin[axis] += self.pos[axis] - value;
+        self.pos[axis] = value;
+        self.path_target[axis] = value;
+    }
+
     fn start_motion(&mut self, from: [i64; 3], to: [i64; 3], speed: u8, kind: Kind, now: SimTime) {
         self.last_path = None;
         self.start_motion_from(from, to, speed, kind, now, true);
@@ -1106,13 +1120,15 @@ impl SimCore {
         let mut to = to;
         let mut limit_error = None;
         for (axis, (lo, hi)) in self.cfg.envelope.iter().enumerate() {
+            // The switches, in the counter's steps.
+            let (lo, hi) = (lo - self.origin[axis], hi - self.origin[axis]);
             // Error numbers per axis: minus = 32 + 2·axis, plus = 33 + 2·axis [SPEC p.37–38]
             let base = 32 + 2 * axis as u16;
-            if to[axis] < *lo {
-                to[axis] = *lo;
+            if to[axis] < lo {
+                to[axis] = lo;
                 limit_error = Some(base);
-            } else if to[axis] > *hi {
-                to[axis] = *hi;
+            } else if to[axis] > hi {
+                to[axis] = hi;
                 limit_error = Some(base + 1);
             }
         }
@@ -1209,6 +1225,7 @@ impl SimCore {
                     let axis = h.axes[h.index];
                     // Off the switch, then the offset, then the counter zeroed [SPEC1 p.30]:
                     // GMC reads `@LX0` after homing with `#OX,300` [CAP g_init].
+                    self.origin[axis] = self.offsets[axis];
                     self.pos[axis] = 0;
                     self.path_target[axis] = 0;
                     if positioned_signal {
@@ -1287,7 +1304,7 @@ impl SimCore {
                             self.limit_hit = None;
                         }
                         match q.item {
-                            Item::WaitInput { .. } | Item::Override(_) => {}
+                            Item::WaitInput { .. } | Item::Override(_) | Item::Flags => {}
                             Item::Vector { target, speed } => {
                                 let from = self.pos;
                                 let dir = direction(from, target);
@@ -1538,6 +1555,30 @@ mod tests {
         assert_eq!(send(&mut c, "@X", 60_001), "@X06<0d>", "error flag set");
         assert_eq!(send(&mut c, "@@", 60_002), "<0d>");
         assert_eq!(send(&mut c, "@X", 60_003), "@X04<0d>");
+    }
+
+    /// Homed with GMC's `#OX,300`, the counter is zeroed 300 steps off the switch [SPEC1 p.30],
+    /// so the carriage has 7.5 mm below zero before it meets it, as the machine profile says
+    /// (`machine::Profile::envelope_mm`). A counter clear moves the zero, not the switch.
+    #[test]
+    fn the_homing_offset_leaves_room_below_zero() {
+        let mut c = SimCore::new(bare());
+        send(&mut c, "#OX,300", 0);
+        send(&mut c, "@M1", 0);
+        send(&mut c, "$Hx", 0);
+        c.tick(ms(3000));
+        send(&mut c, "$L20,X-290", 3001);
+        assert_eq!(text(&c.tick(ms(10_000))), "", "inside the room");
+        assert_eq!(c.snapshot(ms(10_000)).position[X], -290);
+        send(&mut c, "$L20,X-400", 10_001);
+        assert_eq!(text(&c.tick(ms(20_000))), "*032<0d>", "the switch");
+        assert_eq!(c.snapshot(ms(20_000)).position[X], -300);
+        send(&mut c, "@@", 20_001);
+        // Zeroed where it stands, the switch is now at the zero.
+        send(&mut c, "$CX", 20_002);
+        send(&mut c, "$L20,X-1", 20_003);
+        assert_eq!(text(&c.tick(ms(30_000))), "*032<0d>");
+        assert_eq!(c.snapshot(ms(30_000)).position[X], 0);
     }
 
     #[test]
